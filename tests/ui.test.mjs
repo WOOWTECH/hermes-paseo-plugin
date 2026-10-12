@@ -583,3 +583,11 @@ test('reload timeout never refreshes an unchanged server or retries POST; expire
   assert.match(content(expired.tree()), /登入已過期/);
   assert.equal(expired.reloads.length, 0);
 });
+
+test('Dashboard reload waits while the Paseo installer is active', async () => {
+  const app = host({ status: snapshot({ phase: 'installing', daemon: { running: false, reachable: false } }) });
+  app.hostHandle('/capabilities', () => ({ supported: true, generation: 'old' }));
+  await app.mount('page');
+  assert.equal(buttonNode(app, '重載 Dashboard').props.disabled, true);
+  assert.equal(app.calls.filter(x => x.path.endsWith('/reload')).length, 0);
+});

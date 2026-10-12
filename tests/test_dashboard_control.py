@@ -4,6 +4,7 @@ import signal
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
+from types import SimpleNamespace
 
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -87,6 +88,21 @@ class DashboardControlTests(unittest.TestCase):
         self.signaler.side_effect = PermissionError()
         self.assertEqual(self.post(json={'confirm': True}).status_code, 202)
         self.assertFalse(self.control.pending)
+
+    def test_native_install_places_control_before_spa_and_is_idempotent(self):
+        app = FastAPI()
+        @app.get('/{full_path:path}')
+        def spa(full_path):
+            return {'spa': True}
+        server = SimpleNamespace(app=app, _require_token=lambda request: None)
+        for _ in range(2):
+            module.install(server, lambda: True, lambda: 'https://hermes.test', self.control)
+        client = TestClient(app)
+        r = client.get(module.PREFIX + '/capabilities', headers=self.headers)
+        self.assertTrue(r.json()['supported'])
+        self.assertNotIn('spa', r.json())
+        self.assertEqual(client.get('/sessions').json(), {'spa': True})
+        self.assertEqual(len([r for r in app.routes if getattr(r, 'path', '') == module.PREFIX + '/reload']), 1)
 
 
 if __name__ == '__main__':

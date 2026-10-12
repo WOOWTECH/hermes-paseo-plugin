@@ -402,7 +402,7 @@
       };
     }, [operation]);
     async function reload() {
-      if (operation.running || !capability || capability.supported !== true) return;
+      if (blocked || operation.running || !capability || capability.supported !== true) return;
       operation.running = true;
       dashboardReloading = true;
       cancelReads();
@@ -474,7 +474,7 @@
       mode === "confirm" && h("div", { role: "dialog", "aria-modal": "false", "aria-label": "確認重載 Dashboard" },
         h("p", null, "重載期間 Dashboard 會短暫離線，進行中的網頁操作可能中斷。已儲存的設定與資料會保留。"),
         h("div", { className: "hp-actions" },
-          button("確認重載", () => void reload(), operation.running),
+          button("確認重載", () => void reload(), blocked || operation.running),
           button("取消", () => setMode("idle"), operation.running, true))),
       mode !== "confirm" && button(mode === "waiting" ? "正在重載…" : "重載 Dashboard",
         () => setMode("confirm"), blocked || !capability || capability.supported !== true || operation.running || mode === "checking" || mode === "unavailable", true));
@@ -492,7 +492,8 @@
         h("h1", null, "把 Hermes 帶到 Paseo"), h("p", { className: "hp-muted" }, "完成服務啟動與官方配對，再從其他裝置繼續對話。")),
         h("span", { className: "hp-badge", role: "status", "aria-live": "polite" }, phaseCopy(snapshot))),
       errors.map(message => h("div", { key: message, className: "hp-error", role: "alert" }, message)),
-      h(DashboardReload, { blocked: !!snapshot.busy || snapshot.stopping }),
+      h(DashboardReload, { blocked: !!snapshot.busy || snapshot.stopping ||
+        !!(status && ["installing", "starting", "stopping"].includes(status.phase)) }),
       h("section", { className: "hp-card", "aria-label": "安裝與服務" },
         h("h2", null, "1. 安裝與服務"),
         h("p", null, !status ? "正在檢查已啟用外掛的狀態。" : !enabled ? "請在 Hermes 外掛頁啟用 hermes-paseo，再回來開始設定。" :

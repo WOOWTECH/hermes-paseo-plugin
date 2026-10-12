@@ -144,13 +144,21 @@ def make_router(require_auth, public_origin, enabled, control=None):
     return router
 
 
-def install(server):
+def install(server, enabled=None, public_origin=None, control=None):
     if getattr(server.app.state, 'hermes_paseo_host_installed', False):
         return
-    from hermes_cli.plugins_cmd import _get_enabled_set, _get_disabled_set
+    if enabled is None:
+        from hermes_cli.plugins_cmd import _get_enabled_set, _get_disabled_set
+        enabled = lambda: 'hermes-paseo' in _get_enabled_set() and 'hermes-paseo' not in _get_disabled_set()
+    existing = list(server.app.router.routes)
     server.app.include_router(make_router(
         server._require_token,
-        lambda: os.environ.get('HERMES_DASHBOARD_PUBLIC_URL', ''),
-        lambda: 'hermes-paseo' in _get_enabled_set() and 'hermes-paseo' not in _get_disabled_set(),
+        public_origin or (lambda: os.environ.get('HERMES_DASHBOARD_PUBLIC_URL', '')),
+        enabled, control,
     ))
+    # Hermes calls mount_spa(app) while importing web_server. Exact control
+    # routes must precede its /{full_path:path} fallback. Middleware/auth still
+    # runs first, and only these fixed paths are moved ahead of existing routes.
+    server.app.router.routes[:] = server.app.router.routes[len(existing):] + existing
+    server.app.openapi_schema = None
     server.app.state.hermes_paseo_host_installed = True
