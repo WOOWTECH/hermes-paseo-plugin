@@ -340,6 +340,59 @@ class RouteTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 403)
                 self.privacy(response)
 
+    def configure_origin(self, value):
+        b._private_dir(self.runtime.state_dir)
+        file = self.runtime.state_dir / 'dashboard-origin.json'
+        b._write_json(file, value)
+        return file
+
+    def test_configured_https_origin_accepts_http_reverse_proxy_without_trusting_headers(self):
+        self.configure_origin({'origin': 'https://dashboard.example:8443'})
+        with patch.object(self.runtime, '_invoke', return_value={'url': 'https://app.paseo.sh/?offer=test'}):
+            response = self.client.post(self.prefix + '/pair', json={}, headers={
+                'Origin': 'https://dashboard.example:8443', 'Sec-Fetch-Site': 'same-origin'})
+        self.assertEqual(response.status_code, 200)
+        self.privacy(response)
+
+    def test_configured_origin_still_rejects_foreign_scheme_port_credentials_and_fetch_site(self):
+        self.configure_origin({'origin': 'https://dashboard.example:8443'})
+        with patch.object(self.runtime, '_invoke', side_effect=AssertionError('untrusted invocation')):
+            for headers in [
+                {'Origin': 'https://evil.test'}, {'Origin': 'http://dashboard.example:8443'},
+                {'Origin': 'https://dashboard.example'}, {'Origin': 'https://dashboard.example:8443.evil'},
+                {'Origin': 'https://user@dashboard.example:8443'},
+                {'Origin': 'https://dashboard.example:8443', 'Sec-Fetch-Site': 'cross-site'},
+                {'Origin': 'http://testserver', 'X-Forwarded-Host': 'dashboard.example:8443', 'X-Forwarded-Proto': 'https'},
+            ]:
+                response = self.client.post(self.prefix + '/pair', json={}, headers=headers)
+                self.assertEqual(response.status_code, 403)
+                self.privacy(response)
+
+    def test_forwarded_origin_is_not_authority_without_operator_configuration(self):
+        response = self.client.post(self.prefix + '/pair', json={}, headers={
+            'Origin': 'https://dashboard.example', 'X-Forwarded-Host': 'dashboard.example',
+            'X-Forwarded-Proto': 'https', 'Sec-Fetch-Site': 'same-origin'})
+        self.assertEqual(response.status_code, 403)
+        self.privacy(response)
+
+    def test_origin_file_requires_private_permissions_valid_schema_and_no_symlink(self):
+        with patch.object(self.runtime, '_invoke', side_effect=AssertionError('invalid origin invocation')):
+            for value in [{'origin': 'https://user:password@dashboard.example'},
+                          {'origin': 'https://dashboard.example/path'},
+                          {'origin': 'https://dashboard.example', 'unexpected': True}]:
+                self.configure_origin(value)
+                response = self.client.post(self.prefix + '/pair', json={}, headers=self.origin)
+                self.assertEqual(response.status_code, 503)
+                self.privacy(response)
+            file = self.configure_origin({'origin': 'http://testserver'})
+            file.chmod(0o666)
+            self.assertEqual(self.client.post(self.prefix + '/pair', json={}, headers=self.origin).status_code, 503)
+            file.unlink()
+            target = Path(self.temp.name) / 'origin-target.json'
+            target.write_text('{"origin":"http://testserver"}')
+            file.symlink_to(target)
+            self.assertEqual(self.client.post(self.prefix + '/pair', json={}, headers=self.origin).status_code, 503)
+
     def test_json_size_unknown_fields_and_encoding(self):
         with patch.object(self.runtime, '_invoke', side_effect=AssertionError('invalid body invocation')):
             for body, headers, expected in [('{}', {'Content-Type': 'text/plain'}, 415), ('{"provider":"hermes"}', {'Content-Type': 'application/json'}, 400),

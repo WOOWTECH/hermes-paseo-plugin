@@ -43,7 +43,7 @@
     return ({
       RESTART: "外掛 API 尚未載入。請由管理者重新啟動 hermes dashboard，再按「重新檢查」。舊版主機僅重新掃描或重新整理頁面無法掛載 API，不需要升級映像。",
       AUTH: "Dashboard 登入已過期，請重新整理頁面並登入。",
-      FORBIDDEN: "請先在 Hermes 的外掛頁啟用 hermes-paseo，並確認目前帳號有操作權限。",
+      FORBIDDEN: "操作被拒絕。請確認 hermes-paseo 已啟用且登入有效；若使用反向代理，請由管理者確認正式網址設定。",
       BUSY: "服務仍在處理上一項操作，請稍後重試。",
       PAIR: "配對服務沒有傳回有效的官方連結，請重新產生。",
       DATA: "服務傳回的狀態格式不完整，請重新檢查。",

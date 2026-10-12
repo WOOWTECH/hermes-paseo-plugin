@@ -63,14 +63,17 @@ def check_origin(request):
     origin = request.headers.get('origin')
     if origin:
         actual = _origin(origin)
-        expected = _origin(str(request.base_url).rstrip('/'))
+        configured = bridge.get_bridge().dashboard_origin()
+        expected = _origin(configured or str(request.base_url).rstrip('/'))
         if actual is None or actual != expected:
             raise RequestError('ORIGIN_DENIED', 403)
     elif request.method not in ('GET', 'HEAD', 'OPTIONS'):
         if request.headers.get('sec-fetch-site') != 'same-origin':
             raise RequestError('ORIGIN_REQUIRED', 403)
-    # Never trust client-supplied Forwarded/X-Forwarded-Host here. Proxy normalization
-    # belongs to the host; request.base_url uses the host's ASGI scheme and Host.
+    # Never trust client-supplied Forwarded/X-Forwarded-Host here. Operators may
+    # configure one exact public Origin in a private, profile-scoped local file
+    # when an HTTP proxy loses the original scheme/host. Browser requests cannot
+    # create or update this file. Fetch Metadata remains enforced above.
 
 
 async def read_json(request):

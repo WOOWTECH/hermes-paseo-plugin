@@ -21,6 +21,8 @@ hermes plugins enable hermes-paseo
 
 首次安裝的後端 API 是否能立即使用，依 Hermes 版本而異。沒有插件後端熱載入的版本需要重新啟動 Hermes Dashboard 一次；頁面會顯示重啟提示，不會把尚未載入當成已配對。這不需要升級 Hermes 映像。
 
+Hermes 0.19 的 Web 插件列表只在頁面載入時讀取。從插件頁安裝或啟用後，請重新整理一次；插件載入後會自動開啟尚未完成的配對指南。
+
 官方 relay 不需要額外 Paseo 密碼。缺少模型登入時，使用 Hermes 的官方模型／登入設定；不要將密碼、OAuth token 或配對連結貼到聊天中。插件不讀取或複製模型憑證。
 
 ## 在 Hermes 對話調用插件
@@ -44,6 +46,14 @@ Linux、Python 3.11+、Node.js 22.19.0+、npm、util-linux flock；Hermes 須支
 狀態與診斷不等同真正模型回覆；對話驗收會使用帳號額度，完成後歸檔此次測試 agent、保留紀錄。配對 URL 只在受保護設定頁傳遞，API 使用 no-store/no-referrer。
 
 入口代理若清空 Origin 或改寫 Host，必須先驗證允許的正式 Origin，並保留／拒絕瀏覽器 cross-site Fetch Metadata；不可只依靠重寫後的後端 Origin 判斷。
+
+若 HTTPS 入口經 HTTP 代理後遺失原本協定或 Host，由管理者使用 Hermes 服務帳戶為該 profile 設定正式 Origin：
+
+```bash
+python ~/.hermes/plugins/hermes-paseo/bin/configure-origin.py https://hermes.example.com
+```
+
+自訂 `HERMES_HOME` 時請改用該 profile 下的插件路徑，並沿用相同環境。設定寫入私有 `plugin-data/hermes-paseo/dashboard-origin.json`，要求本帳戶擁有、無其他帳戶讀寫權限；禁止 credentials、path、query、fragment。插件只接受這個精確 Origin，仍拒絕 cross-site Fetch Metadata，不信任客戶端任意 Forwarded 標頭。這個設定不包含密碼，也不更改 Hermes 登入。
 
 ## 開發驗證
 

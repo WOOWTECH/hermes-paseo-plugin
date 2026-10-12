@@ -52,7 +52,7 @@ PROVIDER_MODELS_UNAVAILABLE NO_AVAILABLE_MODEL RESTART_REQUIRED NODE_VERSION_UNS
 NPM_UNAVAILABLE VERSION_MISMATCH WEB_UI_MISSING RUNTIME_NOT_OWNED INVALID_PORT
 UNSAFE_SYMLINK UNSAFE_LOCK LOCK_GUARD_UNAVAILABLE LOCK_GUARD_FAILED LOCK_GUARD_TIMEOUT
 INVALID_MODE CHAT_TIMEOUT NO_ASSISTANT_REPLY ACCEPTANCE_FAILED RELAY_UNVERIFIED
-PROVIDER_LOGIN_REQUIRED PROVIDER_ERROR START_FAILED STOP_FAILED ACCEPTANCE_CLEANUP_FAILED
+PROVIDER_LOGIN_REQUIRED PROVIDER_ERROR START_FAILED STOP_FAILED ACCEPTANCE_CLEANUP_FAILED INVALID_DASHBOARD_ORIGIN
 WORKSPACE_CREATE_FAILED PERMISSION_REQUIRED PROVIDER_TIMEOUT PROVIDER_TURN_FAILED
 EMPTY_OR_UNEXPECTED_REPLY'''.split())
 PUBLIC_KEYS = frozenset('''ok code installed version enabled phase diagnosticCode daemon running
@@ -151,7 +151,7 @@ def _private_dir(path):
     path.chmod(0o700)
 
 
-def _read_json(path):
+def _read_json(path, private=False):
     _safe_path(path)
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -161,6 +161,8 @@ def _read_json(path):
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_INPUT:
             raise BridgeError('STATE_CORRUPT')
+        if private and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
+            raise BridgeError('STATE_UNAVAILABLE')
         data = os.read(fd, MAX_INPUT + 1)
         value = json.loads(data)
         if not isinstance(value, dict):
@@ -304,6 +306,20 @@ def run_process(argv, payload, env, timeout, output_limit=MAX_OUTPUT):
                 pass
 
 
+def validate_dashboard_origin(value):
+    if not isinstance(value, str) or not value or len(value) > 2048 or re.search(r'[\s\x00-\x1f\x7f\\]', value):
+        raise BridgeError('INVALID_DASHBOARD_ORIGIN')
+    try:
+        parsed = urlsplit(value)
+        if (parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username
+                or parsed.password or parsed.path or parsed.query or parsed.fragment
+                or (parsed.port is not None and not 1 <= parsed.port <= 65535)):
+            raise ValueError()
+    except ValueError:
+        raise BridgeError('INVALID_DASHBOARD_ORIGIN') from None
+    return value
+
+
 class Bridge:
     def __init__(self, root=ROOT, home=None):
         self.root = Path(root).absolute()
@@ -320,6 +336,23 @@ class Bridge:
         self._phase = None
         self._error = None
         self._operation_lock = threading.Lock()
+
+    def dashboard_origin(self):
+        record = _read_json(self.state_dir / 'dashboard-origin.json', private=True)
+        if record is None:
+            return None
+        if set(record) != {'origin'}:
+            raise BridgeError('STATE_CORRUPT')
+        try:
+            return validate_dashboard_origin(record['origin'])
+        except BridgeError:
+            raise BridgeError('STATE_CORRUPT') from None
+
+    def set_dashboard_origin(self, value):
+        value = validate_dashboard_origin(value)
+        with _state_lock(self.state_dir):
+            _write_json(self.state_dir / 'dashboard-origin.json', {'origin': value})
+
 
     def environment(self):
         env = os.environ.copy()  # preserve active credentials without opening their files
