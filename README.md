@@ -17,6 +17,8 @@ hermes plugins enable hermes-paseo
 
 原生 Agent 插件與 Dashboard 頁面均包含在同一 repo。啟用後開啟 Paseo 頁面，按引導準備服務與產生配對；在新分頁開啟官方 Paseo，按 Connect 完成綁定，再選 Hermes、模型與權限模式。
 
+仍啟用的服務因容器或 daemon 重啟而中斷時，開啟 Hermes Web 會嘗試恢復服務；不會把意外中斷當成手動停止。真正的手動停止會保留，恢復失敗需要按按鈕重試。這是可見 Web 介面的恢復行為，不是容器啟動的背景 supervisor。
+
 首次安裝的後端 API 是否能立即使用，依 Hermes 版本而異。沒有插件後端熱載入的版本需要重新啟動 Hermes Dashboard 一次；頁面會顯示重啟提示，不會把尚未載入當成已配對。這不需要升級 Hermes 映像。
 
 官方 relay 不需要額外 Paseo 密碼。缺少模型登入時，使用 Hermes 的官方模型／登入設定；不要將密碼、OAuth token 或配對連結貼到聊天中。插件不讀取或複製模型憑證。

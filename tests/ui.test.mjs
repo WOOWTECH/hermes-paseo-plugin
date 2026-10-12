@@ -215,6 +215,40 @@ test('initial disabled/manual pause never starts; explicit resume permits pairin
   assert.equal(buttonNode(app, '產生配對連結').props.disabled, false);
 });
 
+test('unexpected daemon loss preserves enabled intent, guides and recovers once; manual pause is respected', async () => {
+  const storage = new Map([['hermes-paseo:ui:v1', JSON.stringify({ started: ['restart-1'], guided: [], paused: false })]]);
+  const stopped = snapshot({ phase: 'stopped', daemon: { running: false, reachable: false },
+    onboarding: { required: true, completed: false, id: 'restart-1' } });
+  const app = host({ status: stopped, storage });
+  const start = deferred();
+  app.handle('/start', () => start.promise);
+  await app.mount('header');
+  assert.deepEqual(app.navigations, ['/paseo']);
+  assert.equal(count(app, '/start'), 1, 'enabled header recovers a lost daemon');
+  await app.mount('page'); await app.advance(6000);
+  assert.equal(count(app, '/start'), 1, 'no duplicate recovery while in flight');
+  assert.doesNotMatch(content(app.tree()), /已手動停止|你已停止服務/);
+  app.status(snapshot()); start.resolve({}); await app.settle();
+  app.handle('/start', () => { app.status(snapshot()); return {}; });
+  app.status(stopped); await app.advance(2000);
+  assert.equal(count(app, '/start'), 2, 'a later loss can recover after readiness was confirmed');
+  assert.equal(count(app, '/pair'), 0); assert.equal(count(app, '/acceptance'), 0);
+
+  const pausedStorage = new Map([['hermes-paseo:ui:v1', JSON.stringify({ started: [], guided: [], paused: true })]]);
+  const paused = host({ status: stopped, storage: pausedStorage });
+  await paused.mount('header'); await paused.mount('page'); await paused.advance(6000);
+  assert.equal(count(paused, '/start'), 0); assert.equal(paused.navigations.length, 0);
+  assert.match(content(paused.tree()), /已手動停止/);
+});
+
+test('stopped disabled intent or ownership diagnostics never automatically restart', async () => {
+  for (const patch of [{ enabled: false }, { diagnosticCode: 'DAEMON_NOT_OWNED' }]) {
+    const app = host({ status: snapshot({ phase: 'stopped', daemon: { running: false, reachable: false }, ...patch }) });
+    await app.mount('header'); await app.mount('page'); await app.advance(6000);
+    assert.equal(count(app, '/start'), 0);
+  }
+});
+
 test('stop is enabled during reads, cancels stale state, and persists manual pause across remount/reload', async () => {
   const app = host();
   await app.mount('header'); await app.mount('page');

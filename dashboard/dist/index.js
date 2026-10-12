@@ -29,6 +29,9 @@
   function activation(status) {
     return typeof status.onboarding.id === "string" && status.onboarding.id ? status.onboarding.id : "initial";
   }
+  function pausedStatus(status) {
+    return !!status && PAUSED.has(status.phase) && (status.phase !== "stopped" || !status.enabled);
+  }
   function text(value, fallback) {
     return typeof value === "string" && value.trim() ? value.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 160) : fallback;
   }
@@ -78,6 +81,7 @@
         typeof value.onboarding.completed !== "boolean") throw fault("DATA");
     return {
       enabled: value.enabled, phase: value.phase,
+      diagnosticCode: typeof value.diagnosticCode === "string" ? value.diagnosticCode : null,
       daemon: { running: value.daemon.running, reachable: value.daemon.reachable },
       providers: value.providers.filter(row => row && typeof row.provider === "string").map(row => ({
         provider: row.provider, label: text(row.label, row.provider), status: row.status,
@@ -96,6 +100,7 @@
   let navigationDone = false;
   let startAttempted = false;
   let resuming = false;
+  let recoveryAttempted = false;
   function publish(patch) {
     state = Object.assign({}, state, patch);
     for (const subscriber of subscribers) subscriber.update(state);
@@ -135,7 +140,7 @@
   }
   function maybeGuide(status) {
     if (!activated(status) || !status.onboarding.required || status.onboarding.completed ||
-        markers.paused || PAUSED.has(status.phase) || !visible()) return;
+        markers.paused || pausedStatus(status) || !visible()) return;
     const key = activation(status);
     if (navigationDone || markers.guided.includes(key)) return;
     navigationDone = true;
@@ -143,11 +148,20 @@
     navigate();
   }
   function maybeStart(status) {
-    if (!pageMounted() || !visible() || !activated(status) || status.phase !== "not_installed" ||
+    const recovery = status && status.enabled && status.phase === "stopped" &&
+      !status.daemon.running && !status.daemon.reachable && !status.diagnosticCode;
+    if (!visible() || !activated(status) || (!recovery && (!pageMounted() || status.phase !== "not_installed")) ||
         markers.paused || state.busy || state.stopping) return;
-    const key = activation(status);
-    if (markers.started.includes(key)) return;
-    remember("started", key);
+    if (recovery) {
+      // Recover enabled intent after a host/daemon restart. A failed attempt
+      // requires an explicit retry; only confirmed readiness permits another.
+      if (recoveryAttempted) return;
+      recoveryAttempted = true;
+    } else {
+      const key = activation(status);
+      if (markers.started.includes(key)) return;
+      remember("started", key);
+    }
     void action("start");
   }
   async function readStatus() {
@@ -162,11 +176,12 @@
         const result = normalize(await request("/status", "GET", controller.signal));
         if (controller.signal.aborted || flight.revision !== revision || !canPoll()) return;
         if (state.status && state.status.enabled && !result.enabled) navigationDone = false;
-        if (!PAUSED.has(result.phase)) resuming = false;
+        if (!pausedStatus(result)) resuming = false;
+        if (result.enabled && result.daemon.running && result.daemon.reachable && ["running", "ready"].includes(result.phase)) recoveryAttempted = false;
         if (navigationDone) remember("guided", activation(result));
         if (startAttempted) remember("started", activation(result));
-        if (PAUSED.has(result.phase) && !resuming && state.busy !== "start") { markers.paused = true; saveMarkers(); }
-        publish({ status: result, readError: null, pairUrl: result.enabled && !PAUSED.has(result.phase) ? state.pairUrl : null });
+        if (pausedStatus(result) && !resuming && state.busy !== "start") { markers.paused = true; saveMarkers(); }
+        publish({ status: result, readError: null, pairUrl: result.enabled && !pausedStatus(result) ? state.pairUrl : null });
         maybeGuide(result);
         maybeStart(result);
       } catch (error) {
@@ -206,6 +221,7 @@
         navigationDone = false;
         startAttempted = false;
         resuming = false;
+        recoveryAttempted = false;
         publish({ status: null, readError: null, error: null, pairUrl: null, acceptance: null });
       } else schedule();
     };
@@ -280,10 +296,11 @@
     if (snapshot.readError) return "狀態無法確認";
     if (!status) return "讀取狀態中";
     if (!activated(status)) return "外掛尚未啟用";
-    if (markers.paused || PAUSED.has(status.phase)) return snapshot.busy === "start" ? "正在恢復" : status.daemon.running ? "停止待確認" : "已手動停止";
+    if (markers.paused || pausedStatus(status)) return snapshot.busy === "start" ? "正在恢復" : status.daemon.running ? "停止待確認" : "已手動停止";
+    if (status.phase === "stopped" && snapshot.busy === "start") return "正在恢復服務";
     return ({ not_installed: "等待初始化", installing: "正在安裝 Paseo", starting: "正在啟動服務",
       running: status.daemon.reachable ? "服務已就緒" : "等待服務連線", ready: "服務已就緒",
-      restart_required: "需要重新啟動", error: "啟動失敗" })[status.phase] || "正在確認服務";
+      stopped: "服務已中斷", restart_required: "需要重新啟動", error: "啟動失敗" })[status.phase] || "正在確認服務";
   }
   function button(label, onClick, disabled, secondary) {
     return h("button", { type: "button", className: secondary ? "hp-button hp-secondary" : "hp-button", onClick, disabled }, label);
@@ -349,7 +366,7 @@
   function Page() {
     const snapshot = useSnapshot("page");
     const status = snapshot.status;
-    const paused = markers.paused || !!(status && PAUSED.has(status.phase));
+    const paused = markers.paused || pausedStatus(status);
     const enabled = activated(status);
     const busy = !!snapshot.busy || snapshot.stopping;
     const reachable = enabled && !paused && !!status.daemon.reachable && !snapshot.readError;
