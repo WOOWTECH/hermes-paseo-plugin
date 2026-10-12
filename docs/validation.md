@@ -25,3 +25,9 @@ Hermes 0.19 沒有公開插件建立全新 native 對話的介面：初始化使
 支援範圍為 Linux 單一 Hermes profile。尚未建立長期 soak、大量並行模型對話或 SLA／容量承諾。
 
 Hermes 0.19 停用／移除沒有公開卸載 callback：必須先用插件頁或 `/paseo stop` 停止 daemon，再停用／移除。不能把 host 關閉工具入口當作背景服務已停止。
+
+此站台的 `toolsets` 限定為 `hermes-cli`；在此預設下，模型看不到新插件工具。這是原白名單保留的結果，Paseo 配對與 Hermes ACP 對話已正常。原生工具需單次使用 `--toolsets hermes_paseo` 或由使用者將該工具集納入 profile；此次沒有把全域白名單改成全部開放。
+
+目標 0.19 的 CLI 沒有 `plugins doctor` 子命令，因此不宣稱已在該 CLI 跑過 doctor。已使用其官方 install／enable 及實際對話驗證；公開 CI 和本機 bridge 註冊測試另有明確範圍。
+
+已再以 CLI 單次選取 `hermes_paseo` 工具集，讓模型僅調用 `paseo_status` 並回傳真正、不可猜測的初始化 ID；回傳值吻合，且初始化紀錄已掛接真實 native session。原 profile 的 `hermes-cli` 白名單保持原樣。

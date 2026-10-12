@@ -19,6 +19,18 @@ hermes plugins enable hermes-paseo
 
 官方 relay 不需要額外 Paseo 密碼。缺少模型登入時，使用 Hermes 的官方模型／登入設定；不要將密碼、OAuth token 或配對連結貼到聊天中。插件不讀取或複製模型憑證。
 
+## 在 Hermes 對話調用插件
+
+插件提供 `paseo_status`、`paseo_start`、`paseo_stop`、`paseo_models`、`paseo_chat`、`paseo_continue`。若 profile 已限定工具集，請在 Hermes 工具設定將 `hermes_paseo` 納入需要使用的工具集；插件保留原有白名單，不會改成全部開放。
+
+單次 CLI 對話可明確選用：
+
+```bash
+hermes chat --toolsets hermes_paseo --query "請用 paseo_status 查看連線狀態"
+```
+
+也可用 `/paseo` 查看引導，`/paseo status`、`/paseo start`、`/paseo stop` 直接控制。配對邀請由受保護的 Dashboard 頁面取得。
+
 ## 環境與資料
 
 Linux、Python 3.11+、Node.js 22.19.0+、npm、util-linux flock；Hermes 須支援原生 Dashboard plugins 與 `hermes acp`，並已安裝 ACP extra。插件不自動替換 Hermes 核心或 Python 環境。
