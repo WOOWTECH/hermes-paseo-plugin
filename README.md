@@ -4,6 +4,8 @@ Hermes Agent / Web 插件：啟用後準備固定 Paseo runtime，在受保護�
 
 公開 repo：<https://github.com/WOOWTECH/hermes-paseo-plugin>。下載不需要 GitHub 帳號或 token。
 
+完整中文教學：[下載、安裝、部署與測試](docs/install.zh-TW.md)。
+
 目前為公開預覽版本。部署到正式環境前，請在自己的主機完成 Web 安裝／啟用、官方配對及首輪／續聊驗收；各版本的支援範圍與驗收方式見 [實測紀錄](docs/validation.md)。
 
 ## 安裝與配對
@@ -50,7 +52,7 @@ Linux、Python 3.11+、Node.js 22.19.0+、npm、util-linux flock；Hermes 須支
 若 HTTPS 入口經 HTTP 代理後遺失原本協定或 Host，由管理者使用 Hermes 服務帳戶為該 profile 設定正式 Origin：
 
 ```bash
-python ~/.hermes/plugins/hermes-paseo/bin/configure-origin.py https://hermes.example.com
+python3 ~/.hermes/plugins/hermes-paseo/bin/configure-origin.py https://hermes.example.com
 ```
 
 自訂 `HERMES_HOME` 時請改用該 profile 下的插件路徑，並沿用相同環境。設定寫入私有 `plugin-data/hermes-paseo/dashboard-origin.json`，要求本帳戶擁有、無其他帳戶讀寫權限；禁止 credentials、path、query、fragment。插件只接受這個精確 Origin，仍拒絕 cross-site Fetch Metadata，不信任客戶端任意 Forwarded 標頭。這個設定不包含密碼，也不更改 Hermes 登入。
