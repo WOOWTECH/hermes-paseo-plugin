@@ -4,6 +4,8 @@ Hermes Agent / Web 插件：啟用後準備固定 Paseo runtime，在受保護�
 
 公開 repo：<https://github.com/WOOWTECH/hermes-paseo-plugin>。下載不需要 GitHub 帳號或 token。
 
+目前為公開預覽版本。部署到正式環境前，請在自己的主機完成 Web 安裝／啟用、官方配對及首輪／續聊驗收；各版本的支援範圍與驗收方式見 [實測紀錄](docs/validation.md)。
+
 ## 安裝與配對
 
 在 Hermes Web 的插件頁選擇從 GitHub 安裝，輸入 `WOOWTECH/hermes-paseo-plugin`。CLI：
