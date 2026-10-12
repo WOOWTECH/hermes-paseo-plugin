@@ -1,0 +1,14 @@
+name: hermes-paseo
+version: 0.1.0
+kind: standalone
+author: WOOWTECH
+description: Profile-scoped Paseo runtime, protected dashboard pairing, and Hermes ACP conversations.
+provides_tools:
+  - paseo_status
+  - paseo_start
+  - paseo_stop
+  - paseo_models
+  - paseo_chat
+  - paseo_continue
+provides_hooks:
+  - on_session_start

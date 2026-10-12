@@ -1,0 +1,20 @@
+name: Verify Hermes Paseo
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.1'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'fastapi>=0.115,<0.116' 'httpx>=0.28,<0.29' 'PyYAML>=6,<7'
+      - run: node --test tests/*.test.mjs
+      - run: python -m unittest discover -s tests -p 'test_*.py'
+      - run: node --check dashboard/dist/index.js
+      - run: npm audit --omit=dev --prefix runtime
