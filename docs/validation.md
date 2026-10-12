@@ -1,6 +1,6 @@
 # Hermes Paseo 驗收紀錄
 
-2026-10-12；首個使用者授權實測目標為 woowtech Hermes，Hermes 0.19.0 / Python 3.13.5 / Node 22.22.3。未升級 Hermes 映像或更改既有模型登入。
+2026-10-12；以下為 0.1.2 首次對話驗收。使用者授權實測目標為 woowtech Hermes，Hermes 0.19.0 / Python 3.13.5 / Node 22.22.3。未升級 Hermes 映像或更改既有模型登入。
 
 已使用 Hermes 的服務帳戶在 profile 專用目錄準備並啟動固定 Paseo 0.11.2 runtime。官方 ACP catalog 實測取得 13 個模型，以及 Default、Accept Edits、Don't Ask 三個模式；預設 `custom:chatgpt/gpt-5.6-sol`。
 
@@ -31,3 +31,15 @@ Hermes 0.19 停用／移除沒有公開卸載 callback：必須先用插件頁�
 目標 0.19 的 CLI 沒有 `plugins doctor` 子命令，因此不宣稱已在該 CLI 跑過 doctor。已使用其官方 install／enable 及實際對話驗證；公開 CI 和本機 bridge 註冊測試另有明確範圍。
 
 已再以 CLI 單次選取 `hermes_paseo` 工具集，讓模型僅調用 `paseo_status` 並回傳真正、不可猜測的初始化 ID；回傳值吻合，且初始化紀錄已掛接真實 native session。原 profile 的 `hermes-cli` 白名單保持原樣。
+
+## 0.1.3：Dashboard 內重載
+
+在配置主機端 adapter 的 s6 Hermes 環境，以正常登入的 Chromium 完成原生 Plugins Git pull 更新，以及 Paseo 頁的「重載 Dashboard → 確認重載」。確認伺服器 generation 改變、插件 API 恢復、自動重新整理原頁、Paseo daemon 可連線及配對按鈕可操作；手機尺寸也可看到控制按鈕。
+
+取消操作保留原 generation。未登入與跨 Origin 的重載請求均被拒絕，沒有重啟程序。原生 Hermes 版本及 ACP 指令仍可使用。此段驗證重載與初始化控制流程，模型首輪／續聊驗收見上方紀錄。
+
+實測發現 volume remount 的 fsGroup 會把 Origin 私有檔案從 600 改為 660。已加入檢查既有 profile UID 的部署選項，保留原有私有檔案檢查；重新執行 Origin 設定後，在真實 Pod 重建與 volume remount 下仍維持 600。
+
+本機 Node/runtime/UI 測試 48/48、Python bridge/host/installer 測試 51/51 通過；[實作與修正 CI](https://github.com/WOOWTECH/hermes-paseo-plugin/actions/runs/38234388548) 通過。回歸包含 SPA 兜底路由順序、首次 API 404、明確確認、重複點擊、斷線觀察、不同 generation 與 API readiness、timeout、保留手動暫停、服務 PID 驗證、Origin/body 防護及拒絕錯誤 profile UID。
+
+此功能要求一次性 [主機端設定](dashboard-control.zh-TW.md)。一般插件安裝不會自行改寫主機 CLI；沒有主機介面時按鈕會停用。Kubernetes 手動掛載與儲存選項需要納入正式部署模板，才能在 Helm 重建工作負載時保留。
