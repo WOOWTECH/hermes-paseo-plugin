@@ -18,6 +18,8 @@ def main():
     parser.add_argument('--namespace', required=True)
     parser.add_argument('--workload', required=True)
     parser.add_argument('--apply', action='store_true')
+    parser.add_argument('--preserve-private-profile', action='store_true',
+                        help='Remove recursive fsGroup chmod for an existing /opt/data profile owned by UID 10000.')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     data = {name: (root / 'host' / name).read_text() for name in ('hermes', 'dashboard_control.py')}
@@ -50,6 +52,20 @@ def main():
                      {'name': volume, 'mountPath': '/opt/hermes/.venv/bin/hermes', 'subPath': 'hermes', 'readOnly': True},
                  ]}],
              }}}}
+    if args.preserve_private_profile:
+        selector = ','.join(f'{k}={v}' for k, v in workload['spec']['selector']['matchLabels'].items())
+        pods = json.loads(subprocess.run(kube + ['get', 'pods', '-l', selector, '-o', 'json'],
+                                        check=True, capture_output=True, text=True).stdout)['items']
+        pod = next((p for p in pods if p.get('status', {}).get('phase') == 'Running' and
+                    any(o.get('uid') == workload['metadata']['uid'] for o in p['metadata'].get('ownerReferences', []))), None)
+        if not pod:
+            raise SystemExit('Verify a running owned Hermes pod before changing fsGroup.')
+        uid = subprocess.run(kube + ['exec', pod['metadata']['name'], '-c', 'hermes-agent',
+                                     '--', 'stat', '-c', '%u', '/opt/data'],
+                             check=True, capture_output=True, text=True).stdout.strip()
+        if uid != '10000':
+            raise SystemExit('The existing profile is not owned by the expected service UID; keep fsGroup and review ownership.')
+        patch['spec']['template']['spec']['securityContext'] = {'fsGroup': None}
     if not args.apply:
         print(json.dumps({'dry_run': True, 'config_map': config_name,
                           'workload': args.workload, 'patch': patch}, indent=2))

@@ -426,8 +426,15 @@
           try {
             const current = await hostRequest("/capabilities", "GET", controller.signal);
             if (current.supported === true && current.generation !== previous) {
-              normalize(await request("/status", "GET", controller.signal));
+              const recovered = normalize(await request("/status", "GET", controller.signal));
               if (operation.alive && !controller.signal.aborted) {
+                if (recovered.phase === "not_installed" && !markers.paused && !pausedStatus(recovered)) {
+                  // Explicit Dashboard reload may follow an earlier failed first
+                  // start. Permit one new initialization after refresh, while
+                  // retaining manual pause and preventing automatic retry loops.
+                  markers.started = markers.started.filter(key => key !== activation(recovered));
+                  saveMarkers();
+                }
                 window.location.reload();
                 return;
               }

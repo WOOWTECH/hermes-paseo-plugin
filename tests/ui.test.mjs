@@ -591,3 +591,21 @@ test('Dashboard reload waits while the Paseo installer is active', async () => {
   assert.equal(buttonNode(app, '重載 Dashboard').props.disabled, true);
   assert.equal(app.calls.filter(x => x.path.endsWith('/reload')).length, 0);
 });
+
+test('explicit Dashboard recovery permits one failed first-start retry without clearing manual pause', async () => {
+  for (const paused of [false, true]) {
+    const key = 'failed-init';
+    const storage = new Map([['hermes-paseo:ui:v1', JSON.stringify({ started: [key], guided: [key], paused })]]);
+    const current = snapshot({ enabled: false, phase: 'not_installed', daemon: { running: false, reachable: false },
+      onboarding: { required: true, completed: false, id: key } });
+    const app = host({ storage, status: current, pathname: '/paseo' });
+    let accepted = false;
+    app.hostHandle('/capabilities', () => ({ supported: true, generation: accepted ? 'new' : 'old' }));
+    app.hostHandle('/reload', () => { accepted = true; return { ok: true, generation: 'old' }; });
+    await app.mount('page'); await app.click('重載 Dashboard'); await app.click('確認重載');
+    const saved = JSON.parse(app.storage.get('hermes-paseo:ui:v1'));
+    assert.equal(saved.started.includes(key), paused);
+    assert.equal(saved.paused, paused);
+    assert.equal(count(app, '/start'), 0, 'new initialization waits for the actual refresh');
+  }
+});

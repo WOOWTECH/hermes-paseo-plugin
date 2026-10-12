@@ -27,6 +27,8 @@ python3 bin/install-dashboard-control-k8s.py \
 
 掛載會跨 Pod 重啟保留。Helm 升級／重新部署可能重建工作負載並移除額外掛載：正式部署需將相同 volume/mount 納入 chart／部署模板，或在部署完成後重新執行這個安裝命令。不要只靠一次手動 patch 宣稱所有平台 redeploy 均已支援。
 
+若工作負載設定 `fsGroup`，Kubernetes 重新掛載可能把 profile 的私有檔案由 `600` 改成 `660`，導致 Origin 等私有設定被拒絕。對於已存在且 `/opt/data` 由 Hermes UID 10000 擁有的 s6 部署，可加 `--preserve-private-profile`；安裝器先驗證正在運行的所屬 Pod 與目錄 UID，再移除這一台工作負載的遞迴 fsGroup 權限改寫。仍由原映像維持服務帳戶的目錄所有權，私有檔案驗證不會放寬。若已被改寫，需用服務帳戶重新執行 Origin 設定命令；正式 chart 也需保留這項設定。
+
 ## 建入 s6 映像
 
 也可用 `host/Dockerfile` 將 adapter 建入相容的原映像：
