@@ -22,7 +22,8 @@
     try { window.sessionStorage.setItem(STORAGE, JSON.stringify(markers)); } catch (_) { /* Private browsing. */ }
   }
   function remember(kind, key) {
-    if (!markers[kind].includes(key)) markers[kind] = markers[kind].concat(key).slice(-40);
+    if (markers[kind].includes(key)) return;
+    markers[kind] = markers[kind].concat(key).slice(-40);
     saveMarkers();
   }
   function activation(status) {
@@ -202,6 +203,10 @@
         if (pollTimer !== null) window.clearTimeout(pollTimer);
         pollTimer = null;
         cancelReads();
+        navigationDone = false;
+        startAttempted = false;
+        resuming = false;
+        publish({ status: null, readError: null, error: null, pairUrl: null, acceptance: null });
       } else schedule();
     };
   }

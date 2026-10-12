@@ -23,7 +23,7 @@ hermes plugins enable hermes-paseo
 
 Linux、Python 3.11+、Node.js 22.19.0+、npm、util-linux flock；Hermes 須支援原生 Dashboard plugins 與 `hermes acp`，並已安裝 ACP extra。插件不自動替換 Hermes 核心或 Python 環境。
 
-每個 Hermes profile 的 plugin-data/hermes-paseo 存放 runtime、Paseo home、狀態與初始化紀錄；不與 Pi plugin 或使用者原來的 Paseo home 混用。停止後保留手動暫停、登入與對話資料。其他同容器已安裝的 Claude Code、Codex、Pi 會被偵測；缺少或未登入的 provider 不宣稱能對話。
+每個 Hermes profile 的 plugin-data/hermes-paseo 存放 runtime、Paseo home、狀態與初始化紀錄；不與 Pi plugin 或使用者原來的 Paseo home 混用。停止後保留手動暫停、登入與對話資料。Hermes 0.19 沒有公開卸載 callback，停用／移除插件前請先在 Paseo 頁按「停止服務」，或執行 `/paseo stop`，確認 `/paseo status` 中 `daemon.running=false` 後再停用；此版本不宣稱停用按鈕會自動清理背景 daemon。其他同容器已安裝的 Claude Code、Codex、Pi 會被偵測；缺少或未登入的 provider 不宣稱能對話。
 
 狀態與診斷不等同真正模型回覆；對話驗收會使用帳號額度，完成後歸檔此次測試 agent、保留紀錄。配對 URL 只在受保護設定頁傳遞，API 使用 no-store/no-referrer。
 

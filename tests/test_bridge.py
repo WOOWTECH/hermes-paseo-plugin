@@ -415,3 +415,19 @@ class RouteTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NativeCommandTests(unittest.TestCase):
+    def test_stop_and_status_call_profile_bridge(self):
+        runtime = unittest.mock.Mock()
+        runtime.call.return_value = {'phase': 'disabled', 'daemon': {'running': False}}
+        with patch.object(native.bridge, 'get_bridge', return_value=runtime):
+            self.assertFalse(json.loads(native._setup_command('stop'))['daemon']['running'])
+            native._setup_command('status')
+        self.assertEqual(runtime.call.call_args_list, [unittest.mock.call('stop', {}), unittest.mock.call('status', {})])
+
+    def test_pair_and_arbitrary_commands_never_execute_or_echo_input(self):
+        with patch.object(native.bridge, 'get_bridge', side_effect=AssertionError('must not execute')):
+            result = native._setup_command('pair private-marker')
+            self.assertNotIn('private-marker', result)
+            native._setup_command('exec touch /tmp/unsafe')
