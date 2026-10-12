@@ -41,7 +41,7 @@
   }
   function errorCopy(error) {
     return ({
-      RESTART: "外掛 API 尚未載入。請由管理者重新啟動 hermes dashboard，再按「重新檢查」。舊版主機僅重新掃描或重新整理頁面無法掛載 API，不需要升級映像。",
+      RESTART: "外掛 API 尚未載入。請使用下方「重載 Dashboard」，完成後會自動回到配對頁。",
       AUTH: "Dashboard 登入已過期，請重新整理頁面並登入。",
       FORBIDDEN: "操作被拒絕。請確認 hermes-paseo 已啟用且登入有效；若使用反向代理，請由管理者確認正式網址設定。",
       BUSY: "服務仍在處理上一項操作，請稍後重試。",
@@ -101,13 +101,14 @@
   let startAttempted = false;
   let resuming = false;
   let recoveryAttempted = false;
+  let dashboardReloading = false;
   function publish(patch) {
     state = Object.assign({}, state, patch);
     for (const subscriber of subscribers) subscriber.update(state);
   }
   function visible() { return document.visibilityState !== "hidden"; }
   function pageMounted() { return Array.from(subscribers).some(subscriber => subscriber.kind === "page"); }
-  function canPoll() { return subscribers.size > 0 && visible(); }
+  function canPoll() { return subscribers.size > 0 && visible() && !dashboardReloading; }
   function cancelReads() {
     revision++;
     if (statusFlight) { statusFlight.controller.abort(); statusFlight = null; }
@@ -363,12 +364,127 @@
         button("重試探索", () => setRetry(value => value + 1), !ready, true)),
       catalog && !catalog.models.length && h("p", { className: "hp-muted" }, "此代理未提供模型清單，請確認它的官方登入與 ACP 設定。"));
   }
+  async function hostRequest(path, method, signal) {
+    const init = { method: method || "GET", credentials: "same-origin", cache: "no-store", signal };
+    if (method === "POST") {
+      init.headers = { "Content-Type": "application/json" };
+      init.body = JSON.stringify({ confirm: true });
+    }
+    const endpoint = "/api/hermes-paseo-host" + path;
+    if (typeof SDK.authedFetch === "function") {
+      const response = await SDK.authedFetch(endpoint, init);
+      if (!response.ok) throw httpFault(response.status);
+      return response.json();
+    }
+    if (typeof SDK.fetchJSON === "function") return SDK.fetchJSON(endpoint, init);
+    throw fault("SDK");
+  }
+  function DashboardReload({ blocked }) {
+    const [mode, setMode] = useState("checking");
+    const [capability, setCapability] = useState(null);
+    const [error, setError] = useState(null);
+    const [operation] = useState(() => ({ alive: false, running: false, controller: null, timeout: null, delay: null }));
+    useEffect(() => {
+      operation.alive = true;
+      const controller = new AbortController();
+      operation.controller = controller;
+      void hostRequest("/capabilities", "GET", controller.signal).then(value => {
+        if (!operation.alive) return;
+        setCapability(value);
+        setMode(value && value.supported === true && typeof value.generation === "string" ? "idle" : "unavailable");
+      }).catch(() => { if (operation.alive) setMode("unavailable"); });
+      return () => {
+        operation.alive = false;
+        operation.controller?.abort();
+        if (operation.timeout !== null) window.clearTimeout(operation.timeout);
+        if (operation.delay !== null) window.clearTimeout(operation.delay);
+        if (operation.running) { dashboardReloading = false; publish({}); schedule(); }
+      };
+    }, [operation]);
+    async function reload() {
+      if (operation.running || !capability || capability.supported !== true) return;
+      operation.running = true;
+      dashboardReloading = true;
+      cancelReads();
+      publish({ pairUrl: null });
+      setError(null); setMode("waiting");
+      const controller = new AbortController();
+      operation.controller = controller;
+      operation.timeout = window.setTimeout(() => controller.abort(), 60000);
+      let previous = capability.generation;
+      try {
+        try {
+          const accepted = await hostRequest("/reload", "POST", controller.signal);
+          if (!accepted || accepted.ok !== true || typeof accepted.generation !== "string") throw fault("DATA");
+          previous = accepted.generation;
+        } catch (failure) {
+          // A disconnected POST can already have been accepted. Observe first;
+          // never send a second restart automatically.
+          if (failure && ["AUTH", "FORBIDDEN", "BUSY", "DATA", "RESTART", "SDK"].includes(failure.code)) throw failure;
+        }
+        for (let attempt = 0; attempt < 30 && operation.alive && !controller.signal.aborted; attempt++) {
+          try {
+            const current = await hostRequest("/capabilities", "GET", controller.signal);
+            if (current.supported === true && current.generation !== previous) {
+              normalize(await request("/status", "GET", controller.signal));
+              if (operation.alive && !controller.signal.aborted) {
+                window.location.reload();
+                return;
+              }
+            }
+          } catch (failure) {
+            if (failure && ["AUTH", "FORBIDDEN"].includes(failure.code)) throw failure;
+          }
+          if (controller.signal.aborted || !operation.alive) break;
+          await new Promise(resolve => {
+            function complete() {
+              if (operation.delay !== null) window.clearTimeout(operation.delay);
+              operation.delay = null;
+              controller.signal.removeEventListener("abort", complete);
+              resolve();
+            }
+            operation.delay = window.setTimeout(complete, 2000);
+            controller.signal.addEventListener("abort", complete, { once: true });
+          });
+        }
+        throw fault("RELOAD_TIMEOUT");
+      } catch (failure) {
+        if (operation.alive) {
+          setError(failure && failure.code === "RELOAD_TIMEOUT"
+            ? "尚未確認重載完成。請稍後重新檢查，或重新登入 Dashboard。"
+            : errorCopy(failure));
+          setMode("failed");
+        }
+      } finally {
+        operation.running = false;
+        if (operation.timeout !== null) window.clearTimeout(operation.timeout);
+        if (operation.delay !== null) window.clearTimeout(operation.delay);
+        operation.timeout = operation.delay = null;
+        dashboardReloading = false;
+        if (operation.alive) { publish({}); schedule(); }
+      }
+    }
+    return h("section", { className: "hp-card", "aria-label": "Dashboard 重載" },
+      h("h2", null, "Dashboard 重載"),
+      h("p", { className: "hp-muted" }, "安裝或更新外掛後，從這裡重新載入 Dashboard。完成後會自動回到目前頁面。"),
+      mode === "checking" && h("p", { role: "status" }, "正在檢查重載功能…"),
+      mode === "unavailable" && h("p", { className: "hp-muted" }, "這台主機尚未配置 Dashboard 重載介面，需要管理者完成一次性主機設定。"),
+      mode === "waiting" && h("p", { role: "status", "aria-live": "polite" }, "Dashboard 正在重載，等待重新連線…"),
+      error && h("p", { className: "hp-error", role: "alert" }, error),
+      mode === "confirm" && h("div", { role: "dialog", "aria-modal": "false", "aria-label": "確認重載 Dashboard" },
+        h("p", null, "重載期間 Dashboard 會短暫離線，進行中的網頁操作可能中斷。已儲存的設定與資料會保留。"),
+        h("div", { className: "hp-actions" },
+          button("確認重載", () => void reload(), operation.running),
+          button("取消", () => setMode("idle"), operation.running, true))),
+      mode !== "confirm" && button(mode === "waiting" ? "正在重載…" : "重載 Dashboard",
+        () => setMode("confirm"), blocked || !capability || capability.supported !== true || operation.running || mode === "checking" || mode === "unavailable", true));
+  }
   function Page() {
     const snapshot = useSnapshot("page");
     const status = snapshot.status;
     const paused = markers.paused || pausedStatus(status);
     const enabled = activated(status);
-    const busy = !!snapshot.busy || snapshot.stopping;
+    const busy = !!snapshot.busy || snapshot.stopping || dashboardReloading;
     const reachable = enabled && !paused && !!status.daemon.reachable && !snapshot.readError;
     const errors = Array.from(new Set([snapshot.readError, snapshot.error].filter(Boolean)));
     return h("div", { className: "hermes-paseo hp-page", lang: "zh-Hant" },
@@ -376,6 +492,7 @@
         h("h1", null, "把 Hermes 帶到 Paseo"), h("p", { className: "hp-muted" }, "完成服務啟動與官方配對，再從其他裝置繼續對話。")),
         h("span", { className: "hp-badge", role: "status", "aria-live": "polite" }, phaseCopy(snapshot))),
       errors.map(message => h("div", { key: message, className: "hp-error", role: "alert" }, message)),
+      h(DashboardReload, { blocked: !!snapshot.busy || snapshot.stopping }),
       h("section", { className: "hp-card", "aria-label": "安裝與服務" },
         h("h2", null, "1. 安裝與服務"),
         h("p", null, !status ? "正在檢查已啟用外掛的狀態。" : !enabled ? "請在 Hermes 外掛頁啟用 hermes-paseo，再回來開始設定。" :
@@ -388,10 +505,10 @@
           h("li", { "data-done": reachable }, "確認連線")),
         status && status.phase === "restart_required" && h("p", { className: "hp-error" }, "Paseo 執行環境需要重啟。請先停止，再恢復服務。"),
         h("div", { className: "hp-actions" },
-          button(snapshot.stopping ? "正在停止…" : "停止服務", () => void action("stop"), !enabled || snapshot.stopping || (paused && !status.daemon.running), true),
+          button(snapshot.stopping ? "正在停止…" : "停止服務", () => void action("stop"), !enabled || snapshot.stopping || dashboardReloading || (paused && !status.daemon.running), true),
           button(snapshot.busy === "start" ? "正在啟動…" : paused ? "恢復服務" : "重新啟動／重試", () => void action("start"),
             !enabled || busy || !!snapshot.readError || (!paused && reachable), false),
-          button(snapshot.reading ? "檢查中…" : "重新檢查", () => void readStatus(), snapshot.reading, true)),
+          button(snapshot.reading ? "檢查中…" : "重新檢查", () => void readStatus(), snapshot.reading || dashboardReloading, true)),
         h("p", { className: "hp-muted hp-small" }, "頁面約每 2 秒檢查一次，頁首約每 5 秒檢查。分頁隱藏時暫停讀取；已送出的操作仍由服務處理。")),
       h("section", { className: "hp-card hp-pair", "aria-label": "配對精靈" },
         h("h2", null, "2. 配對精靈"),

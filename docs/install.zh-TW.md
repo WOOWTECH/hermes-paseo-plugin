@@ -1,15 +1,15 @@
 # Hermes Paseo：下載、安裝、部署與測試
 
-適用於 v0.1.2 公開預覽版。本教學將插件部署到已有的 Hermes Agent / Dashboard；Hermes 核心與模型帳號須先準備好。
+適用於 v0.1.3 公開預覽版。本教學將插件部署到已有的 Hermes Agent / Dashboard；Hermes 核心與模型帳號須先準備好。
 
 ## 下載網址
 
 - 原始碼：https://github.com/WOOWTECH/hermes-paseo-plugin
-- v0.1.2：https://github.com/WOOWTECH/hermes-paseo-plugin/releases/tag/v0.1.2
-- 固定版本 ZIP：https://github.com/WOOWTECH/hermes-paseo-plugin/archive/refs/tags/v0.1.2.zip
+- v0.1.3：https://github.com/WOOWTECH/hermes-paseo-plugin/releases/tag/v0.1.3
+- 固定版本 ZIP：https://github.com/WOOWTECH/hermes-paseo-plugin/archive/refs/tags/v0.1.3.zip
 - Paseo 官方介面：https://app.paseo.sh
 
-公開下載不需要 GitHub token。Web / CLI 從 GitHub 安裝會取得目前 main；ZIP 固定為 v0.1.2。
+公開下載不需要 GitHub token。Web / CLI 從 GitHub 安裝會取得目前 main；ZIP 固定為 v0.1.3。
 
 ## 1. 確認環境
 
@@ -36,7 +36,8 @@ hermes acp --help
 4. 新安裝時，開啟 **Enable after install**，按 **Install**。
 5. 確認 `hermes-paseo` 卡片顯示 `enabled`；若未啟用，按 **Enable**。
 6. Hermes 0.19 需重新整理頁面一次，才會載入剛安裝／啟用的插件。
-7. 若 Paseo 頁顯示後端 API 尚未載入或 404，請由管理者重載 Dashboard，再重新整理。
+7. 若 Paseo 頁顯示後端 API 尚未載入或 404，在 Paseo 頁按 **重載 Dashboard → 確認重載**。準備好的主機會等待後端重新啟動及插件 API 恢復，再自動重新整理目前頁面。
+8. 如果重載按鈕無法使用，表示主機尚未安裝重載介面；管理者需先完成一次性 [主機設定](dashboard-control.zh-TW.md)。這個設定屬於主機部署，不會由普通插件 API 自行提升權限安裝。
 
 已從 GitHub 安裝時，使用該插件卡片的 **Git pull** 更新；更新 Python 後端後同樣需重載舊版 Dashboard。已部署的主機可直接從第 5 節開始測試。
 
@@ -51,7 +52,7 @@ hermes plugins enable hermes-paseo
 
 若要使用固定版本 ZIP：
 
-1. 下載上述 v0.1.2 ZIP 並解壓。
+1. 下載上述 v0.1.3 ZIP 並解壓。
 2. 將包含 `plugin.yaml`、`__init__.py`、`dashboard/`、`runtime/` 的那一層資料夾命名為 `hermes-paseo`。
 3. 放入同一 Hermes profile 的 `plugins/` 目錄：預設為 `~/.hermes/plugins/hermes-paseo/`；自訂 `HERMES_HOME` 時為 `$HERMES_HOME/plugins/hermes-paseo/`。檔案須由 Hermes 服務帳戶擁有。
 4. 確認 `plugin.yaml` 直接位於該目錄，然後執行 `hermes plugins enable hermes-paseo`。
@@ -60,6 +61,8 @@ hermes plugins enable hermes-paseo
 ## 4. 容器與反向代理部署
 
 CLI 指令與設定 Origin 的指令都須在實際 Hermes 容器內，以服務帳戶和相同 `HERMES_HOME` 執行。
+
+支援內建重載介面的主機可直接使用插件頁的 **重載 Dashboard**。其他主機由管理者依下列方式處理一次。
 
 使用 s6、且 Dashboard 服務位於 `/run/service/dashboard` 的映像，可由容器管理者在容器終端重載：
 
@@ -128,7 +131,7 @@ Hermes 0.19 的首次引導為插件頁配對精靈；此版沒有公開的新�
 | 現象 | 處理方式 |
 | --- | --- |
 | 啟用後側欄沒有 Paseo | Hermes 0.19 重新整理頁面一次。 |
-| 插件 API 404／尚未載入 | 重載 Dashboard 後重新整理。 |
+| 插件 API 404／尚未載入 | 在插件頁按「重載 Dashboard」並確認；主機需先配置重載介面。 |
 | 403／Origin 被拒絕 | 確認插件已啟用及登入有效；使用服務帳戶設定精確正式 Origin。 |
 | 沒有模型或無法回覆 | 確認 Hermes ACP 已安裝，並完成 Hermes 官方模型登入／設定。 |
 | 沒有 Claude Code、Codex 或 Pi | 需先在同容器安裝與完成各官方登入，才會被插件偵測。 |

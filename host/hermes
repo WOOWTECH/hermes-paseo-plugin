@@ -1,0 +1,15 @@
+#!/opt/hermes/.venv/bin/python3
+"""Operator-installed native CLI entrypoint; only dashboard loads host control."""
+import os
+import sys
+
+if sys.argv[1:2] == ['dashboard']:
+    if os.geteuid() == 0:
+        raise SystemExit('Start Dashboard as the Hermes service account.')
+    sys.path.insert(0, '/opt/hermes-paseo-dashboard-control')
+    from hermes_cli import web_server
+    from dashboard_control import install
+    install(web_server)
+
+from hermes_cli.main import main
+sys.exit(main())

@@ -26,7 +26,7 @@ function host({ status = snapshot(), storage = new Map(), pathname = '/sessions'
   let dirty = false;
   let now = 0, timerId = 0;
   const components = new Map(), slots = new Map(), roots = new Map(), instances = new Map();
-  const timers = new Map(), events = new Map(), calls = [], navigations = [], logs = [];
+  const timers = new Map(), events = new Map(), calls = [], navigations = [], logs = [], reloads = [];
   const handlers = new Map();
   const document = {
     visibilityState: 'visible',
@@ -36,7 +36,7 @@ function host({ status = snapshot(), storage = new Map(), pathname = '/sessions'
   const window = {
     document,
     __HERMES_BASE_PATH__: basePath,
-    location: { pathname },
+    location: { pathname, reload() { reloads.push(window.location.pathname); } },
     sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
     localStorage: { getItem() { throw new Error('Forbidden localStorage read'); }, setItem() { throw new Error('Forbidden localStorage write'); } },
     history: { pushState(_state, _title, path) { window.location.pathname = path; navigations.push(path); } },
@@ -121,9 +121,10 @@ function host({ status = snapshot(), storage = new Map(), pathname = '/sessions'
     for (let i = 0; i < 25; i++) { await Promise.resolve(); flush(); }
   }
   const api = {
-    window, document, components, slots, calls, navigations, logs, storage, timers, events,
+    window, document, components, slots, calls, navigations, logs, storage, timers, events, reloads,
     status(value) { currentStatus = value; },
     handle(path, fn) { handlers.set('/api/plugins/hermes-paseo' + path, fn); },
+    hostHandle(path, fn) { handlers.set('/api/hermes-paseo-host' + path, fn); },
     async mount(kind) { roots.set(kind, { component: kind === 'header' ? slots.get('header-right') : components.get('hermes-paseo') }); dirty = true; await settle(); },
     async unmount(kind) { roots.delete(kind); dirty = true; await settle(); },
     tree(kind = 'page') { return roots.get(kind)?.tree; },
@@ -388,8 +389,9 @@ test('late model replies cannot replace a newly selected provider; models abort 
 test('404 from old hosts requires dashboard restart, has no fake success, and errors never show backend secrets', async () => {
   const app = host(); app.handle('/status', () => ({ httpError: 404 }));
   await app.mount('header'); await app.mount('page');
-  assert.match(content(app.tree()), /重新啟動 hermes dashboard/);
-  assert.match(content(app.tree()), /不需要升級映像/);
+  assert.match(content(app.tree()), /重載 Dashboard/);
+  assert.match(content(app.tree()), /一次性主機設定/);
+  assert.equal(buttonNode(app, '重載 Dashboard').props.disabled, true);
   assert.equal(count(app, '/start'), 0);
   assert.equal(buttonNode(app, '產生配對連結').props.disabled, true);
   assert.doesNotMatch(content(app.tree()), /服務已就緒/);
@@ -405,10 +407,11 @@ test('legacy fetchJSON SDK accepts exact same-origin JSON POSTs and sanitizes it
   const app = host({ raw: false }); await app.mount('page');
   app.handle('/pair', () => { throw new Error('404: secret=PRIVATE'); });
   await app.click('產生配對連結');
-  assert.match(content(app.tree()), /重新啟動 hermes dashboard/);
+  assert.match(content(app.tree()), /重載 Dashboard/);
   assert.doesNotMatch(content(app.tree()), /PRIVATE/);
   for (const call of app.calls) {
-    assert.ok(call.path.startsWith('/api/plugins/hermes-paseo/'));
+    assert.ok(call.path.startsWith('/api/plugins/hermes-paseo/') ||
+      ['/api/hermes-paseo-host/capabilities', '/api/hermes-paseo-host/reload'].includes(call.path));
     assert.equal(call.init.credentials, 'same-origin');
     if (call.init.method === 'POST') {
       assert.equal(call.init.headers['Content-Type'], 'application/json');
@@ -509,4 +512,74 @@ test('host disable/re-enable can guide a new onboarding identity while preservin
   app.window.location.pathname = '/logs';
   await app.mount('header');
   assert.equal(app.navigations.length, 2);
+});
+
+test('Dashboard reload bootstraps missing plugin API and waits for a new generation plus API readiness', async () => {
+  const app = host({ pathname: '/paseo' });
+  let accepted = false, generationReads = 0, ready = false;
+  app.handle('/status', () => ready ? snapshot() : { httpError: 404 });
+  app.hostHandle('/capabilities', () => ({ supported: true, generation: accepted && ++generationReads > 1 ? 'new' : 'old' }));
+  app.hostHandle('/reload', call => {
+    assert.equal(call.init.method, 'POST');
+    assert.equal(call.init.credentials, 'same-origin');
+    assert.deepEqual(JSON.parse(call.init.body), { confirm: true });
+    accepted = true;
+    return { ok: true, generation: 'old' };
+  });
+  await app.mount('page');
+  assert.match(content(app.tree()), /外掛 API 尚未載入/);
+  await app.click('重載 Dashboard');
+  const confirm = buttonNode(app, '確認重載');
+  confirm.props.onClick(); confirm.props.onClick(); await app.settle();
+  assert.equal(app.calls.filter(x => x.path === '/api/hermes-paseo-host/reload').length, 1);
+  await app.advance(4000);
+  assert.equal(app.reloads.length, 0, 'new host alone is insufficient while plugin API remains 404');
+  ready = true;
+  await app.advance(2000);
+  assert.deepEqual(app.reloads, ['/paseo']);
+  assert.equal(count(app, '/pair'), 0); assert.equal(count(app, '/acceptance'), 0);
+});
+
+test('Dashboard reload requires explicit confirmation; cancel and unavailable hosts do not POST', async () => {
+  const app = host();
+  app.hostHandle('/capabilities', () => ({ supported: true, generation: 'old' }));
+  await app.mount('page');
+  await app.click('重載 Dashboard'); await app.click('取消');
+  assert.equal(app.calls.filter(x => x.init.method === 'POST' && x.path.includes('hermes-paseo-host')).length, 0);
+  const unsupported = host();
+  unsupported.hostHandle('/capabilities', () => ({ httpError: 404 }));
+  await unsupported.mount('page');
+  assert.equal(buttonNode(unsupported, '重載 Dashboard').props.disabled, true);
+  assert.match(content(unsupported.tree()), /一次性主機設定/);
+});
+
+test('a disconnected reload POST is observed without retries and manual pause survives recovery', async () => {
+  const paused = snapshot({ enabled: false, phase: 'paused', daemon: { running: false, reachable: false } });
+  const app = host({ status: paused, pathname: '/paseo' });
+  let accepted = false;
+  app.hostHandle('/capabilities', () => ({ supported: true, generation: accepted ? 'new' : 'old' }));
+  app.hostHandle('/reload', () => { accepted = true; throw new Error('connection lost after acceptance'); });
+  await app.mount('page');
+  await app.click('重載 Dashboard'); await app.click('確認重載');
+  assert.deepEqual(app.reloads, ['/paseo']);
+  assert.equal(app.calls.filter(x => x.path.endsWith('/reload')).length, 1);
+  assert.equal(count(app, '/start'), 0);
+  assert.equal(JSON.parse(app.storage.get('hermes-paseo:ui:v1')).paused, true);
+});
+
+test('reload timeout never refreshes an unchanged server or retries POST; expired auth is actionable', async () => {
+  const app = host();
+  app.hostHandle('/capabilities', () => ({ supported: true, generation: 'old' }));
+  app.hostHandle('/reload', () => ({ ok: true, generation: 'old' }));
+  await app.mount('page'); await app.click('重載 Dashboard'); await app.click('確認重載');
+  await app.advance(60000);
+  assert.equal(app.reloads.length, 0);
+  assert.equal(app.calls.filter(x => x.path.endsWith('/reload')).length, 1);
+  assert.match(content(app.tree()), /尚未確認重載完成/);
+  const expired = host();
+  expired.hostHandle('/capabilities', () => ({ supported: true, generation: 'old' }));
+  expired.hostHandle('/reload', () => ({ httpError: 401 }));
+  await expired.mount('page'); await expired.click('重載 Dashboard'); await expired.click('確認重載');
+  assert.match(content(expired.tree()), /登入已過期/);
+  assert.equal(expired.reloads.length, 0);
 });
