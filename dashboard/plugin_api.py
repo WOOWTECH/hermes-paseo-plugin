@@ -116,9 +116,10 @@ class ProtectedRoute(APIRoute):
         async def handle(request):
             try:
                 check_origin(request)
-                # The old host mounts plugin routes under its launch profile. Do not
-                # silently accept a profile query that 0.19 would ignore/misroute.
-                if request.query_params:
+                # 0.22's SDK adds the launch-profile selector even for the
+                # default profile. Support that one alias only; this router
+                # never switches homes based on untrusted query parameters.
+                if list(request.query_params.multi_items()) not in ([], [('profile', 'default')]):
                     raise RequestError('INVALID_REQUEST')
                 if request.method == 'GET':
                     count = 0

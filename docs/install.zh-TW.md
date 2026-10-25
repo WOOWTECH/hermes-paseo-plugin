@@ -41,6 +41,10 @@ hermes acp --help
 
 已從 GitHub 安裝時，使用該插件卡片的 **Git pull** 更新；更新 Python 後端後同樣需重載舊版 Dashboard。已部署的主機可直接從第 5 節開始測試。
 
+從較舊 Hermes 升級後，若 Git pull 顯示 `has no owned Git checkout; reinstall from its source`，先停止 Paseo 服務，再從同一官方 repo 重新安裝並勾選 **Force reinstall** 與 **Enable after install**。原生安裝器會建立新版需要的 checkout ownership 紀錄；`plugin-data/hermes-paseo/` 保留。不要自行偽造 ownership 檔案或放寬 Git 安全檢查。
+
+Hermes 0.22 的 SDK 會自動附上 `profile=default`；0.1.4 支援這個啟動 profile 的別名，仍拒絕其他 profile 與額外 query。此版本請在 `default` profile 使用。
+
 ## 3. 安裝：CLI 或 ZIP 方式
 
 CLI 與 Web 安裝擇一。在 Hermes 使用的服務帳戶與 profile 中執行：

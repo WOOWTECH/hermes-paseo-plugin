@@ -446,9 +446,20 @@ class RouteTests(unittest.TestCase):
         self.privacy(response)
 
     def test_query_profile_cannot_cross_old_host_launch_profile(self):
-        response = self.client.get(self.prefix + '/status?profile=other')
-        self.assertEqual(response.status_code, 400)
-        self.privacy(response)
+        for query in ('profile=other', 'profile=default&profile=other', 'profile=default&extra=1', 'profile='):
+            response = self.client.get(self.prefix + '/status?' + query)
+            self.assertEqual(response.status_code, 400)
+            self.privacy(response)
+
+    def test_new_sdk_default_profile_alias_stays_in_the_launch_profile(self):
+        with patch.object(self.runtime, '_invoke', return_value={'enabled': False, 'phase': 'disabled', 'providers': []}):
+            response = self.client.get(self.prefix + '/status?profile=default')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()['phase'], 'disabled')
+        with patch.object(self.runtime, 'call', return_value={'url': 'https://app.paseo.sh/?offer=test'}) as call:
+            response = self.client.post(self.prefix + '/pair?profile=default', json={}, headers=self.origin)
+            self.assertEqual(response.status_code, 200)
+            call.assert_called_once_with('pair', {}, allow_pair=True)
 
     def test_status_shape_and_models(self):
         with patch.object(self.runtime, '_invoke', return_value={'enabled': False, 'phase': 'disabled', 'providers': []}):
