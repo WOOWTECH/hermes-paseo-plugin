@@ -1,5 +1,52 @@
 # Hermes Paseo 驗收紀錄
 
+## 0.1.4-rc.1：2026-10-25 專用服務實測
+
+公開候選版本的實作 commit 為 `5ccff6f2b64f4c0761b70be98c2a60b9695a69b7`，已經從 Hermes 原生 Plugins 頁安裝到專用測試服務。環境為 Hermes 0.22.5、Python 3.14.9、Node 26.12.1、Linux x64、s6、單一 profile、2 CPU／6 GiB RAM；受登入保護的 HTTPS Dashboard 經反向代理存取，使用本 repo 的主機 adapter。以下是此環境的證據，不代表所有 Hermes 映像或部署模板皆適用。
+
+### 已通過的真實流程
+
+| 項目 | 結果與證據範圍 |
+| --- | --- |
+| 原生 Web 安裝／更新 | Plugins Git pull 與刪除後重新安裝皆完成；檢查回應內容及實際 Git SHA。HTTP 200 且 `ok:false` 的掃描阻擋不算成功。 |
+| 初始化／配對 | 正常登入後自動進入引導、runtime 啟動、開啟官方 Paseo Connect，完成加密 relay 配對。 |
+| 正式 Paseo UI | 從 `app.paseo.sh` 建立工作區、選模型、選 Default，首輪回覆及未重複提供完整 marker 的記憶續聊皆通過；以 daemon 的新 assistant 訊息確認，未使用畫面上的 user echo 判定。 |
+| 模型／模式 | 實際列出 Hermes 模型；Default、Accept edits、Don't ask 在官方 UI 可見，三個模式透過正式 SDK 逐一切換後確認生效，再還原 Default。 |
+| 插件背景驗收 | Web POST 約 0.24 秒回傳 202；首輪／續聊真實通過。重新整理沿用同一工作，關閉提交瀏覽器及重載 Dashboard 後仍完成；UI 顯示成功，驗收 agent 與工作區均歸檔、歷史保留。 |
+| 原生 Hermes 工具 | 六個已註冊工具 handler 實測；status／models、真實 chat／continue、測試歸檔與停止／恢復皆成功。另由模型真正調用 `paseo_status`，回傳 prompt 未提供的初始化 ID，程序正常結束。 |
+| 暫停／恢復 | 手動停止後重新整理仍維持暫停；恢復後可連線。`/paseo stop` 與 `/paseo start` 均實際執行。 |
+| Dashboard 內重載 | 按插件頁「重載 Dashboard → 確認重載」，確認 generation 改變、API 恢復及頁面自動回來，無須進 PaaS。取消操作不重載。 |
+| 原生停用／移除／重裝 | 先確認背景 daemon 已停止，再停用或刪除來源。重新啟用／安裝後，關閉瀏覽器且阻止前端送 start，主機仍自行恢復；設定、安裝身分與配對資料保留。 |
+| Pod 重建 | 已測無瀏覽器的背景恢復；保留安裝身分，更新容器身分；保留必要 fsGroup，Origin 私有檔案重新掛載後仍為服務帳戶擁有且 600。此項目前的實測先於最末兩個插件修正，最終部署仍須重跑。 |
+| API 防護 | 未登入 401、跨 Origin 重載 403、非法 body 400、跨 profile／重複或多餘 query 均 400，且沒有意外重載。 |
+
+模型使用透過 Hermes 原生本機模型介面安裝的 `Qwen3.5-0.8B-Q4_K_M` CPU 模型。這是可重現的真實推論測試，不使用假的模型回覆。原生 Tool Search 對這個小模型的工具名稱與參數造成失敗，專用測試 profile 改為 eager 工具 schema 後，真正的工具調用通過；插件不會代替使用者修改模型登入或工具集白名單。先前不符合該主機 64K context 最低要求的模型被正常拒絕，沒有降低主機檢查。
+
+### 修正與自動驗證
+
+- Paseo 固定版本仍為 0.11.2，受管 runtime 依賴修訂為 `0.11.2-r2-71709cd7872f`；全新安裝的 npm runtime audit 為 0 項已知弱點。
+- 修正 profile query 相容性、登入 middleware 順序、fsGroup remount、舊容器 PID 重用、單次控制程序完成後不退出，以及 `/paseo start` 未真正啟動的問題。
+- 長時間模型驗收改為耐久背景工作，避免反向代理 HTTP 524。中斷會明確顯示未完成，不會自動重送可能付費的模型工作。
+- 文字服務預設不下載未啟用的語音模型。主機 wrapper 依 cgroup／CPU affinity 設定 llama.cpp／OpenMP 預設執行緒；明確配置的值保留。
+- 69 個 Node 測試及 70 個 Python 測試通過。React／Chromium UI 回歸覆蓋背景工作、重新整理、重載及重複提交；該組使用 mock API，與上述真實 relay／模型證據分開。
+- [此實作的五組 CI](https://github.com/WOOWTECH/hermes-paseo-plugin/actions/runs/40185856336) 全數通過，包含最低與目前 Node／Python、瀏覽器驗證及供應鏈檢查。
+- 狀態 API 的小樣本為 16 次請求、並行 4、錯誤 0；中位數約 73 ms、最大約 96 ms。這不是容量測試或 SLA。
+
+### 尚未通過與使用限制
+
+Hermes 原生「Restart Gateway」接受了工作，但實際程序失敗，不能把收到 ACK 當作重啟成功。此映像的內部啟動入口需要已登記的 PM dependency environment，目前只有舊式 in-tree 套件與依賴清單。官方 `hermes pm repair` 沿用原清單建立環境時，5 GiB 資料磁碟空間不足；尚待容量處理後重跑官方修復及 Gateway 重啟、最終 Pod 重建驗收。插件自己的 Dashboard 重載已通過，但不代替 Gateway 重啟。
+
+目前不能宣稱無條件正式上線。另有以下範圍尚未驗證：
+
+- 測試帳號尚未提供可用雲端模型登入；本次真實推論證據是上述本機模型。此 Hermes 容器未安裝 Claude Code、Codex、Pi，三者也沒有登入，不列為可用 companions。
+- 語音／聽寫未啟用、未驗收。原映像缺少部分語音解壓縮工具；需要該功能時另行部署及測試。
+- 大量並行對話、長期 soak、備份還原、跨節點故障及 SLA 未完成。
+- 主機 adapter 是指定工作負載的持久掛載；Helm 重建時仍須納入正式模板或重套 adapter，未宣稱任意平台 redeploy 都會保留。
+
+配對憑證、模型 API key、登入 cookie、對話逐字稿及測試帳號資料不放入公開驗收文件。
+
+## 歷史：0.1.2／Hermes 0.19
+
 2026-10-12；以下為 0.1.2 首次對話驗收。使用者授權實測目標為 woowtech Hermes，Hermes 0.19.0 / Python 3.13.5 / Node 22.22.3。未升級 Hermes 映像或更改既有模型登入。
 
 已使用 Hermes 的服務帳戶在 profile 專用目錄準備並啟動固定 Paseo 0.11.2 runtime。官方 ACP catalog 實測取得 13 個模型，以及 Default、Accept Edits、Don't Ask 三個模式；預設 `custom:chatgpt/gpt-5.6-sol`。

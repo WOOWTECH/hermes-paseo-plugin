@@ -1,15 +1,15 @@
 # Hermes Paseo：下載、安裝、部署與測試
 
-適用於 v0.1.3 公開預覽版。本教學將插件部署到已有的 Hermes Agent / Dashboard；Hermes 核心與模型帳號須先準備好。
+適用於 v0.1.4-rc.1 公開候選版。本教學將插件部署到已有的 Hermes Agent / Dashboard；Hermes 核心與可用的模型端點須先準備好。實測範圍與待驗項目見 [驗收紀錄](validation.md)。
 
 ## 下載網址
 
 - 原始碼：https://github.com/WOOWTECH/hermes-paseo-plugin
-- v0.1.3：https://github.com/WOOWTECH/hermes-paseo-plugin/releases/tag/v0.1.3
-- 固定版本 ZIP：https://github.com/WOOWTECH/hermes-paseo-plugin/archive/refs/tags/v0.1.3.zip
+- v0.1.4-rc.1：https://github.com/WOOWTECH/hermes-paseo-plugin/releases/tag/v0.1.4-rc.1
+- 固定版本 ZIP：https://github.com/WOOWTECH/hermes-paseo-plugin/archive/refs/tags/v0.1.4-rc.1.zip
 - Paseo 官方介面：https://app.paseo.sh
 
-公開下載不需要 GitHub token。Web / CLI 從 GitHub 安裝會取得目前 main；ZIP 固定為 v0.1.3。
+公開下載不需要 GitHub token。Web / CLI 從 GitHub 安裝會取得目前 main；ZIP 固定為 v0.1.4-rc.1。候選版不代表已完成所有正式部署環境的驗收。
 
 ## 1. 確認環境
 
@@ -39,7 +39,11 @@ hermes acp --help
 7. 若 Paseo 頁顯示後端 API 尚未載入或 404，在 Paseo 頁按 **重載 Dashboard → 確認重載**。準備好的主機會等待後端重新啟動及插件 API 恢復，再自動重新整理目前頁面。
 8. 如果重載按鈕無法使用，表示主機尚未安裝重載介面；管理者需先完成一次性 [主機設定](dashboard-control.zh-TW.md)。這個設定屬於主機部署，不會由普通插件 API 自行提升權限安裝。
 
+Hermes 0.22 的首次安裝也可能因 caution 掃描結果而拒絕安裝。本候選版包含執行 Paseo 所需的子程序呼叫與程序身分檢查；核對來源為 `WOOWTECH/hermes-paseo-plugin` 並閱讀提示後，可勾選 **Force reinstall (delete existing folder first)**，再按 Install。這個選項會替換插件來源資料夾；已安裝者請先停止 Paseo。profile 的 `plugin-data/hermes-paseo/` 保留。
+
 已從 GitHub 安裝時，使用該插件卡片的 **Git pull** 更新；更新 Python 後端後同樣需重載舊版 Dashboard。已部署的主機可直接從第 5 節開始測試。
+
+Hermes 0.22 可能在 Git pull 後先回報掃描提示，再要求確認是否套用更新。請核對 repo 與欲安裝的版本，閱讀原生視窗列出的項目後再確認。本插件為啟動 Paseo、執行背景驗收與核對程序擁有權，包含子程序呼叫及 `/proc` 讀取，可能被標示為 caution。取消確認時程式碼不會更新；HTTP 200 本身不代表已安裝新版本。更新完成後再重載 Dashboard，確認新功能與插件版本均已載入。
 
 從較舊 Hermes 升級後，若 Git pull 顯示 `has no owned Git checkout; reinstall from its source`，先停止 Paseo 服務，再從同一官方 repo 重新安裝並勾選 **Force reinstall** 與 **Enable after install**。原生安裝器會建立新版需要的 checkout ownership 紀錄；`plugin-data/hermes-paseo/` 保留。不要自行偽造 ownership 檔案或放寬 Git 安全檢查。
 
@@ -56,7 +60,7 @@ hermes plugins enable hermes-paseo
 
 若要使用固定版本 ZIP：
 
-1. 下載上述 v0.1.3 ZIP 並解壓。
+1. 下載上述 v0.1.4-rc.1 ZIP 並解壓。
 2. 將包含 `plugin.yaml`、`__init__.py`、`dashboard/`、`runtime/` 的那一層資料夾命名為 `hermes-paseo`。
 3. 放入同一 Hermes profile 的 `plugins/` 目錄：預設為 `~/.hermes/plugins/hermes-paseo/`；自訂 `HERMES_HOME` 時為 `$HERMES_HOME/plugins/hermes-paseo/`。檔案須由 Hermes 服務帳戶擁有。
 4. 確認 `plugin.yaml` 直接位於該目錄，然後執行 `hermes plugins enable hermes-paseo`。
@@ -96,6 +100,12 @@ python3 ~/.hermes/plugins/hermes-paseo/bin/configure-origin.py https://hermes.ex
 
 Hermes 頁面的模型／模式選單用於探索可用選項；實際對話設定在 Paseo 建立對話時選擇。官方 relay 不需要額外的 Paseo 密碼。配對連結可能授予存取權，請保留給自己的裝置使用。
 
+在 Hermes 修改預設模型後，既有 ACP 程序可能仍保留舊預設。先完成或停止進行中的對話，再在 Paseo 插件頁「停止服務 → 恢復服務」，重新取得模型清單。官方 Paseo 的模型按鈕位於訊息輸入區，文字可能是「Select model」或已選模型的名稱；選定模型後才顯示權限模式按鈕。不要把「模型清單可讀取」當作帳號已登入或模型已回覆的證據。
+
+可依 Hermes 官方流程使用本機模型，無需雲端 API Key；仍須符合映像所要求的 context 及 CPU／記憶體限制。部分 Woow 映像要求至少 64K context，低於門檻會在呼叫模型前被拒絕；應選用符合門檻的模型及真實服務視窗。
+
+此插件的文字對話服務預設不啟用語音模型下載；既有明確的語音啟用設定會保留。要使用 dictation／voice mode，請另行配置 Paseo 語音服務、解壓工具及模型空間，並完成語音驗收。文字配對及對話測試不包含語音功能。
+
 若其他插件的引導視窗擋住操作，可使用該視窗的「稍後設定」，再進入 Paseo。
 
 ## 6. 測試功能
@@ -103,18 +113,20 @@ Hermes 頁面的模型／模式選單用於探索可用選項；實際對話設�
 在 Paseo 送出：
 
 ```text
-請記住 WOOW_TEST_001，只回覆這段文字，不要使用工具或修改檔案。
+請記住 WOOW_TEST_001。不要使用工具或修改檔案，只回覆 WOOW_TEST_001。
 ```
 
 收到回覆後再送出：
 
 ```text
-我剛才要你記住什麼？只回覆那段文字，不要使用工具。
+我剛才讓你記住以 WOOW_TEST_ 開頭的完整代碼是什麼？只回覆完整代碼，不要使用工具。
 ```
 
 兩輪都回覆 `WOOW_TEST_001`，才算完成首輪與記憶續聊測試。也可在 Hermes 插件頁按 **執行真實對話驗收（會消耗帳號額度）**，檢查結果；此按鈕使用後端代理的預設設定，不使用探索選單的選擇。
 
-驗收會使用真實模型帳號額度。自動驗收完成後歸檔此次測試代理並保留歷史；手動建立的測試對話由使用者在 Paseo 歸檔。
+0.1.4 的驗收會立即建立背景工作，頁面顯示「驗收進行中，等待結果…」並輪詢結果。可重新整理、關閉頁面或重載 Dashboard 後回來查看；同一 profile 進行中的工作會被沿用，不會因重複點擊或重新整理再開一次模型呼叫。只有結果確認首輪、續聊及測試代理清理均成功，才顯示通過。容器被終止時，未完成的工作會標示中斷；不會自動重新送出可能產生費用的請求。
+
+驗收會使用真實模型帳號額度。自動驗收完成後歸檔此次建立的測試代理及專用工作區，保留歷史。歸檔未確認時不會回報驗收通過；手動建立的測試對話由使用者在 Paseo 歸檔。
 
 要在 Hermes 對話使用原生工具，若 profile 限定工具集，將 `hermes_paseo` 納入需要使用的工具集；單次 CLI 測試可用：
 
@@ -122,11 +134,15 @@ Hermes 頁面的模型／模式選單用於探索可用選項；實際對話設�
 hermes chat --toolsets hermes_paseo --query "請用 paseo_status 查看連線狀態"
 ```
 
+Hermes 的 Tool Search 會透過 `tool_search`／`tool_describe`／`tool_call` 間接調用插件工具。專用的小模型測試 profile 若只有少量工具，可在 Hermes 設定使用 `tools.tool_search.enabled: off`，直接載入工具 schema。這是測試 profile 的明確設定，插件安裝及更新不會代為更動；工具很多的環境應依模型能力與 context 預算保留原設定。設定方式見 [Hermes Tool Search 官方說明](https://hermes-agent.nousresearch.com/docs/user-guide/features/tool-search)。
+
 ## 7. 停止、恢復及移除
 
 在 Paseo 插件頁按 **停止服務**，確認停止後重新整理；服務應保持停止。再按 **恢復服務**，確認回到就緒。這個操作保留配對設定與對話資料。
 
-Hermes 0.19 沒有插件卸載 callback。要停用／移除時，先用插件頁或 `/paseo stop` 停止 daemon，確認 `/paseo status` 的 `daemon.running=false`，再到 Plugins 停用／移除。
+配置 0.1.4 主機介面時，Hermes Web 的 Disable／移除會先停止 daemon，確認後才執行原生操作。Hermes 0.22 的移除可能顯示為垃圾桶圖示，按下後須在確認視窗按 Delete。重新安裝同一 repo 並開啟 Enable after install，會沿用 plugin-data 中的配對及安裝識別。
+
+沒有主機介面、或使用 CLI 停用／移除時，先用插件頁或 `/paseo stop` 停止 daemon，確認 `/paseo status` 的 `daemon.running=false`，再停用／移除。Hermes 0.19 沒有插件卸載 callback。
 
 Hermes 0.19 的首次引導為插件頁配對精靈；此版沒有公開的新建原生聊天 API，因此不宣稱啟用後會自動建立新的原生 Hermes 聊天。
 
@@ -136,8 +152,11 @@ Hermes 0.19 的首次引導為插件頁配對精靈；此版沒有公開的新�
 | --- | --- |
 | 啟用後側欄沒有 Paseo | Hermes 0.19 重新整理頁面一次。 |
 | 插件 API 404／尚未載入 | 在插件頁按「重載 Dashboard」並確認；主機需先配置重載介面。 |
+| Restart Gateway 顯示已啟動但未完成 | 查看工作最終狀態；若為 `no dependency environment is committed`，須由管理者處理官方 PM 環境及修復所需空間，詳見 [主機說明](dashboard-control.zh-TW.md)。 |
 | 403／Origin 被拒絕 | 確認插件已啟用及登入有效；使用服務帳戶設定精確正式 Origin。 |
 | 沒有模型或無法回覆 | 確認 Hermes ACP 已安裝，並完成 Hermes 官方模型登入／設定。 |
+| `PROVIDER_TURN_FAILED` | 到 Hermes 的 Logs 檢查該次錯誤；可能是模型登入、context 不足或推理服務失敗。修正後重新執行首輪／續聊，不能僅依 ready 狀態判定成功。 |
+| 切換預設模型後仍出現舊模型 | 完成進行中的對話後，停止並恢復 Paseo 服務，讓 ACP 重新載入。 |
 | 沒有 Claude Code、Codex 或 Pi | 需先在同容器安裝與完成各官方登入，才會被插件偵測。 |
 | Hermes 對話找不到插件工具 | 檢查 profile 的工具集白名單是否包含 `hermes_paseo`。 |
 

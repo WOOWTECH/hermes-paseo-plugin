@@ -31,6 +31,8 @@ python3 bin/install-dashboard-control-k8s.py \
 
 已啟用插件在主機啟動時自動準備 runtime；已啟用的服務意外中斷時，在 Dashboard 受管程序內恢復，不需要開啟瀏覽器。使用者手動停止的狀態仍保留。從 Hermes Web 停用或移除此插件時，主機會先停止其擁有的 Paseo daemon，再讓原生操作繼續；停止尚未確認時回傳錯誤，保留插件來源供重試。從 CLI 移除仍須先執行 `/paseo stop`。
 
+主機 CLI wrapper 會依 Linux cgroup 的 CPU quota 及 CPU affinity，設定本機 llama.cpp／OpenMP 的預設執行緒數，避免以整台節點的核心數壓滿小型容器。HTTP 執行緒預設最多 8；已明確設定的 `LLAMA_ARG_THREADS`、`LLAMA_ARG_THREADS_BATCH`、`LLAMA_ARG_THREADS_HTTP`、`OMP_NUM_THREADS` 會保留。這些限制適用於經 wrapper 啟動並繼承環境的程序；其他入口的模型服務仍須配置自己的資源限制。
+
 ## 建入 s6 映像
 
 也可用 `host/Dockerfile` 將 adapter 建入相容的原映像：
@@ -51,3 +53,9 @@ docker build --build-arg HERMES_BASE_IMAGE=YOUR_PINNED_S6_HERMES_IMAGE \
 - 重複點擊只會接受一次；斷線後先觀察，不會自動再送重載。
 - 超過 60 秒仍未確認成功，頁面顯示未完成，保留可檢查的狀態，不宣稱重載成功。
 - 多 profile、systemd、非 s6 映像與其他 CLI 位置不在此 adapter 的支援範圍。
+
+## 與 Restart Gateway 的差異
+
+安裝或更新此插件的 Dashboard 後端時，使用 Paseo 頁的「重載 Dashboard」。該操作已在真實 s6 主機驗證，不需要跳至 PaaS。原生頁面的「Restart Gateway」會重新載入 Gateway／工具處理程序，屬於另一個操作；必須查看該工作最後的退出狀態，收到「已啟動」不代表重啟完成。
+
+2026-10-25 的 Hermes 0.22.5 測試映像尚缺 PM 已登記的依賴環境，原生 Gateway 重啟回報 `no dependency environment is committed`。官方 `hermes pm repair` 需要足夠空間建立完整環境；5 GiB 測試磁碟在該映像不足，容量及修復驗收尚未完成。遇到相同訊息，先由管理者處理官方依賴環境與容量，再驗證原生重啟。不要因為按鈕接受請求，就認定程序已經換新。
