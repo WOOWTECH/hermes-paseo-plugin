@@ -13,10 +13,12 @@ export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${XDG_CACHE_HOME:-$HOME/.cach
 exec "$PYTHON" -P -c 'import os,site,sys
 sys.argv[0]="hermes"
 site.addsitedir(os.environ["HERMES_SITE"])
+sys.path.insert(0,"/opt/hermes-paseo-dashboard-control")
+from resource_limits import configure_cpu_environment
+configure_cpu_environment()
 if sys.argv[1:2]==["dashboard"]:
     if os.geteuid()==0:
         raise SystemExit("Start Dashboard as the Hermes service account.")
-    sys.path.insert(0,"/opt/hermes-paseo-dashboard-control")
     from hermes_cli import web_server
     from dashboard_control import install
     install(web_server)

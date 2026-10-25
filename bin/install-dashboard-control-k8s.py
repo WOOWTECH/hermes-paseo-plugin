@@ -22,7 +22,7 @@ def main():
                         help='Verify the existing service-owned profile; retain fsGroup and repair private Origin at startup.')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    data = {name: (root / 'host' / name).read_text() for name in ('hermes', 'dashboard_control.py', 'profile_lifecycle.py')}
+    data = {name: (root / 'host' / name).read_text() for name in ('hermes', 'dashboard_control.py', 'profile_lifecycle.py', 'resource_limits.py')}
     digest = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:12]
     volume = 'hermes-paseo-dashboard-control'
     config_name = f'hermes-paseo-dashboard-control-{digest}'
