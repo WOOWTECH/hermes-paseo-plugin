@@ -12,7 +12,7 @@ import { assistantEntries, latestAssistantCursor, chatResult } from './chat-resu
 import {singleFlight,daemonStatusWindow} from './single-flight.mjs';
 import {usingAcceptanceAgent} from './acceptance-agent.mjs';
 import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,RUNTIME_REVISION} from './runtime-layout.mjs';
-import {demonstrablyReusedPid} from './daemon-identity.mjs';
+import {demonstrablyReusedPid,linuxContainerIdentity,instanceFromPreviousContainer} from './daemon-identity.mjs';
 export { locations, readState, updateState } from './state.mjs';
 export const PASEO_VERSION = '0.11.2';
 const PROVIDERS = ['hermes', 'claude', 'codex', 'pi'];
@@ -75,14 +75,15 @@ async function verifyInstanceOwnership(instance) {
 async function releaseReusedPid(instance) {
   // Caller holds the runtime lock. Do not signal a process that reused a PID
   // from a previous container; only retire this profile's unchanged stale lock.
-  if (!ownsHome() || instance?.uid !== process.getuid?.() || !demonstrablyReusedPid(instance)) return false;
+  const stale = value => instanceFromPreviousContainer(value, readState()) || demonstrablyReusedPid(value);
+  if (!ownsHome() || instance?.uid !== process.getuid?.() || !stale(instance)) return false;
   const file = path.join(locations().paseoHome, 'paseo.pid');
   assertSafePath(file);
   const info = fs.lstatSync(file);
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== process.getuid?.()) return false;
   const locks = await serverModule('dist/server/server/pid-lock.js');
   const current = await locks.getPidLockInfo(locations().paseoHome);
-  if (!current || current.pid !== instance.pid || current.startedAt !== instance.startedAt || !demonstrablyReusedPid(current)) return false;
+  if (!current || current.pid !== instance.pid || current.startedAt !== instance.startedAt || !stale(current)) return false;
   await locks.releasePidLock(locations().paseoHome, { ownerPid: current.pid, startedAt: current.startedAt });
   return (await locks.getPidLockInfo(locations().paseoHome)) === null;
 }
@@ -171,13 +172,13 @@ export async function activate(options = {}) {
               reload.restartRequiredPaths.length || reload.overrideControlledPaths.some(p => p === 'agents.providers' || p.startsWith('agents.providers.')) ||
               (needsApply && !reload.appliedPaths.includes('agents.providers'))) throw new RuntimeError('RESTART_REQUIRED');
         } catch { throw new RuntimeError('RESTART_REQUIRED'); }
-        updateState({ phase: 'running', providerReloadPending: null, daemonPid: existing.pid, daemonStartedAt: existing.startedAt });
+        updateState({ phase: 'running', providerReloadPending: null, daemonPid: existing.pid, daemonStartedAt: existing.startedAt, daemonContainerIdentity: linuxContainerIdentity() });
       } else {
         const port = await choosePort(locations().port); await writeConfig(port, launchers);
         updateState({ phase: 'starting' });
         await cli(['daemon', 'start', '--timeout', '90'], { timeoutMs: 105000 });
         const instance = await currentInstance(); await verifyInstanceOwnership(instance);
-        updateState({ phase: 'running', providerReloadPending: null, daemonPid: instance.pid, daemonStartedAt: instance.startedAt });
+        updateState({ phase: 'running', providerReloadPending: null, daemonPid: instance.pid, daemonStartedAt: instance.startedAt, daemonContainerIdentity: linuxContainerIdentity() });
       }
       const result = await status();
       if (!result.daemon.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
@@ -201,7 +202,7 @@ export async function deactivate() {
       try { await control.stopDaemonInstance(locations().paseoHome, { instance, timeoutMs: 20000, force: false }); }
       catch (error) { throw new RuntimeError(safeCode(error)); }
     }
-    updateState({ phase: 'disabled', daemonPid: null, daemonStartedAt: null });
+    updateState({ phase: 'disabled', daemonPid: null, daemonStartedAt: null, daemonContainerIdentity: null });
     return status();
   });
 }

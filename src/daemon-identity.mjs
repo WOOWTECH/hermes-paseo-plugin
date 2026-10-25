@@ -22,3 +22,20 @@ export function demonstrablyReusedPid(instance, birth = linuxProcessBirth(instan
   const recorded = Date.parse(instance?.startedAt);
   return Number.isFinite(birth) && Number.isFinite(recorded) && birth > recorded + 60000;
 }
+
+export function linuxContainerIdentity() {
+  if (process.platform !== 'linux') return null;
+  try {
+    const boot = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    const stat = fs.readFileSync('/proc/1/stat', 'utf8');
+    const start = stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19];
+    return /^[0-9a-f-]{36}$/.test(boot) && /^\d+$/.test(start) ? `${boot}:${start}` : null;
+  } catch { return null; }
+}
+
+export function instanceFromPreviousContainer(instance, state, current = linuxContainerIdentity()) {
+  return typeof current === 'string' && typeof state?.daemonContainerIdentity === 'string' &&
+    /^[0-9a-f-]{36}:\d+$/.test(state.daemonContainerIdentity) &&
+    state.daemonContainerIdentity !== current && state.daemonPid === instance?.pid &&
+    state.daemonStartedAt === instance?.startedAt;
+}

@@ -116,6 +116,11 @@ class LifecycleMiddlewareTests(unittest.TestCase):
         self.life.stop_for_disable = lambda record: self.order.append('stopped')
         self.life.mark_disabled = lambda: self.order.append('recorded')
         app = FastAPI()
+        @app.middleware('http')
+        async def native_auth_gate(request, call_next):
+            if request.headers.get('x-test-session') == 'valid':
+                request.state.session = 'verified-by-native-gate'
+            return await call_next(request)
         @app.post('/api/dashboard/agent-plugins/hermes-paseo/disable')
         def disable():
             self.order.append('disabled')
@@ -125,7 +130,7 @@ class LifecycleMiddlewareTests(unittest.TestCase):
             self.order.append('removed')
             return {'ok': True}
         def auth(request):
-            if request.headers.get('x-test-session') != 'valid':
+            if getattr(request.state, 'session', None) != 'verified-by-native-gate':
                 raise HTTPException(401)
         server = SimpleNamespace(app=app, _require_token=auth)
         module.install(server, enabled=lambda: True, public_origin=lambda: 'https://hermes.test',

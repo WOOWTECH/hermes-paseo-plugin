@@ -19,6 +19,8 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from starlette.background import BackgroundTask
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 PREFIX = '/api/hermes-paseo-host'
 HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
@@ -184,7 +186,6 @@ def install(server, enabled=None, public_origin=None, control=None, lifecycle=No
                     with suppress(asyncio.CancelledError):
                         await task
         server.app.router.lifespan_context = lifespan
-        @server.app.middleware('http')
         async def stop_before_removal(request, call_next):
             changing = ((request.method == 'POST' and request.url.path == '/api/dashboard/agent-plugins/hermes-paseo/disable')
                         or (request.method == 'DELETE' and request.url.path == '/api/dashboard/agent-plugins/hermes-paseo'))
@@ -208,4 +209,9 @@ def install(server, enabled=None, public_origin=None, control=None, lifecycle=No
             if changing and 200 <= response.status_code < 300:
                 await asyncio.to_thread(lifecycle.mark_disabled)
             return response
+        # Hermes versions register their auth gate at different startup stages.
+        # Place this control inside every existing user middleware so a verified
+        # native session exists before _require_token is evaluated. Gates added
+        # later also stay outside it through Starlette's prepend semantics.
+        server.app.user_middleware.append(Middleware(BaseHTTPMiddleware, dispatch=stop_before_removal))
     server.app.state.hermes_paseo_host_installed = True

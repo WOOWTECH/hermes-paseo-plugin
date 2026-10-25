@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 import { locations, readState, updateState, withRuntimeLock, processIdentity } from '../src/state.mjs';
 import { runProcess } from '../src/process.mjs';
 import { activate, deactivate, status, listModels } from '../src/runtime.mjs';
-import { demonstrablyReusedPid, linuxProcessBirth } from '../src/daemon-identity.mjs';
+import { demonstrablyReusedPid, linuxProcessBirth, linuxContainerIdentity, instanceFromPreviousContainer } from '../src/daemon-identity.mjs';
 
 function fixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-paseo-runtime-'));
@@ -104,6 +104,17 @@ test('stale lock from an earlier container retires without signalling the unrela
     assert.equal(demonstrablyReusedPid({...record,startedAt:new Date().toISOString()}),false);
     const result=await deactivate();
     assert.equal(result.phase,'disabled');assert.equal(fs.existsSync(path.join(loc.paseoHome,'paseo.pid')),false);assert.ok(processIdentity(child.pid));
+    // A fast restart must not depend on a wall-clock grace period. Namespace
+    // evidence is valid only for the exact PID/timestamp previously recorded.
+    const recent={...record,startedAt:new Date().toISOString()};
+    const oldNamespace='00000000-0000-0000-0000-000000000000:123';
+    updateState({daemonPid:recent.pid,daemonStartedAt:recent.startedAt,daemonContainerIdentity:oldNamespace});
+    fs.writeFileSync(path.join(loc.paseoHome,'paseo.pid'),JSON.stringify(recent));
+    assert.ok(linuxContainerIdentity());
+    assert.equal(instanceFromPreviousContainer(recent,readState()),true);
+    assert.equal(instanceFromPreviousContainer({...recent,pid:recent.pid+1},readState()),false);
+    await deactivate();
+    assert.equal(fs.existsSync(path.join(loc.paseoHome,'paseo.pid')),false);assert.ok(processIdentity(child.pid));
   } finally {child.kill('SIGTERM');f.close();}
 });
 
