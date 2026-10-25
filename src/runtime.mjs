@@ -13,6 +13,7 @@ import {singleFlight,daemonStatusWindow} from './single-flight.mjs';
 import {usingAcceptanceAgent} from './acceptance-agent.mjs';
 import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,RUNTIME_REVISION} from './runtime-layout.mjs';
 import {demonstrablyReusedPid,linuxContainerIdentity,instanceFromPreviousContainer} from './daemon-identity.mjs';
+import {managedFeatures} from './daemon-config.mjs';
 export { locations, readState, updateState } from './state.mjs';
 export const PASEO_VERSION = '0.11.2';
 const PROVIDERS = ['hermes', 'claude', 'codex', 'pi'];
@@ -126,7 +127,7 @@ async function writeConfig(port, launchers) {
     ...config, $schema: 'https://paseo.sh/schemas/paseo.config.v1.json', version: 1,
     daemon: { ...config.daemon, ...(name?{name}:{}), listen: `127.0.0.1:${port}`, hostnames: ['localhost', '127.0.0.1', '.localhost'], relay: { ...config.daemon?.relay, enabled: true }, mcp: { ...config.daemon?.mcp, enabled: true } },
     agents: { ...config.agents, providers, metadataGeneration: config.agents?.metadataGeneration || { providers: [] } },
-    features: { ...config.features, webUi: { ...config.features?.webUi, enabled: true } },
+    features: managedFeatures(config.features),
     log: { ...config.log, console: { level: 'warn' }, file: { level: 'warn', path: 'daemon.log', rotate: { maxSize: '5m', maxFiles: 2 } } },
   };
   const { savePersistedConfig } = await serverModule('dist/server/server/config.js');
