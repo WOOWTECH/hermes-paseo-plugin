@@ -42,7 +42,7 @@ jobs:
       - name: Install unit-test dependencies in /tmp
         run: |
           python -m venv /tmp/hermes-paseo-unit-venv
-          /tmp/hermes-paseo-unit-venv/bin/python -m pip install 'fastapi>=0.115,<0.116' 'httpx>=0.28,<0.29' 'PyYAML>=6,<7'
+          /tmp/hermes-paseo-unit-venv/bin/python -m pip install fastapi==0.115.14 httpx==0.28.1 PyYAML==6.0.3
           echo '/tmp/hermes-paseo-unit-venv/bin' >> "$GITHUB_PATH"
       - run: node --test tests/*.test.mjs
       - run: python -m unittest discover -s tests -p 'test_*.py'

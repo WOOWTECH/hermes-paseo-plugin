@@ -498,6 +498,17 @@ if __name__ == '__main__':
 
 
 class NativeCommandTests(unittest.TestCase):
+    def test_start_command_invokes_the_same_profile_bridge_and_keeps_acp_guard(self):
+        runtime = unittest.mock.Mock()
+        runtime.call.return_value = {'phase': 'installing', 'enabled': True}
+        with patch.object(native.bridge, 'get_bridge', return_value=runtime):
+            self.assertEqual(json.loads(native._setup_command('start'))['phase'], 'installing')
+            runtime.call.assert_called_once_with('start', {})
+            runtime.reset_mock()
+            with patch.dict(os.environ, {'HERMES_PASEO_ACP_CHILD': '1'}):
+                self.assertEqual(json.loads(native._setup_command('start'))['code'], 'INVALID_REQUEST')
+                runtime.call.assert_not_called()
+
     def test_stop_and_status_call_profile_bridge(self):
         runtime = unittest.mock.Mock()
         runtime.call.return_value = {'phase': 'disabled', 'daemon': {'running': False}}

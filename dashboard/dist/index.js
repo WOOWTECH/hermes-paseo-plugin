@@ -80,7 +80,8 @@
       provider: text(row.provider, ""), passed: row.passed === true,
       first: row.firstReply === true || !!(row.firstReply && row.firstReply.passed === true),
       followup: row.followup === true || !!(row.followup && row.followup.passed === true),
-      cleanup: row.cleanup === true || !!(row.cleanup && row.cleanup.archived === true)
+      cleanup: row.cleanup === true || !!(row.cleanup && row.cleanup.archived === true && row.cleanup.workspaceArchived !== false),
+      workspaceArchived: !!(row.cleanup && row.cleanup.workspaceArchived === true)
     })) };
   }
   function normalizeJob(value) {
@@ -580,7 +581,7 @@
           h("strong", null, snapshot.acceptance.passed ? "後端回報：真實對話驗收通過" : "真實對話驗收未全部通過；請確認代理的官方登入與服務狀態。"),
           h("ul", null, snapshot.acceptance.providers.map((row, index) => h("li", { key: index },
             ((status ? status.providers : []).find(provider => provider.provider === row.provider) || {}).label || row.provider,
-            "：", row.passed ? "通過首輪與續聊驗收" : "未通過", row.cleanup ? "；測試代理已清理" : "；請檢查測試代理清理狀態"))))));
+            "：", row.passed ? "通過首輪與續聊驗收" : "未通過", row.cleanup ? "；測試代理已清理" : "；請檢查測試清理狀態", row.workspaceArchived ? "，工作區已歸檔" : ""))))));
   }
   registry.register("hermes-paseo", Page);
   if (typeof registry.registerSlot === "function") registry.registerSlot("hermes-paseo", "header-right", HeaderGuide);

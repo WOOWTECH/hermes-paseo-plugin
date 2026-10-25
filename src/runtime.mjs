@@ -10,7 +10,7 @@ import { resolveProviderLaunchers, configureProviders } from './provider-launche
 import { providerReplyError } from './provider-reply.mjs';
 import { assistantEntries, latestAssistantCursor, chatResult } from './chat-result.mjs';
 import {singleFlight,daemonStatusWindow} from './single-flight.mjs';
-import {usingAcceptanceAgent} from './acceptance-agent.mjs';
+import {usingAcceptanceAgent,usingAcceptanceWorkspace} from './acceptance-agent.mjs';
 import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,RUNTIME_REVISION} from './runtime-layout.mjs';
 import {demonstrablyReusedPid,linuxContainerIdentity,instanceFromPreviousContainer} from './daemon-identity.mjs';
 import {managedFeatures} from './daemon-config.mjs';
@@ -289,9 +289,8 @@ export async function acceptance(options = {}) {
       row.model = model; row.modeId = modeId || null;
       await withClient(async client => {
         const marker = `HERMES_PASEO_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
-        const workspace = await client.createWorkspace({ source: { kind: 'directory', path: cwd } });
-        if (!workspace.workspace?.id) throw new RuntimeError('WORKSPACE_CREATE_FAILED');
-        await usingAcceptanceAgent(client,{ provider, model, modeId, cwd, workspaceId: workspace.workspace.id, title: `Hermes Paseo ${provider} connection check`, initialPrompt: `Connection check only. Do not use tools or edit files. Remember ${marker}. Reply with exactly ${marker}.`, labels: { 'hermes-paseo-acceptance': 'true' } },row,async agent=>{
+        await usingAcceptanceWorkspace(client,{source:{kind:'directory',path:cwd}},row,async workspace=>{
+        await usingAcceptanceAgent(client,{ provider, model, modeId, cwd, workspaceId: workspace.id, title: `Hermes Paseo ${provider} connection check`, initialPrompt: `Connection check only. Do not use tools or edit files. Remember ${marker}. Reply with exactly ${marker}.`, labels: { 'hermes-paseo-acceptance': 'true' } },row,async agent=>{
         const first = await client.waitForFinish(agent.id, timeoutMs);
         if (first.status !== 'idle') throw new RuntimeError(first.status === 'permission' ? 'PERMISSION_REQUIRED' : first.status === 'timeout' ? 'PROVIDER_TIMEOUT' : 'PROVIDER_TURN_FAILED');
         const firstEntries = await assistantEntries(client, agent.id);
@@ -306,6 +305,7 @@ export async function acceptance(options = {}) {
         if (providerReplyError(followup)) throw new RuntimeError(providerReplyError(followup));
         row.passed = row.firstReply && row.followup;
         });
+        });
       }, timeoutMs * 2 + 30000);
     } catch (error) { row.code = safeCode(error); }
     results.push(row);
@@ -313,7 +313,7 @@ export async function acceptance(options = {}) {
     if (options.onProgress) await options.onProgress({ ...row });
   }
   const merged = [...previous.filter(row => !selectedProviders.includes(row.provider)), ...results];
-  const result = { checkedAt: new Date().toISOString(), passed: selectedProviders.every(provider => merged.some(row => row.provider === provider && row.passed && row.cleanup?.archived!==false)), providers: merged };
+  const result = { checkedAt: new Date().toISOString(), passed: selectedProviders.every(provider => merged.some(row => row.provider === provider && row.passed && row.cleanup?.archived!==false && row.cleanup?.workspaceArchived!==false)), providers: merged };
   updateState({ acceptance: result }); return result;
 }
 function chatInput(message) {

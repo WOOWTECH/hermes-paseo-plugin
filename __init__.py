@@ -73,7 +73,7 @@ def _session_start(ctx, session_id=None, platform=None, **kwargs):
 
 def _setup_command(raw_args=''):
     action = raw_args.strip().lower() if isinstance(raw_args, str) else ''
-    if action in ('status', 'stop'):
+    if action in ('status', 'start', 'stop'):
         return _handler(action)({})
     return SETUP_GUIDANCE
 
@@ -111,7 +111,7 @@ def register(ctx):
     command = getattr(ctx, 'register_command', None)
     if callable(command):
         command('paseo', _setup_command, description='Paseo setup; stop before disabling or removing this plugin.',
-                args_hint='[status|stop]')
+                args_hint='[status|start|stop]')
     prompt = getattr(ctx, 'register_system_prompt_section', None)
     if callable(prompt):
         prompt('hermes-paseo.setup', _prompt_guidance, max_chars=768)
