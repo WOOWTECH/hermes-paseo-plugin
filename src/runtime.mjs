@@ -4,7 +4,7 @@ import net from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { locations, readState, updateState, atomicJson, privateDirectory, withRuntimeLock, processIdentity, RuntimeError } from './state.mjs';
+import { locations, readState, updateState, atomicJson, privateDirectory, withRuntimeLock, processIdentity, RuntimeError, assertSafePath } from './state.mjs';
 import { findExecutable, runProcess } from './process.mjs';
 import { resolveProviderLaunchers, configureProviders } from './provider-launchers.mjs';
 import { providerReplyError } from './provider-reply.mjs';
@@ -12,6 +12,7 @@ import { assistantEntries, latestAssistantCursor, chatResult } from './chat-resu
 import {singleFlight,daemonStatusWindow} from './single-flight.mjs';
 import {usingAcceptanceAgent} from './acceptance-agent.mjs';
 import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,RUNTIME_REVISION} from './runtime-layout.mjs';
+import {demonstrablyReusedPid} from './daemon-identity.mjs';
 export { locations, readState, updateState } from './state.mjs';
 export const PASEO_VERSION = '0.11.2';
 const PROVIDERS = ['hermes', 'claude', 'codex', 'pi'];
@@ -70,6 +71,20 @@ async function verifyInstanceOwnership(instance) {
       if (!supervisor || executable !== expectedNode || instance.heartbeat !== true || !env.includes(`PASEO_HOME=${locations().paseoHome}`)) throw new RuntimeError('DAEMON_NOT_OWNED');
     } catch { throw new RuntimeError('DAEMON_NOT_OWNED'); }
   }
+}
+async function releaseReusedPid(instance) {
+  // Caller holds the runtime lock. Do not signal a process that reused a PID
+  // from a previous container; only retire this profile's unchanged stale lock.
+  if (!ownsHome() || instance?.uid !== process.getuid?.() || !demonstrablyReusedPid(instance)) return false;
+  const file = path.join(locations().paseoHome, 'paseo.pid');
+  assertSafePath(file);
+  const info = fs.lstatSync(file);
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== process.getuid?.()) return false;
+  const locks = await serverModule('dist/server/server/pid-lock.js');
+  const current = await locks.getPidLockInfo(locations().paseoHome);
+  if (!current || current.pid !== instance.pid || current.startedAt !== instance.startedAt || !demonstrablyReusedPid(current)) return false;
+  await locks.releasePidLock(locations().paseoHome, { ownerPid: current.pid, startedAt: current.startedAt });
+  return (await locks.getPidLockInfo(locations().paseoHome)) === null;
 }
 async function installRuntime() {
   privateDirectory(locations().runtimeDir);
@@ -136,7 +151,11 @@ export async function activate(options = {}) {
     try {
       if (Number(process.versions.node.split('.')[0]) < 22) throw new RuntimeError('NODE_VERSION_UNSUPPORTED');
       await installRuntime();
-      const existing = await currentInstance(); const launchers = await detectLaunchers({ installMissing: false });
+      let existing = await currentInstance(); const launchers = await detectLaunchers({ installMissing: false });
+      if (existing) {
+        try { await verifyInstanceOwnership(existing); }
+        catch (error) { if (await releaseReusedPid(existing)) existing = null; else throw error; }
+      }
       if (existing) {
         await verifyInstanceOwnership(existing);
         if(instanceNeedsRuntimeRestart(existing)) {
@@ -170,7 +189,11 @@ export async function activate(options = {}) {
 export async function deactivate() {
   return withRuntimeLock(async () => {
     updateState({ desiredEnabled: false });
-    const instance = await currentInstance();
+    let instance = await currentInstance();
+    if (instance) {
+      try { await verifyInstanceOwnership(instance); }
+      catch (error) { if (await releaseReusedPid(instance)) instance = null; else throw error; }
+    }
     if (instance) {
       await verifyInstanceOwnership(instance);
       const control = await controlModule();

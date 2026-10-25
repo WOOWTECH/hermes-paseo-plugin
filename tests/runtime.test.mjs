@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import { locations, readState, updateState, withRuntimeLock, processIdentity } from '../src/state.mjs';
 import { runProcess } from '../src/process.mjs';
 import { activate, deactivate, status, listModels } from '../src/runtime.mjs';
+import { demonstrablyReusedPid, linuxProcessBirth } from '../src/daemon-identity.mjs';
 
 function fixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-paseo-runtime-'));
@@ -83,6 +84,27 @@ test('missing runtime reports clean state and invalid provider never opens conne
     const s=await status();assert.equal(s.installed,false);assert.equal(s.daemon.running,false);assert.equal(s.chatVerified,false);
     await assert.rejects(listModels('unrecognized'),e=>e.code==='INVALID_PROVIDER');
   }finally{f.close()}
+});
+
+test('stale lock from an earlier container retires without signalling the unrelated live PID', async () => {
+  const f=fixture();const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
+  try {
+    const loc=locations();const state=updateState({desiredEnabled:true});fs.mkdirSync(loc.paseoHome,{recursive:true});
+    fs.writeFileSync(path.join(loc.paseoHome,'.hermes-paseo-owner.json'),JSON.stringify({installationId:state.installationId,home:loc.paseoHome}));
+    const record={pid:child.pid,uid:process.getuid(),startedAt:'2000-01-01T00:00:00.000Z',heartbeat:true,listen:'127.0.0.1:6769'};
+    fs.writeFileSync(path.join(loc.paseoHome,'paseo.pid'),JSON.stringify(record));
+    const pkg=path.join(loc.runtimeDir,'node_modules/@getpaseo/server');fs.mkdirSync(path.join(pkg,'dist/server/server'),{recursive:true});
+    fs.mkdirSync(path.join(loc.runtimeDir,'node_modules/@getpaseo/cli'),{recursive:true});fs.writeFileSync(path.join(loc.runtimeDir,'node_modules/@getpaseo/cli/package.json'),JSON.stringify({version:'0.11.2'}));
+    fs.writeFileSync(path.join(pkg,'package.json'),JSON.stringify({type:'module'}));
+    fs.writeFileSync(path.join(pkg,'dist/server/server/daemon-instance.js'),'import fs from "node:fs";export async function readDaemonInstance(home){try{return JSON.parse(fs.readFileSync(home+"/paseo.pid","utf8"))}catch{return null}};export async function stopDaemonInstance(){throw new Error("must never signal a reused PID")};');
+    fs.writeFileSync(path.join(pkg,'dist/server/server/pid-lock.js'),'import fs from "node:fs";export async function getPidLockInfo(home){try{return JSON.parse(fs.readFileSync(home+"/paseo.pid","utf8"))}catch{return null}};export async function releasePidLock(home,expected){const x=await getPidLockInfo(home);if(x&&x.pid===expected.ownerPid&&x.startedAt===expected.startedAt)fs.unlinkSync(home+"/paseo.pid")};');
+    assert.ok(linuxProcessBirth(child.pid));
+    assert.equal(demonstrablyReusedPid(record),true);
+    assert.equal(demonstrablyReusedPid({...record,startedAt:'invalid'}),false);
+    assert.equal(demonstrablyReusedPid({...record,startedAt:new Date().toISOString()}),false);
+    const result=await deactivate();
+    assert.equal(result.phase,'disabled');assert.equal(fs.existsSync(path.join(loc.paseoHome,'paseo.pid')),false);assert.ok(processIdentity(child.pid));
+  } finally {child.kill('SIGTERM');f.close();}
 });
 
 test('timed out child kills its own inherited process group including descendants',async()=>{
