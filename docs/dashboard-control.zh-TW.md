@@ -29,9 +29,9 @@ python3 bin/install-dashboard-control-k8s.py \
 
 ### 正式 chart 整合狀態
 
-已準備選用式 `paseoDashboardControl` 掛載支援，預設停用；管理者指定由自己維護的現有 ConfigMap，chart 固定掛載四個 adapter 檔案與 CLI wrapper。這份修正已通過 Helm render／upgrade 的離線驗證，但仍為草稿 PR，尚未發布及部署到本測試服務。
+`hermes-agent` chart `0.4.0` 已發布至平台 Gitea Helm 與 OCI registry，提供選用式 `paseoDashboardControl` 掛載支援，預設停用；管理者指定由自己維護的現有 ConfigMap，chart 固定掛載四個 adapter 檔案與 CLI wrapper。完整 chart 倉庫 CI 已通過，兩個 channel 重新下載的套件完全相同，26 個檔案的 SHA-256 均符合驗證候選。此 chart 尚未部署到本測試服務，平台 Redeploy 仍待下方前置條件與實測。
 
-預計的服務 values 形狀如下；**現行 0.3.13 chart 不支援此設定**，單獨填入不會建立掛載：
+`0.4.0` 的服務 values 形狀如下；**現行測試服務的 0.3.13 chart 不支援此設定**，單獨填入不會建立掛載：
 
 ```yaml
 paseoDashboardControl:
