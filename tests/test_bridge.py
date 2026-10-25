@@ -471,6 +471,22 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.privacy(response)
 
+    def test_acceptance_submission_returns_a_job_and_polling_never_runs_models(self):
+        receipt = {'jobId': 'a' * 32, 'phase': 'running', 'pending': True, 'result': None, 'code': None}
+        with patch.object(self.runtime, 'start_acceptance', return_value=receipt) as start:
+            response = self.client.post(self.prefix + '/acceptance?profile=default', json={}, headers=self.origin)
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(response.json(), receipt)
+            self.privacy(response)
+            start.assert_called_once_with({})
+        with patch.object(self.runtime, 'acceptance_status', return_value=receipt), patch.object(self.runtime, '_invoke', side_effect=AssertionError('poll must not run a model')):
+            response = self.client.get(self.prefix + '/acceptance?profile=default')
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), receipt)
+            self.privacy(response)
+        with patch.object(self.runtime, 'start_acceptance', side_effect=AssertionError('foreign origin job')):
+            self.assertEqual(self.client.post(self.prefix + '/acceptance', json={}, headers={'Origin': 'https://evil.test'}).status_code, 403)
+
     def test_wrong_method_and_missing_path_have_privacy_headers(self):
         for response in [self.client.get(self.prefix + '/pair'), self.client.get(self.prefix + '/missing')]:
             self.assertEqual(response.status_code, 404)

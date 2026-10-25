@@ -173,7 +173,13 @@ async def pair(request: Request):
 @router.post('/acceptance')
 async def acceptance(request: Request):
     body = await read_json(request)
-    return await asyncio.to_thread(bridge.get_bridge().call, 'acceptance', body)
+    result = await asyncio.to_thread(bridge.get_bridge().start_acceptance, body)
+    return JSONResponse(result, status_code=202 if result['pending'] else 200)
+
+
+@router.get('/acceptance')
+async def acceptance_status():
+    return await asyncio.to_thread(bridge.get_bridge().acceptance_status)
 
 
 @router.get('/models/{provider}')

@@ -47,3 +47,12 @@
 - Run full local suites, browser checks, dependency audit and current-version integration.
 - Publish only reviewed source, reproducible instructions and sanitized validation; keep deployment credentials/evidence private.
 - Give the user the exact test URL and an acceptance matrix with passed, unsupported and genuinely blocked rows; do not claim completion until required work is actually finished.
+
+### Task 7: Blockers found during live acceptance
+
+- Retire provably stale PID locks without signalling a reused Dashboard PID; persist container identity for fast recreations.
+- Bound native local inference and HTTP threads by cgroup CPU quota; retain explicit operator settings.
+- Keep optional speech downloads opt-in for the managed text service, preserving an existing explicit enable.
+- Flush and exit one-shot control processes so dependency handles cannot hold completed results open.
+- Replace the synchronous Web acceptance request after observing Cloudflare HTTP 524 at 125 seconds: return a durable background job, deduplicate submissions across processes, poll via authenticated status, and preserve a running job through Dashboard reload. Never retry a model call automatically.
+- Use a dedicated local-model fixture with an explicit ACP toolset for resource-bounded real conversations; preserve the pre-test configuration privately. This does not establish cloud-provider authentication or companion availability.

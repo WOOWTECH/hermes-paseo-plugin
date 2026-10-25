@@ -16,6 +16,9 @@ const deferred = () => {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 };
+const acceptanceResult = (passed = true) => ({ passed, providers: [{ provider: 'hermes', firstReply: true, followup: passed, passed, cleanup: { archived: true, deleted: true } }] });
+const acceptanceJob = (patch = {}) => ({ jobId: 'acceptance-job-1', phase: 'running', pending: true, result: null, code: null, ...patch });
+const accepted = body => ({ httpStatus: 202, body });
 const modelData = { models: [{ id: 'live/acp-model', label: 'ACP 即時模型', isDefault: true }], modes: [{ id: 'live-mode', label: '動態模式' }] };
 
 // Simulates the host's React hooks, effect cleanup, child components, auth helper,
@@ -78,7 +81,7 @@ function host({ status = snapshot(), storage = new Map(), pathname = '/sessions'
   if (raw) SDK.authedFetch = async (path, init) => {
     const value = await dispatch(path, init);
     if (value?.httpError) return { ok: false, status: value.httpError, json() { throw new Error('Must not read raw error body containing secrets'); } };
-    return { ok: true, status: 200, json: async () => value };
+    return { ok: true, status: value?.httpStatus || 200, json: async () => value?.httpStatus ? value.body : value };
   };
   else SDK.fetchJSON = dispatch;
   window.__HERMES_PLUGIN_SDK__ = SDK;
@@ -147,6 +150,7 @@ function host({ status = snapshot(), storage = new Map(), pathname = '/sessions'
 function nodes(node) { if (!node || typeof node !== 'object') return []; return [node, ...(node.children || []).flatMap(nodes)]; }
 function content(node) { if (node == null || node === false) return ''; if (typeof node !== 'object') return String(node); return (node.children || node.props?.children || []).map(content).join(''); }
 const count = (app, path, method) => app.calls.filter(call => call.path === '/api/plugins/hermes-paseo' + path && (!method || call.init.method === method)).length;
+const acceptanceButton = app => nodes(nodes(app.tree()).find(row => row.type === 'section' && row.props['aria-label'] === '真實對話驗收')).find(row => row.type === 'button');
 const buttonNode = (app, label) => nodes(app.tree()).find(row => row.type === 'button' && content(row).includes(label));
 
 test('official IIFE registers the host React page and visible persistent header slot without executing on bundle load', () => {
@@ -315,6 +319,236 @@ test('paid acceptance never runs automatically, duplicate actions disable, and a
   await app.settle();
   assert.match(content(app.tree()), /未全部通過/);
   assert.match(content(app.tree()), /測試代理已清理/);
+});
+
+test('202 releases POST busy, blocks duplicate paid clicks and adopts completion through status polling', async () => {
+  const app = host(); await app.mount('page');
+  const click = acceptanceButton(app).props.onClick;
+  app.handle('/acceptance', () => {
+    app.status(snapshot({ acceptanceJob: acceptanceJob() }));
+    return accepted(acceptanceJob());
+  });
+  click(); click(); await app.settle();
+  assert.equal(count(app, '/acceptance', 'POST'), 1);
+  assert.equal(acceptanceButton(app).props.disabled, true);
+  assert.match(content(app.tree()), /背景執行|等待驗證結果/);
+  assert.doesNotMatch(content(app.tree()), /後端回報：真實對話驗收通過|狀態格式不完整/);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, false, '202 releases the foreground action lock');
+  assert.equal(buttonNode(app, '停止服務').props.disabled, false);
+  click(); await app.settle(); await app.advance(4000);
+  assert.equal(count(app, '/acceptance', 'POST'), 1, 'a stale click handler cannot start another paid job');
+  app.status(snapshot({ acceptanceJob: acceptanceJob({ phase: 'completed', pending: false, result: acceptanceResult() }) }));
+  await app.advance(2000);
+  assert.match(content(app.tree()), /後端回報：真實對話驗收通過/);
+  assert.match(content(app.tree()), /Hermes ACP：通過首輪與續聊驗收；測試代理已清理/);
+  assert.equal(acceptanceButton(app).props.disabled, false);
+  assert.equal(count(app, '/acceptance', 'GET'), 0, 'the existing status poll is the only job observer');
+  for (const call of app.calls) {
+    assert.equal(call.init.cache, 'no-store');
+    assert.equal(call.init.credentials, 'same-origin');
+  }
+  assert.equal(app.calls.find(call => call.path.endsWith('/acceptance')).init.body, '{}');
+  assert.doesNotMatch(JSON.stringify([...app.storage]), /acceptance-job|firstReply|providers/);
+  assert.deepEqual(app.logs, []);
+});
+
+test('a 202 receipt alone blocks duplicates even when an older status fixture omits acceptanceJob', async () => {
+  for (const raw of [true, false]) {
+    const app = host({ raw }); await app.mount('page');
+    app.handle('/acceptance', () => raw ? accepted(acceptanceJob()) : acceptanceJob());
+    await app.click('執行真實對話驗收'); await app.advance(4000);
+    assert.match(content(app.tree()), /背景執行|等待驗證結果/);
+    assert.equal(acceptanceButton(app).props.disabled, true);
+    assert.equal(buttonNode(app, '產生配對連結').props.disabled, false);
+    assert.equal(count(app, '/acceptance', 'POST'), 1);
+  }
+});
+
+test('status cannot restore a previous successful job while a new paid POST is still being submitted', async () => {
+  const previous = acceptanceJob({ phase: 'completed', pending: false, result: acceptanceResult() });
+  const app = host({ status: snapshot({ acceptanceJob: previous }) });
+  await app.mount('page');
+  const pending = deferred(); app.handle('/acceptance', () => pending.promise);
+  await app.click('執行真實對話驗收'); await app.advance(4000);
+  assert.doesNotMatch(content(app.tree()), /後端回報：真實對話驗收通過/);
+  assert.equal(acceptanceButton(app).props.disabled, true);
+  app.status(snapshot({ acceptanceJob: acceptanceJob({ jobId: 'next-job' }) }));
+  pending.resolve(accepted(acceptanceJob({ jobId: 'next-job' }))); await app.settle();
+  assert.match(content(app.tree()), /背景執行|等待驗證結果/);
+  assert.equal(count(app, '/acceptance', 'POST'), 1);
+});
+
+test('refresh and remount adopt pending and completed jobs without sending a paid POST on either SDK', async () => {
+  for (const raw of [true, false]) {
+    const app = host({ raw, status: snapshot({ acceptanceJob: acceptanceJob() }) });
+    await app.mount('header'); await app.mount('page');
+    assert.equal(acceptanceButton(app).props.disabled, true);
+    assert.match(content(app.tree()), /背景執行|等待驗證結果/);
+    await app.unmount('page'); await app.unmount('header'); await app.mount('page');
+    assert.equal(acceptanceButton(app).props.disabled, true);
+    const refresh = host({ raw, storage: app.storage, status: snapshot({ acceptanceJob: acceptanceJob() }) });
+    await refresh.mount('page');
+    assert.equal(acceptanceButton(refresh).props.disabled, true);
+    refresh.status(snapshot({ acceptanceJob: acceptanceJob({ phase: 'completed', pending: false, result: acceptanceResult(false) }) }));
+    await refresh.advance(2000);
+    assert.match(content(refresh.tree()), /未全部通過/);
+    assert.equal(acceptanceButton(refresh).props.disabled, false);
+    const completedRefresh = host({ raw, status: snapshot({ acceptanceJob: acceptanceJob({ phase: 'completed', pending: false, result: acceptanceResult() }) }) });
+    await completedRefresh.mount('page');
+    assert.match(content(completedRefresh.tree()), /後端回報：真實對話驗收通過/);
+    assert.equal(count(app, '/acceptance') + count(refresh, '/acceptance') + count(completedRefresh, '/acceptance'), 0);
+  }
+});
+
+test('interrupted, error and idle receipts clear old success and never render a partial result as a pass', async () => {
+  for (const phase of ['interrupted', 'error', 'idle']) {
+    const app = host({ status: snapshot({ acceptanceJob: acceptanceJob({ phase: 'completed', pending: false, result: acceptanceResult() }) }) });
+    await app.mount('page');
+    assert.match(content(app.tree()), /後端回報：真實對話驗收通過/);
+    app.status(snapshot({ acceptanceJob: acceptanceJob({ phase, pending: false, result: phase === 'idle' ? null : acceptanceResult(), code: 'PRIVATE_BACKEND_DETAIL' }) }));
+    await app.advance(2000);
+    assert.doesNotMatch(content(app.tree()), /後端回報：真實對話驗收通過|PRIVATE_BACKEND_DETAIL/);
+    if (phase !== 'idle') assert.match(content(app.tree()), phase === 'interrupted' ? /驗收已中斷/ : /驗收發生錯誤/);
+    assert.equal(acceptanceButton(app).props.disabled, false);
+  }
+});
+
+test('uncertain paid POST keeps duplicate clicks blocked while only status GETs recover the job', async () => {
+  const app = host(); await app.mount('page');
+  const click = acceptanceButton(app).props.onClick;
+  app.handle('/acceptance', () => { throw new Error('PRIVATE: connection lost after paid work started'); });
+  app.handle('/status', () => { throw new Error('PRIVATE status outage'); });
+  click(); await app.settle();
+  assert.match(content(app.tree()), /驗收請求可能已送達/);
+  assert.equal(acceptanceButton(app).props.disabled, true);
+  assert.equal(buttonNode(app, '停止服務').props.disabled, false);
+  click(); await app.settle(); await app.advance(6000);
+  assert.equal(count(app, '/acceptance', 'POST'), 1);
+  assert.doesNotMatch(content(app.tree()), /PRIVATE|後端回報：真實對話驗收通過/);
+  app.handle('/status', () => snapshot({ acceptanceJob: acceptanceJob() }));
+  await app.advance(2000);
+  assert.match(content(app.tree()), /背景執行|等待驗證結果/);
+  assert.doesNotMatch(content(app.tree()), /驗收請求可能已送達|無法完成操作/);
+  click(); await app.settle();
+  assert.equal(count(app, '/acceptance', 'POST'), 1);
+  app.handle('/status', () => snapshot({ acceptanceJob: acceptanceJob({ phase: 'completed', pending: false, result: acceptanceResult() }) }));
+  await app.advance(2000);
+  assert.match(content(app.tree()), /後端回報：真實對話驗收通過/);
+  assert.equal(count(app, '/acceptance', 'POST'), 1);
+});
+
+test('an idle receipt resolves uncertain submission without a retry and needs a new explicit paid click', async () => {
+  const app = host(); await app.mount('page');
+  app.handle('/acceptance', () => { throw new Error('lost response'); });
+  await app.click('執行真實對話驗收');
+  assert.equal(acceptanceButton(app).props.disabled, true, 'an old status without a job cannot resolve uncertainty');
+  await app.advance(4000);
+  assert.equal(count(app, '/acceptance'), 1);
+  app.status(snapshot({ acceptanceJob: acceptanceJob({ jobId: null, phase: 'idle', pending: false }) }));
+  await app.advance(2000);
+  assert.equal(acceptanceButton(app).props.disabled, false);
+  assert.doesNotMatch(content(app.tree()), /驗收請求可能已送達/);
+  assert.equal(count(app, '/acceptance'), 1);
+});
+
+test('stop remains usable for a background job and interrupted status cannot become acceptance success', async () => {
+  const app = host({ status: snapshot({ acceptanceJob: acceptanceJob() }) });
+  await app.mount('page');
+  assert.equal(buttonNode(app, '停止服務').props.disabled, false);
+  app.handle('/stop', () => {
+    app.status(snapshot({ enabled: false, phase: 'disabled', daemon: { running: false, reachable: false },
+      acceptanceJob: acceptanceJob({ phase: 'interrupted', pending: false, code: 'ACCEPTANCE_INTERRUPTED' }) }));
+    return {};
+  });
+  await app.click('停止服務');
+  assert.match(content(app.tree()), /已手動停止/);
+  assert.match(content(app.tree()), /驗收已中斷/);
+  assert.doesNotMatch(content(app.tree()), /後端回報：真實對話驗收通過/);
+  assert.equal(count(app, '/acceptance'), 0);
+});
+
+test('stop supersedes an in-flight paid POST and rejects its late successful result', async () => {
+  const app = host(); await app.mount('page');
+  const pending = deferred(); app.handle('/acceptance', () => pending.promise);
+  await app.click('執行真實對話驗收');
+  app.handle('/stop', () => {
+    app.status(snapshot({ enabled: false, phase: 'disabled', daemon: { running: false, reachable: false },
+      acceptanceJob: acceptanceJob({ phase: 'interrupted', pending: false }) }));
+    return {};
+  });
+  await app.click('停止服務');
+  pending.resolve(accepted(acceptanceJob({ phase: 'completed', pending: false, result: acceptanceResult() })));
+  await app.settle();
+  assert.match(content(app.tree()), /驗收已中斷/);
+  assert.doesNotMatch(content(app.tree()), /後端回報：真實對話驗收通過/);
+  assert.equal(count(app, '/acceptance', 'POST'), 1);
+});
+
+test('job polling retains visibility and unmount cleanup with no independent acceptance requests', async () => {
+  const app = host({ status: snapshot({ acceptanceJob: acceptanceJob() }) });
+  await app.mount('page');
+  assert.equal(acceptanceButton(app).props.disabled, true);
+  const slow = deferred(); let signal;
+  app.handle('/status', call => { signal = call.init.signal; return slow.promise; });
+  await app.advance(2000);
+  await app.hidden(true);
+  assert.equal(signal.aborted, true);
+  slow.resolve(snapshot({ acceptanceJob: acceptanceJob({ phase: 'completed', pending: false, result: acceptanceResult() }) }));
+  await app.settle(); await app.advance(10000);
+  assert.doesNotMatch(content(app.tree()), /後端回報：真實對話驗收通過/);
+  app.handle('/status', () => snapshot({ acceptanceJob: acceptanceJob({ phase: 'completed', pending: false, result: acceptanceResult() }) }));
+  await app.hidden(false);
+  assert.match(content(app.tree()), /後端回報：真實對話驗收通過/);
+  await app.unmount('page');
+  const reads = count(app, '/status'); await app.advance(10000);
+  assert.equal(count(app, '/status'), reads);
+  assert.equal(app.timers.size, 0);
+  assert.equal(app.events.get('visibilitychange').size, 0);
+  assert.equal(count(app, '/acceptance'), 0);
+});
+
+test('hiding during submission ignores its late result and adopts the job when visible without resubmitting', async () => {
+  const app = host(); await app.mount('page');
+  const pending = deferred(); app.handle('/acceptance', () => pending.promise);
+  const click = acceptanceButton(app).props.onClick;
+  click(); await app.settle(); await app.hidden(true);
+  app.status(snapshot({ acceptanceJob: acceptanceJob({ phase: 'completed', pending: false, result: acceptanceResult() }) }));
+  pending.resolve(accepted(acceptanceJob())); await app.settle();
+  const reads = count(app, '/status'); await app.advance(10000);
+  assert.equal(count(app, '/status'), reads);
+  assert.equal(acceptanceButton(app).props.disabled, true);
+  assert.doesNotMatch(content(app.tree()), /後端回報：真實對話驗收通過/);
+  await app.hidden(false);
+  assert.match(content(app.tree()), /後端回報：真實對話驗收通過/);
+  assert.equal(count(app, '/acceptance', 'POST'), 1);
+});
+
+test('completed without a result and malformed receipts cannot claim a pass or leak backend details', async () => {
+  const app = host({ status: snapshot({ acceptanceJob: acceptanceJob({ phase: 'completed', pending: false }) }) });
+  await app.mount('page');
+  assert.match(content(app.tree()), /未取得有效結果/);
+  assert.doesNotMatch(content(app.tree()), /後端回報：真實對話驗收通過/);
+  app.status(snapshot({ acceptanceJob: acceptanceJob({ phase: 'error', pending: false, code: 'PROCESS_TIMEOUT' }) }));
+  await app.advance(2000);
+  assert.match(content(app.tree()), /驗收發生錯誤/);
+  assert.doesNotMatch(content(app.tree()), /PROCESS_TIMEOUT/);
+  app.status(snapshot({ acceptanceJob: { phase: 'completed', pending: false, result: acceptanceResult(), code: 'PRIVATE_BACKEND_DETAIL' } }));
+  await app.advance(2000);
+  assert.match(content(app.tree()), /狀態格式不完整/);
+  assert.equal(acceptanceButton(app).props.disabled, true);
+  assert.equal(buttonNode(app, '停止服務').props.disabled, false);
+  assert.doesNotMatch(content(app.tree()), /PRIVATE_BACKEND_DETAIL|後端回報：真實對話驗收通過/);
+});
+
+test('legacy immediate results survive status polling when acceptanceJob is absent', async () => {
+  for (const raw of [true, false]) {
+    const app = host({ raw }); await app.mount('page');
+    app.handle('/acceptance', () => acceptanceResult());
+    await app.click('執行真實對話驗收'); await app.advance(4000);
+    assert.match(content(app.tree()), /後端回報：真實對話驗收通過/);
+    assert.equal(acceptanceButton(app).props.disabled, false);
+    assert.equal(count(app, '/acceptance', 'POST'), 1);
+  }
 });
 
 test('pairing stays as an explicit secure official link and never enters storage, logs or a popup', async () => {

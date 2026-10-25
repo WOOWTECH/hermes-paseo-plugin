@@ -74,6 +74,27 @@
       throw status ? httpFault(Number(status)) : fault("REQUEST");
     }
   }
+  function normalizeAcceptance(value) {
+    if (!value || typeof value.passed !== "boolean" || !Array.isArray(value.providers)) throw fault("DATA");
+    return { passed: value.passed, providers: value.providers.filter(row => row && typeof row.provider === "string").map(row => ({
+      provider: text(row.provider, ""), passed: row.passed === true,
+      first: row.firstReply === true || !!(row.firstReply && row.firstReply.passed === true),
+      followup: row.followup === true || !!(row.followup && row.followup.passed === true),
+      cleanup: row.cleanup === true || !!(row.cleanup && row.cleanup.archived === true)
+    })) };
+  }
+  function normalizeJob(value) {
+    if (!value || !(value.jobId === null || typeof value.jobId === "string") ||
+        !["running", "completed", "error", "interrupted", "idle"].includes(value.phase) ||
+        typeof value.pending !== "boolean" || !(value.code === null || typeof value.code === "string")) throw fault("DATA");
+    return { jobId: value.jobId, phase: value.phase, pending: value.pending,
+      result: value.result === null ? null : normalizeAcceptance(value.result), code: value.code };
+  }
+  function jobPending(job) { return !!job && (job.pending || job.phase === "running"); }
+  function jobPatch(job) {
+    return { acceptanceJob: job, acceptanceUncertain: false,
+      acceptance: !jobPending(job) && job.phase === "completed" ? job.result : null };
+  }
   function normalize(value) {
     if (!value || typeof value.enabled !== "boolean" || typeof value.phase !== "string" ||
         !value.daemon || typeof value.daemon.running !== "boolean" || typeof value.daemon.reachable !== "boolean" ||
@@ -81,6 +102,7 @@
         typeof value.onboarding.completed !== "boolean") throw fault("DATA");
     return {
       enabled: value.enabled, phase: value.phase,
+      acceptanceJob: Object.prototype.hasOwnProperty.call(value, "acceptanceJob") ? normalizeJob(value.acceptanceJob) : undefined,
       diagnosticCode: typeof value.diagnosticCode === "string" ? value.diagnosticCode : null,
       daemon: { running: value.daemon.running, reachable: value.daemon.reachable },
       providers: value.providers.filter(row => row && typeof row.provider === "string").map(row => ({
@@ -93,7 +115,7 @@
   }
   const subscribers = new Set();
   const modelReads = new Set();
-  let state = { status: null, reading: false, busy: null, stopping: false, error: null, readError: null, pairUrl: null, acceptance: null };
+  let state = { status: null, reading: false, busy: null, stopping: false, error: null, readError: null, pairUrl: null, acceptance: null, acceptanceJob: null, acceptanceUncertain: false };
   let pollTimer = null;
   let statusFlight = null;
   let revision = 0;
@@ -182,7 +204,12 @@
         if (navigationDone) remember("guided", activation(result));
         if (startAttempted) remember("started", activation(result));
         if (pausedStatus(result) && !resuming && state.busy !== "start") { markers.paused = true; saveMarkers(); }
-        publish({ status: result, readError: null, pairUrl: result.enabled && !pausedStatus(result) ? state.pairUrl : null });
+        // An absent field belongs to an older server. A receipt is authoritative,
+        // but a status read during submission may still describe the previous job.
+        const acceptance = result.acceptanceJob !== undefined && (state.busy !== "acceptance" || markers.paused)
+          ? jobPatch(result.acceptanceJob) : {};
+        publish(Object.assign(acceptance, { status: result, readError: null,
+          pairUrl: result.enabled && !pausedStatus(result) ? state.pairUrl : null }));
         maybeGuide(result);
         maybeStart(result);
       } catch (error) {
@@ -223,7 +250,8 @@
         startAttempted = false;
         resuming = false;
         recoveryAttempted = false;
-        publish({ status: null, readError: null, error: null, pairUrl: null, acceptance: null });
+        publish({ status: null, readError: null, error: null, pairUrl: null, acceptance: null, acceptanceJob: null,
+          acceptanceUncertain: state.acceptanceUncertain || jobPending(state.acceptanceJob) || state.busy === "acceptance" });
       } else schedule();
     };
   }
@@ -242,6 +270,7 @@
   async function action(name) {
     const status = state.status;
     if (!activated(status) || (name === "stop" ? state.stopping : state.busy || state.stopping)) return;
+    if (name === "acceptance" && (jobPending(state.acceptanceJob) || state.acceptanceUncertain || state.readError || dashboardReloading)) return;
     if (["pair", "acceptance"].includes(name) && (!status.daemon.reachable || markers.paused || PAUSED.has(status.phase))) return;
     if (name === "start" || name === "stop") {
       markers.paused = name === "stop";
@@ -254,25 +283,26 @@
     cancelReads();
     const actionRevision = revision;
     publish(name === "stop" ? { stopping: true, error: null, pairUrl: null, acceptance: null } :
-      { busy: name, error: null, acceptance: name === "acceptance" ? null : state.acceptance, pairUrl: name === "pair" || name === "start" ? null : state.pairUrl });
+      { busy: name, error: null, acceptance: name === "acceptance" ? null : state.acceptance,
+        acceptanceJob: name === "acceptance" ? null : state.acceptanceJob,
+        // Until a receipt arrives, a lost response must never unlock a duplicate paid submission.
+        acceptanceUncertain: name === "acceptance" || state.acceptanceUncertain, pairUrl: name === "pair" || name === "start" ? null : state.pairUrl });
     try {
       const result = await request("/" + name, "POST");
       if (actionRevision !== revision) return;
       if (name === "pair" && pageMounted() && visible()) publish({ pairUrl: validPairUrl(result) });
       if (name === "acceptance") {
-        if (!result || typeof result.passed !== "boolean" || !Array.isArray(result.providers)) throw fault("DATA");
-        publish({ acceptance: { passed: result.passed, providers: result.providers.map(row => ({
-          provider: text(row.provider, ""), passed: row.passed === true,
-          first: row.firstReply === true || row.firstReply && row.firstReply.passed === true,
-          followup: row.followup === true || row.followup && row.followup.passed === true,
-          cleanup: row.cleanup === true || row.cleanup && row.cleanup.archived === true
-        })) } });
+        if (result && Object.prototype.hasOwnProperty.call(result, "phase")) publish(jobPatch(normalizeJob(result)));
+        else publish({ acceptance: normalizeAcceptance(result), acceptanceJob: null, acceptanceUncertain: false });
       }
       // POST completion is not evidence of readiness; refresh the actual status.
     } catch (error) {
       if (actionRevision === revision) {
         if (name === "start") resuming = false;
-        publish({ error: errorCopy(error) });
+        if (name === "acceptance") {
+          const uncertain = ["REQUEST", "DATA", "BUSY"].includes(error.code);
+          publish({ acceptanceUncertain: uncertain, error: uncertain ? null : errorCopy(error) });
+        } else publish({ error: errorCopy(error) });
       }
     } finally {
       if (name === "stop") publish({ stopping: false });
@@ -493,6 +523,14 @@
     const enabled = activated(status);
     const busy = !!snapshot.busy || snapshot.stopping || dashboardReloading;
     const reachable = enabled && !paused && !!status.daemon.reachable && !snapshot.readError;
+    const job = snapshot.acceptanceJob;
+    const acceptancePending = jobPending(job);
+    const acceptanceBlocked = acceptancePending || snapshot.acceptanceUncertain;
+    const acceptanceIssue = job && !acceptancePending && ({
+      interrupted: "真實對話驗收已中斷，尚未確認通過。請確認服務狀態後，再自行決定是否重新執行。",
+      error: "真實對話驗收發生錯誤，尚未確認通過。請確認代理的官方登入與服務狀態。",
+      completed: !job.result ? "驗收已結束，但未取得有效結果，尚未確認通過。請重新檢查狀態。" : null
+    })[job.phase];
     const errors = Array.from(new Set([snapshot.readError, snapshot.error].filter(Boolean)));
     return h("div", { className: "hermes-paseo hp-page", lang: "zh-Hant" },
       h("header", { className: "hp-title" }, h("div", null, h("p", { className: "hp-eyebrow" }, "HERMES × PASEO"),
@@ -530,12 +568,18 @@
       h("section", { className: "hp-card", "aria-label": "真實對話驗收" },
         h("h2", null, "4. 真實對話驗收"),
         h("p", null, "此操作會向 Hermes 發送真實首輪與續聊請求，會消耗帳號的模型額度，也可能產生費用。只有按下按鈕才會執行。"),
-        button(snapshot.busy === "acceptance" ? "正在進行付費驗收…" : "執行真實對話驗收（會消耗帳號額度）", () => void action("acceptance"), !reachable || busy || !!snapshot.readError),
+        button(snapshot.busy === "acceptance" ? "正在進行付費驗收…" : acceptancePending ? "驗收進行中，等待結果…" :
+          snapshot.acceptanceUncertain ? "驗收狀態待確認…" : "執行真實對話驗收（會消耗帳號額度）",
+          () => void action("acceptance"), !reachable || busy || acceptanceBlocked || !!snapshot.readError),
+        acceptancePending && h("p", { role: "status", "aria-live": "polite" }, "驗收已在背景執行，正在等待驗證結果；請勿重複送出。"),
+        snapshot.acceptanceUncertain && snapshot.busy !== "acceptance" && h("p", { role: "status", "aria-live": "polite" },
+          "驗收請求可能已送達，結果尚無法確認。請重新檢查狀態；不會自動重送付費請求。"),
+        acceptanceIssue && h("p", { className: "hp-error", role: "alert" }, acceptanceIssue),
         h("p", { className: "hp-muted hp-small" }, "驗收採用後端的代理預設設定；上方選單用於探索，不會變更驗收設定。"),
         snapshot.acceptance && h("div", { className: "hp-result", role: "status", "aria-live": "polite" },
           h("strong", null, snapshot.acceptance.passed ? "後端回報：真實對話驗收通過" : "真實對話驗收未全部通過；請確認代理的官方登入與服務狀態。"),
           h("ul", null, snapshot.acceptance.providers.map((row, index) => h("li", { key: index },
-            (status.providers.find(provider => provider.provider === row.provider) || {}).label || row.provider,
+            ((status ? status.providers : []).find(provider => provider.provider === row.provider) || {}).label || row.provider,
             "：", row.passed ? "通過首輪與續聊驗收" : "未通過", row.cleanup ? "；測試代理已清理" : "；請檢查測試代理清理狀態"))))));
   }
   registry.register("hermes-paseo", Page);

@@ -21,10 +21,12 @@ import json
 import os
 import re
 import selectors
+import datetime
 import shutil
 import signal
 import stat
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -55,6 +57,7 @@ INVALID_MODE CHAT_TIMEOUT NO_ASSISTANT_REPLY ACCEPTANCE_FAILED RELAY_UNVERIFIED
 PROVIDER_LOGIN_REQUIRED PROVIDER_ERROR START_FAILED STOP_FAILED ACCEPTANCE_CLEANUP_FAILED INVALID_DASHBOARD_ORIGIN
 WORKSPACE_CREATE_FAILED PERMISSION_REQUIRED PROVIDER_TIMEOUT PROVIDER_TURN_FAILED
 EMPTY_OR_UNEXPECTED_REPLY'''.split())
+CODES = CODES | {'ACCEPTANCE_INTERRUPTED', 'PROVIDER_QUOTA_EXHAUSTED'}
 PUBLIC_KEYS = frozenset('''ok code installed version enabled phase diagnosticCode daemon running
 reachable relayEnabled relayVerified relayVerifiedAt providers provider label status modes id
 isDefault defaultModeId models defaultThinkingOptionId thinkingOptions chatVerified chatVerifiedAt
@@ -404,6 +407,106 @@ class Bridge:
             self._cache = None
             self._condition.notify_all()
 
+    def _acceptance_record(self):
+        path = self.state_dir / 'acceptance-job.json'
+        record = _read_json(path)
+        if record is None:
+            return None
+        if path.stat().st_uid != os.geteuid():
+            raise BridgeError('STATE_UNAVAILABLE')
+        if (record.get('version') != 1 or not re.fullmatch(r'[a-f0-9]{32}', str(record.get('id', '')))
+                or record.get('phase') not in ('running', 'completed', 'error', 'interrupted')):
+            raise BridgeError('STATE_CORRUPT')
+        return record
+
+    @staticmethod
+    def _job_process_identity(pid):
+        try:
+            if type(pid) is not int or pid <= 0:
+                return None
+            path = Path('/proc') / str(pid)
+            if path.stat().st_uid != os.geteuid():
+                return None
+            fields = (path / 'stat').read_text().rsplit(')', 1)[1].split()
+            boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+            container = Path('/proc/1/stat').read_text().rsplit(')', 1)[1].split()[19]
+            return ':'.join((boot, container, fields[19])) if fields[0] != 'Z' else None
+        except (OSError, IndexError):
+            return None
+
+    @staticmethod
+    def _public_job(record):
+        if record is None:
+            return {'jobId': None, 'phase': 'idle', 'pending': False, 'result': None, 'code': None}
+        return {'jobId': record['id'], 'phase': record['phase'], 'pending': record['phase'] == 'running',
+                'result': redact(record.get('result')), 'code': record.get('code') if record.get('code') in CODES else None}
+
+    def acceptance_status(self):
+        path = self.state_dir / 'acceptance-job.json'
+        if not path.exists() and not path.is_symlink():
+            return self._public_job(None)
+        with _state_lock(self.state_dir):
+            record = self._acceptance_record()
+            if record and record['phase'] == 'running' and (
+                    not record.get('identity') or self._job_process_identity(record.get('pid')) != record['identity']):
+                record.update(phase='interrupted', code='ACCEPTANCE_INTERRUPTED', result=None)
+                _write_json(path, record)
+            return self._public_job(record)
+
+    def start_acceptance(self, value=None):
+        value = validate_input('acceptance', value)
+        if not (self.root / 'bin/acceptance-worker.py').is_file():
+            raise BridgeError('RUNTIME_UNAVAILABLE')
+        self.onboarding(create=True)
+        with _state_lock(self.state_dir):
+            record = self._acceptance_record()
+            if (record and record['phase'] == 'running' and record.get('identity')
+                    and self._job_process_identity(record.get('pid')) == record['identity']):
+                return self._public_job(record)
+            record = {'version': 1, 'id': uuid.uuid4().hex, 'phase': 'running', 'pid': None, 'identity': None,
+                      'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                      'providers': value.get('providers', ['hermes']), 'result': None, 'code': None}
+            path = self.state_dir / 'acceptance-job.json'
+            _write_json(path, record)
+            try:
+                process = subprocess.Popen(
+                    [sys.executable, '-P', str(self.root / 'bin/acceptance-worker.py'), str(self.home), record['id']],
+                    env=self.environment(), cwd=self.root, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True)
+                record.update(pid=process.pid, identity=self._job_process_identity(process.pid))
+                if not record['identity']:
+                    raise BridgeError('PROCESS_FAILED')
+                _write_json(path, record)
+                threading.Thread(target=process.wait, name='hermes-paseo-acceptance-reaper', daemon=True).start()
+            except (OSError, BridgeError):
+                record.update(phase='error', code='PROCESS_FAILED')
+                _write_json(path, record)
+        self.invalidate()
+        return self._public_job(record)
+
+    def run_acceptance_job(self, job_id):
+        path = self.state_dir / 'acceptance-job.json'
+        with _state_lock(self.state_dir):
+            record = self._acceptance_record()
+            if (not record or record['id'] != job_id or record['phase'] != 'running'
+                    or record.get('pid') != os.getpid()
+                    or record.get('identity') != self._job_process_identity(os.getpid())):
+                raise BridgeError('INVALID_REQUEST')
+            providers = record['providers']
+        try:
+            result = self.call('acceptance', {'providers': providers})
+            if type(result.get('passed')) is not bool or not isinstance(result.get('providers'), list):
+                raise BridgeError('INVALID_COMMAND_OUTPUT')
+            phase, code = 'completed', None
+        except Exception as error:
+            result, phase = None, 'error'
+            code = error.code if isinstance(error, BridgeError) else 'OPERATION_FAILED'
+        with _state_lock(self.state_dir):
+            record = self._acceptance_record()
+            if record and record['id'] == job_id:
+                record.update(phase=phase, code=code, result=result)
+                _write_json(path, record)
+
     def _invoke(self, action, value=None):
         value = validate_input(action, value)
         env = self.environment()
@@ -435,6 +538,7 @@ class Bridge:
         result['providers'] = [row for row in result.get('providers', [])
                                if isinstance(row, dict) and row.get('provider') in PROVIDERS]
         result['onboarding'] = self.onboarding()
+        result['acceptanceJob'] = self.acceptance_status()
         with self._condition:
             if self._phase:
                 result['phase'] = self._phase

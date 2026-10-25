@@ -88,17 +88,28 @@ class Fixture:
         self.reload_status = 202
         self.disconnect_reload = False
         self.documents = 0
+        self.background_acceptance = False
+        self.acceptance_job = None
+        self.disconnect_acceptance = False
 
     def status(self):
         if self.ready_at and time.monotonic() >= self.ready_at:
             self.phase, self.enabled, self.ready_at = 'running', True, None
         running = self.phase == 'running'
-        return dict(enabled=self.enabled, phase=self.phase,
+        value = dict(enabled=self.enabled, phase=self.phase,
                     daemon=dict(running=running, reachable=running),
                     providers=[dict(provider='hermes', label='本機 Hermes ACP', status='ready'),
                                dict(provider='claude', label='未安裝 Claude', status='unavailable'),
                                dict(provider='codex', label='未安裝 Codex', status='unavailable')],
                     onboarding=dict(required=not self.completed, id=self.onboarding_id, completed=self.completed))
+        if self.acceptance_job is not None:
+            value['acceptanceJob'] = self.acceptance_job
+        return value
+
+    @staticmethod
+    def acceptance_result():
+        return dict(passed=True, providers=[dict(provider='hermes', firstReply=True,
+                    followup=True, passed=True, cleanup=dict(archived=True, deleted=True))])
 
     def count(self, endpoint, method=None):
         return sum(call['path'].endswith(endpoint) and
@@ -209,14 +220,24 @@ def run(args):
                 return self.send(fixture.status(), status=202)
             if self.path.endswith('/stop'):
                 fixture.phase, fixture.enabled, fixture.ready_at = 'disabled', False, None
+                if fixture.acceptance_job and fixture.acceptance_job['pending']:
+                    fixture.acceptance_job = dict(fixture.acceptance_job, phase='interrupted', pending=False,
+                                                  result=None, code='ACCEPTANCE_INTERRUPTED')
                 return self.send(fixture.status())
             if self.path.endswith('/pair'):
                 return self.send({'url': 'https://app.paseo.sh/pair#offer=TEST-PRIVATE-OFFER'})
             if self.path.endswith('/acceptance'):
+                if fixture.background_acceptance:
+                    fixture.acceptance_job = dict(jobId=f'fixture-job-{fixture.count("/acceptance", "POST")}',
+                                                  phase='running', pending=True, result=None, code=None)
+                    if fixture.disconnect_acceptance:
+                        fixture.invalid_status = True
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                        self.connection.close()
+                        return
+                    return self.send(fixture.acceptance_job, status=202)
                 fixture.completed = True
-                return self.send(dict(passed=True, checkedAt='2026-10-12', providers=[dict(
-                    provider='hermes', firstReply=True, followup=True, passed=True,
-                    cleanup=dict(archived=True, deleted=True))]))
+                return self.send(fixture.acceptance_result())
             return self.send({}, status=404)
 
     server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
@@ -279,12 +300,34 @@ def run(args):
                 page.screenshot(path=str(args.screenshot), full_page=True)
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), page.evaluate('Array.from(document.querySelectorAll("*")).filter(el => el.getBoundingClientRect().right > innerWidth).map(el => [el.tagName, el.className, el.getBoundingClientRect().right])')
             assert page.get_by_role('combobox', name='代理', exact=True).bounding_box()['width'] > 250
+            fixture.background_acceptance = True
             page.get_by_role('button', name='執行真實對話驗收（會消耗帳號額度）').click()
+            expect(page.get_by_text('驗收已在背景執行', exact=False)).to_be_visible()
+            expect(page.get_by_role('button', name='驗收進行中，等待結果…', exact=True)).to_be_disabled()
+            expect(page.get_by_role('button', name='重新產生配對連結', exact=True)).to_be_enabled()
+            expect(page.get_by_role('button', name='停止服務', exact=True)).to_be_enabled()
+            assert fixture.count('/acceptance', 'POST') == 1
+            page.reload()
+            expect(page.get_by_role('button', name='驗收進行中，等待結果…', exact=True)).to_be_disabled()
+            assert fixture.count('/acceptance', 'POST') == 1, 'refresh must adopt the job without a paid POST'
+            fixture.completed = True
+            fixture.acceptance_job = dict(fixture.acceptance_job, phase='completed', pending=False,
+                                          result=fixture.acceptance_result())
+            expect(page.get_by_text('後端回報：真實對話驗收通過')).to_be_visible(timeout=10000)
+            expect(page.get_by_text('本機 Hermes ACP：通過首輪與續聊驗收；測試代理已清理')).to_be_visible()
+            page.reload()
             expect(page.get_by_text('後端回報：真實對話驗收通過')).to_be_visible()
-            assert fixture.count('/acceptance') == 1
+            assert fixture.count('/acceptance', 'POST') == 1
+            assert fixture.count('/acceptance', 'GET') == 0, 'reuse status polling instead of a second poller'
+            page.get_by_role('button', name='執行真實對話驗收（會消耗帳號額度）').click()
+            expect(page.get_by_role('button', name='驗收進行中，等待結果…', exact=True)).to_be_disabled()
             page.get_by_role('button', name='停止服務', exact=True).click()
             expect(page.get_by_text('已手動停止', exact=True).last).to_be_visible()
+            expect(page.get_by_role('alert')).to_contain_text('驗收已中斷')
+            expect(page.get_by_text('後端回報：真實對話驗收通過')).to_have_count(0)
+            assert fixture.count('/acceptance', 'POST') == 2, 'only the two explicit clicks submit jobs'
             page.reload()
+            expect(page.get_by_role('alert')).to_contain_text('驗收已中斷')
             expect(page.get_by_role('button', name='恢復服務')).to_be_enabled()
             assert fixture.count('/start') == 1, 'reload after manual stop must never auto-start'
             page.get_by_role('button', name='恢復服務').click()
@@ -297,6 +340,37 @@ def run(args):
             assert len(fixture.calls) == before, 'unmount must stop all polling'
             assert_posts(fixture, origin)
             context.close()
+            print('PASS: 202 releases the foreground action; refresh adopts pending/completed jobs; Stop reports interruption.')
+
+            fixture = Fixture.reloadable()
+            fixture.background_acceptance = True
+            fixture.disconnect_acceptance = True
+            context = browser.new_context(viewport=dict(width=390, height=844))
+            context.route('**/*', route)
+            page = context.new_page()
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.clock.install(time=1_700_000_000_000)
+            page.clock.pause_at(1_700_000_001_000)
+            page.goto(origin + '/paseo')
+            page.get_by_role('button', name='執行真實對話驗收（會消耗帳號額度）').click()
+            expect(page.get_by_text('驗收請求可能已送達', exact=False)).to_be_visible()
+            expect(page.get_by_role('button', name='驗收狀態待確認…', exact=True)).to_be_disabled()
+            expect(page.get_by_role('button', name='停止服務', exact=True)).to_be_enabled()
+            page.clock.run_for(4001)
+            assert fixture.count('/acceptance', 'POST') == 1, 'network uncertainty must never retry a paid POST'
+            fixture.invalid_status = False
+            page.clock.run_for(2001)
+            expect(page.get_by_role('button', name='驗收進行中，等待結果…', exact=True)).to_be_disabled()
+            fixture.acceptance_job = dict(fixture.acceptance_job, phase='completed', pending=False,
+                                          result=fixture.acceptance_result())
+            page.clock.run_for(2001)
+            expect(page.get_by_text('後端回報：真實對話驗收通過')).to_be_visible()
+            assert fixture.count('/acceptance', 'POST') == 1
+            assert fixture.count('/acceptance', 'GET') == 0
+            assert_posts(fixture, origin)
+            context.close()
+            print('PASS: a disconnected paid POST is observed through status polling without duplicate submission.')
+
             fixture = Fixture()
             fixture.missing_api = True
             context = browser.new_context(viewport=dict(width=390, height=844))
