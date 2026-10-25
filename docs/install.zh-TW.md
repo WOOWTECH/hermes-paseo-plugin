@@ -96,7 +96,7 @@ python3 ~/.hermes/plugins/hermes-paseo/bin/configure-origin.py https://hermes.ex
 2. 等待 **服務已就緒**。第一次會下載並啟動固定 Paseo runtime；已手動停止時，按 **恢復服務**。
 3. 按 **產生配對連結**。
 4. 按 **開啟 Paseo 官方網站並綁定**，在新分頁按 **Connect**。
-5. 在 Paseo 按 **New workspace**，選擇 Hermes 模型。第一次測試建議使用 **Default** 權限模式。
+5. 在 Paseo 按 **New workspace**，開啟 **Select model**。若先看到供應者清單，按 **Hermes** 再選模型；第一次測試使用 **Default** 權限模式。
 
 Hermes 頁面的模型／模式選單用於探索可用選項；實際對話設定在 Paseo 建立對話時選擇。官方 relay 不需要額外的 Paseo 密碼。配對連結可能授予存取權，請保留給自己的裝置使用。
 
@@ -134,7 +134,13 @@ Hermes 頁面的模型／模式選單用於探索可用選項；實際對話設�
 hermes chat --toolsets hermes_paseo --query "請用 paseo_status 查看連線狀態"
 ```
 
-Hermes 的 Tool Search 會透過 `tool_search`／`tool_describe`／`tool_call` 間接調用插件工具。專用的小模型測試 profile 若只有少量工具，可在 Hermes 設定使用 `tools.tool_search.enabled: off`，直接載入工具 schema。這是測試 profile 的明確設定，插件安裝及更新不會代為更動；工具很多的環境應依模型能力與 context 預算保留原設定。設定方式見 [Hermes Tool Search 官方說明](https://hermes-agent.nousresearch.com/docs/user-guide/features/tool-search)。
+Hermes 的 Tool Search 會透過 `tool_search`／`tool_describe`／`tool_call` 間接調用插件工具。專用的小模型測試 profile 若只有少量工具，可在 Hermes 設定使用 `tools.tool_search.enabled: off`，直接載入工具 schema。這是測試 profile 的明確設定，插件安裝及更新不會代為更動；工具很多的環境應依模型能力與 context 預算保留原設定。設定方式見 [Hermes Tool Search 官方說明](https://hermes-agent.nousresearch.com/docs/user-guide/features/tool-search)。在專用測試 profile 使用 CLI 時可執行：
+
+```bash
+hermes config set tools.tool_search.enabled off
+```
+
+`off` 是設定值，不要把額外的雙引號字元存進值內。實測曾因值變成包含引號的字串而未關閉 Tool Search，導致小模型反覆搜尋工具、未完成對話。設定後完成或停止進行中的對話，再從 Paseo 頁停止／恢復服務，讓新的 ACP 程序載入。
 
 ## 7. 停止、恢復及移除
 

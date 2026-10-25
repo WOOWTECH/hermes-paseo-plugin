@@ -58,4 +58,6 @@ docker build --build-arg HERMES_BASE_IMAGE=YOUR_PINNED_S6_HERMES_IMAGE \
 
 安裝或更新此插件的 Dashboard 後端時，使用 Paseo 頁的「重載 Dashboard」。該操作已在真實 s6 主機驗證，不需要跳至 PaaS。原生頁面的「Restart Gateway」會重新載入 Gateway／工具處理程序，屬於另一個操作；必須查看該工作最後的退出狀態，收到「已啟動」不代表重啟完成。
 
-2026-10-25 的 Hermes 0.22.5 測試映像尚缺 PM 已登記的依賴環境，原生 Gateway 重啟回報 `no dependency environment is committed`。官方 `hermes pm repair` 需要足夠空間建立完整環境；5 GiB 測試磁碟在該映像不足，容量及修復驗收尚未完成。遇到相同訊息，先由管理者處理官方依賴環境與容量，再驗證原生重啟。不要因為按鈕接受請求，就認定程序已經換新。
+2026-10-25 的 Hermes 0.22.5 測試映像曾缺少 PM 已登記的依賴環境，原生 Gateway 重啟回報 `no dependency environment is committed`。在獲授權擴至 10 GiB 後，以官方 `hermes pm repair` 沿用原依賴清單修復，原生 Gateway 重啟及容器重建後的 ACP 連線已通過。這是既有主機環境修復，插件不會自動擴容或改寫 Hermes 核心。
+
+遇到同樣訊息，管理者應先確認儲存空間，再以相同服務帳戶、相同 profile 執行官方修復。該映像的 5 GiB 磁碟容納不了修復快照；10 GiB 是此測試組合的實測容量，不是任意模型／映像的容量保證。修復完成後重啟 Hermes，再查看 Gateway 工作的最終退出狀態及實際連線。不要把接受請求當成程序已換新，也不要手動刪除失敗修復標記來跳過檢查。

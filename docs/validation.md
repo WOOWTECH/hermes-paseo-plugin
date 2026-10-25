@@ -12,12 +12,12 @@
 | 初始化／配對 | 正常登入後自動進入引導、runtime 啟動、開啟官方 Paseo Connect，完成加密 relay 配對。 |
 | 正式 Paseo UI | 從 `app.paseo.sh` 建立工作區、選模型、選 Default，首輪回覆及未重複提供完整 marker 的記憶續聊皆通過；以 daemon 的新 assistant 訊息確認，未使用畫面上的 user echo 判定。 |
 | 模型／模式 | 實際列出 Hermes 模型；Default、Accept edits、Don't ask 在官方 UI 可見，三個模式透過正式 SDK 逐一切換後確認生效，再還原 Default。 |
-| 插件背景驗收 | Web POST 約 0.24 秒回傳 202；首輪／續聊真實通過。重新整理沿用同一工作，關閉提交瀏覽器及重載 Dashboard 後仍完成；UI 顯示成功，驗收 agent 與工作區均歸檔、歷史保留。 |
+| 插件背景驗收 | 修復後重跑 Web POST 約 0.13 秒回傳 202；首輪／續聊真實通過。重新整理沿用同一工作，關閉提交瀏覽器及重載 Dashboard 後仍完成；UI 顯示成功，驗收 agent 與工作區均歸檔、歷史保留。 |
 | 原生 Hermes 工具 | 六個已註冊工具 handler 實測；status／models、真實 chat／continue、測試歸檔與停止／恢復皆成功。另由模型真正調用 `paseo_status`，回傳 prompt 未提供的初始化 ID，程序正常結束。 |
 | 暫停／恢復 | 手動停止後重新整理仍維持暫停；恢復後可連線。`/paseo stop` 與 `/paseo start` 均實際執行。 |
 | Dashboard 內重載 | 按插件頁「重載 Dashboard → 確認重載」，確認 generation 改變、API 恢復及頁面自動回來，無須進 PaaS。取消操作不重載。 |
 | 原生停用／移除／重裝 | 先確認背景 daemon 已停止，再停用或刪除來源。重新啟用／安裝後，關閉瀏覽器且阻止前端送 start，主機仍自行恢復；設定、安裝身分與配對資料保留。 |
-| Pod 重建 | 已測無瀏覽器的背景恢復；保留安裝身分，更新容器身分；保留必要 fsGroup，Origin 私有檔案重新掛載後仍為服務帳戶擁有且 600。此項目前的實測先於最末兩個插件修正，最終部署仍須重跑。 |
+| Pod 重建 | 已測無瀏覽器的背景恢復；保留安裝身分，更新容器身分；保留必要 fsGroup，Origin 私有檔案重新掛載後仍為服務帳戶擁有且 600。修復 PM 後已對最終候選實作重跑，約 91 秒恢復，已登記依賴環境及配對身分保留。 |
 | API 防護 | 未登入 401、跨 Origin 重載 403、非法 body 400、跨 profile／重複或多餘 query 均 400，且沒有意外重載。 |
 
 模型使用透過 Hermes 原生本機模型介面安裝的 `Qwen3.5-0.8B-Q4_K_M` CPU 模型。這是可重現的真實推論測試，不使用假的模型回覆。原生 Tool Search 對這個小模型的工具名稱與參數造成失敗，專用測試 profile 改為 eager 工具 schema 後，真正的工具調用通過；插件不會代替使用者修改模型登入或工具集白名單。先前不符合該主機 64K context 最低要求的模型被正常拒絕，沒有降低主機檢查。
@@ -32,9 +32,17 @@
 - [此實作的五組 CI](https://github.com/WOOWTECH/hermes-paseo-plugin/actions/runs/40185856336) 全數通過，包含最低與目前 Node／Python、瀏覽器驗證及供應鏈檢查。
 - 狀態 API 的小樣本為 16 次請求、並行 4、錯誤 0；中位數約 73 ms、最大約 96 ms。這不是容量測試或 SLA。
 
-### 尚未通過與使用限制
+### 修復後再驗證與使用限制
 
-Hermes 原生「Restart Gateway」接受了工作，但實際程序失敗，不能把收到 ACK 當作重啟成功。此映像的內部啟動入口需要已登記的 PM dependency environment，目前只有舊式 in-tree 套件與依賴清單。官方 `hermes pm repair` 沿用原清單建立環境時，5 GiB 資料磁碟空間不足；尚待容量處理後重跑官方修復及 Gateway 重啟、最終 Pod 重建驗收。失敗修復留下官方恢復標記後，重新啟動的 ACP 無法註冊到 Paseo，新的模型選單載入也未通過；因此上表的真實對話通過紀錄是修復嘗試前的證據，不代表此測試服務目前已完整可用。插件自己的 Dashboard 重載已通過，但不代替 Gateway 重啟。
+原生「Restart Gateway」與 PM 依賴阻擋已修復。原映像只有 in-tree 套件及依賴清單，內部啟動入口需要已登記環境；官方 `hermes pm repair` 原先因 5 GiB 磁碟不足失敗。取得擴容及副本遷移授權後，先建立第三份副本並確認三份均為 RW，再移除低空間節點的指定副本、恢復兩份健康副本，將此服務磁碟擴至 10 GiB 並完成 filesystem remount。未降低 Longhorn 空間門檻，也未改其他磁碟或全域設定。
+
+官方修復以原本八個 extras 重建環境，退出碼 0；官方流程自行清除失敗標記，沒有手動刪除恢復標記或繞過依賴檢查。原生內部入口的版本查詢及 `acp --check` 均退出 0，Hermes 仍為 0.22.5。Dashboard 原生 Gateway 重啟已確認工作退出 0、s6 程序身分換新、Gateway Running 與 Paseo 可連線，無須進 PaaS。
+
+修復後再重建容器，已登記環境保留、沒有修復標記，Paseo 無瀏覽器自動恢復。官方 Paseo 使用原裝置重新連線，實際選模型及 Default 模式，首輪與未提供完整 marker 的記憶續聊再度通過，agent 與工作區均歸檔。 插件背景驗收亦重新通過，提交約 0.13 秒回傳 202；重新整理、Dashboard 重載及關閉提交瀏覽器後仍完成，UI 成功與 agent／工作區歸檔均已確認。
+
+此輪發現專用測試 profile 的 Tool Search 值誤含額外引號，導致小模型反覆搜尋工具而超時；以官方 `hermes config set tools.tool_search.enabled off` 修正後重新驗收通過。ACP 測試工具集限定為 `hermes_paseo`，全域 `hermes-cli` 白名單保留。原生 `plugins doctor` 與 `plugins validate` 也通過（6 個工具、1 個 hook）；validate 仍提醒程序身分檢查與主機 adapter 使用內部讀取介面，故版本相容性需依實測矩陣驗證。
+
+實際 PVC 已為 10 GiB；PaaS 此服務保存的容量／部署值仍為 5 GiB，同步持久紀錄尚待明確授權。後續重新部署前須同步這台服務的 `persistence.data.size` 及容量紀錄，避免舊值造成擴縮判斷失敗。這不改變本輪已完成的 Pod 重建與對話驗收。
 
 目前不能宣稱無條件正式上線。另有以下範圍尚未驗證：
 
