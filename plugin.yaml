@@ -1,5 +1,5 @@
 name: hermes-paseo
-version: 0.1.4-rc.1
+version: 0.1.4-rc.2
 kind: standalone
 author: WOOWTECH
 description: Profile-scoped Paseo runtime, protected dashboard pairing, and Hermes ACP conversations.

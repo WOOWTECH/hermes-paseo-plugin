@@ -27,6 +27,20 @@ python3 bin/install-dashboard-control-k8s.py \
 
 掛載會跨 Pod 重啟保留。Helm 升級／重新部署可能重建工作負載並移除額外掛載：正式部署需將相同 volume/mount 納入 chart／部署模板，或在部署完成後重新執行這個安裝命令。不要只靠一次手動 patch 宣稱所有平台 redeploy 均已支援。
 
+### 正式 chart 整合狀態
+
+已準備選用式 `paseoDashboardControl` 掛載支援，預設停用；管理者指定由自己維護的現有 ConfigMap，chart 固定掛載四個 adapter 檔案與 CLI wrapper。這份修正已通過 Helm render／upgrade 的離線驗證，但仍為草稿 PR，尚未發布及部署到本測試服務。
+
+預計的服務 values 形狀如下；**現行 0.3.13 chart 不支援此設定**，單獨填入不會建立掛載：
+
+```yaml
+paseoDashboardControl:
+  enabled: true
+  existingConfigMap: YOUR_REVIEWED_ADAPTER_CONFIGMAP
+```
+
+正式啟用需要同時保留已發布的新 chart 版本、服務專用 values，以及同 namespace 的 adapter ConfigMap。不能只把值寫入資料庫就宣稱部署完成；必須經平台實際 Redeploy 後重新驗證掛載、Dashboard 重載及模型對話。
+
 若工作負載設定 `fsGroup`，Kubernetes 重新掛載可能把 Origin 檔案從 `600` 改成 `660`。0.1.4 保留平台所需的 `fsGroup`，在 Dashboard 啟動時只修復服務帳戶擁有、無 symlink／hardlink、內容與正式 `HERMES_DASHBOARD_PUBLIC_URL` 一致的 Origin 檔案及其專用目錄。其他私有檔案及錯誤 Origin 不會被自動信任或改寫。舊的 `--preserve-private-profile` 參數保留作目錄 UID 驗證，相容既有部署命令，但不再移除 `fsGroup`。
 
 已啟用插件在主機啟動時自動準備 runtime；已啟用的服務意外中斷時，在 Dashboard 受管程序內恢復，不需要開啟瀏覽器。使用者手動停止的狀態仍保留。從 Hermes Web 停用或移除此插件時，主機會先停止其擁有的 Paseo daemon，再讓原生操作繼續；停止尚未確認時回傳錯誤，保留插件來源供重試。從 CLI 移除仍須先執行 `/paseo stop`。

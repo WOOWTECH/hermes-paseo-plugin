@@ -56,3 +56,13 @@
 - Flush and exit one-shot control processes so dependency handles cannot hold completed results open.
 - Replace the synchronous Web acceptance request after observing Cloudflare HTTP 524 at 125 seconds: return a durable background job, deduplicate submissions across processes, poll via authenticated status, and preserve a running job through Dashboard reload. Never retry a model call automatically.
 - Use a dedicated local-model fixture with an explicit ACP toolset for resource-bounded real conversations; preserve the pre-test configuration privately. This does not establish cloud-provider authentication or companion availability.
+
+### Task 8: Bounded concurrency and restoration (2026-10-25 continuation)
+
+- Add `tests/live-concurrency.mjs`: explicit live opt-in, bounded independent two-turn sessions, unique markers, actual assistant cursor verification, cleanup of owned agents/workspaces, sanitized metrics. Run against the dedicated cloud-model service, then sample process/cgroup health.
+- Quiesce only the dedicated Paseo plugin before backing up its durable state. Keep the runtime cache in place; store credentials/history in private backup files only. Restore to the same supported home while the plugin is paused, validate file digests/permissions and unchanged installation/server identity, resume, and re-run the saved-device official UI conversation. Preserve pre-restore rollback data until verification succeeds.
+- Implement optional, default-disabled chart mounts in an isolated chart worktree and validate render/upgrade behavior. Do not roll unrelated tenants or change the global template pin. Verify service-specific deployment through platform-compatible saved values before claiming platform redeploy persistence.
+- Record the difference between short bounded load and long-duration soak, and between same-volume plugin restoration and disaster recovery from a separate backup store.
+- Update public validation and operator instructions; publish only after regression/CI and live evidence are reviewed.
+
+- Publish `v0.1.4-rc.2` with the bounded verifier and operating evidence after checks; keep `v0.1.4-rc.1` immutable. Verify a native Dashboard update on the dedicated service and rerun conversation after reload.
