@@ -1,12 +1,12 @@
 # 在 Hermes 內重載 Dashboard
 
-v0.1.3 的 Paseo 頁提供「重載 Dashboard → 確認重載」。主機端確認請求後，只結束目前的 Dashboard 程序，由原來的 s6 supervisor 重新啟動。頁面等待新的伺服器識別及可用的插件 API，再自動重新整理目前頁面。
+Paseo 頁提供「重載 Dashboard → 確認重載」。主機端確認請求後，只結束目前的 Dashboard 程序，由原來的 s6 supervisor 重新啟動。頁面等待新的伺服器識別及可用的插件 API，再自動重新整理目前頁面。0.1.4 的主機介面另管理無瀏覽器時的啟動恢復及原生 Web 停用／移除前的服務停止。
 
 此按鈕需要主機端一次性部署 `host/` adapter。普通 Hermes 插件安裝不會自行改寫主機 CLI 或取得管理權限；沒有 adapter 時按鈕會停用並顯示原因。首次安裝插件時，即使插件 API 還是 404，準備好的主機也可以使用此按鈕。
 
 ## 主機需求
 
-- Hermes 0.19 的 FastAPI Dashboard 與原有登入保護。
+- Hermes 0.19／0.22 的 FastAPI Dashboard 與原有登入保護；發版驗證以實測矩陣為準。
 - 單一 Hermes profile、s6 supervision；服務路徑 `/run/service/dashboard`。
 - CLI 位於 `/opt/hermes/.venv/bin/hermes`，Python 位於同一 venv。
 - 以 Hermes 服務帳戶啟動 Dashboard，保留原映像的 privilege-drop shim。
@@ -27,7 +27,9 @@ python3 bin/install-dashboard-control-k8s.py \
 
 掛載會跨 Pod 重啟保留。Helm 升級／重新部署可能重建工作負載並移除額外掛載：正式部署需將相同 volume/mount 納入 chart／部署模板，或在部署完成後重新執行這個安裝命令。不要只靠一次手動 patch 宣稱所有平台 redeploy 均已支援。
 
-若工作負載設定 `fsGroup`，Kubernetes 重新掛載可能把 profile 的私有檔案由 `600` 改成 `660`，導致 Origin 等私有設定被拒絕。對於已存在且 `/opt/data` 由 Hermes UID 10000 擁有的 s6 部署，可加 `--preserve-private-profile`；安裝器先驗證正在運行的所屬 Pod 與目錄 UID，再移除這一台工作負載的遞迴 fsGroup 權限改寫。仍由原映像維持服務帳戶的目錄所有權，私有檔案驗證不會放寬。若已被改寫，需用服務帳戶重新執行 Origin 設定命令；正式 chart 也需保留這項設定。
+若工作負載設定 `fsGroup`，Kubernetes 重新掛載可能把 Origin 檔案從 `600` 改成 `660`。0.1.4 保留平台所需的 `fsGroup`，在 Dashboard 啟動時只修復服務帳戶擁有、無 symlink／hardlink、內容與正式 `HERMES_DASHBOARD_PUBLIC_URL` 一致的 Origin 檔案及其專用目錄。其他私有檔案及錯誤 Origin 不會被自動信任或改寫。舊的 `--preserve-private-profile` 參數保留作目錄 UID 驗證，相容既有部署命令，但不再移除 `fsGroup`。
+
+已啟用插件在主機啟動時自動準備 runtime；已啟用的服務意外中斷時，在 Dashboard 受管程序內恢復，不需要開啟瀏覽器。使用者手動停止的狀態仍保留。從 Hermes Web 停用或移除此插件時，主機會先停止其擁有的 Paseo daemon，再讓原生操作繼續；停止尚未確認時回傳錯誤，保留插件來源供重試。從 CLI 移除仍須先執行 `/paseo stop`。
 
 ## 建入 s6 映像
 

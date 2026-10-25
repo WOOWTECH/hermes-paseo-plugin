@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import signal
+import asyncio
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -103,6 +104,52 @@ class DashboardControlTests(unittest.TestCase):
         self.assertNotIn('spa', r.json())
         self.assertEqual(client.get('/sessions').json(), {'spa': True})
         self.assertEqual(len([r for r in app.routes if getattr(r, 'path', '') == module.PREFIX + '/reload']), 1)
+
+
+class LifecycleMiddlewareTests(unittest.TestCase):
+    def setUp(self):
+        self.order = []
+        self.life = SimpleNamespace(error=None)
+        async def run():
+            await asyncio.Event().wait()
+        self.life.run = run
+        self.life.stop_for_disable = lambda record: self.order.append('stopped')
+        self.life.mark_disabled = lambda: self.order.append('recorded')
+        app = FastAPI()
+        @app.post('/api/dashboard/agent-plugins/hermes-paseo/disable')
+        def disable():
+            self.order.append('disabled')
+            return {'ok': True}
+        @app.delete('/api/dashboard/agent-plugins/hermes-paseo')
+        def remove():
+            self.order.append('removed')
+            return {'ok': True}
+        def auth(request):
+            if request.headers.get('x-test-session') != 'valid':
+                raise HTTPException(401)
+        server = SimpleNamespace(app=app, _require_token=auth)
+        module.install(server, enabled=lambda: True, public_origin=lambda: 'https://hermes.test',
+                       control=module.Control(lambda: os.getpid(), Mock(), 0), lifecycle=self.life)
+        self.client = TestClient(app)
+        self.headers = {'x-test-session': 'valid', 'origin': 'https://hermes.test',
+                        'sec-fetch-site': 'same-origin'}
+
+    def test_gui_disable_and_remove_stop_before_source_is_removed(self):
+        with self.client:
+            self.assertEqual(self.client.post('/api/dashboard/agent-plugins/hermes-paseo/disable', headers=self.headers).status_code, 200)
+            self.assertEqual(self.order, ['stopped', 'disabled', 'recorded'])
+            self.order.clear()
+            self.assertEqual(self.client.delete('/api/dashboard/agent-plugins/hermes-paseo', headers=self.headers).status_code, 200)
+            self.assertEqual(self.order, ['stopped', 'removed', 'recorded'])
+
+    def test_denied_requests_cannot_stop_or_remove(self):
+        with self.client:
+            r = self.client.delete('/api/dashboard/agent-plugins/hermes-paseo')
+            self.assertEqual(r.status_code, 401)
+            r = self.client.delete('/api/dashboard/agent-plugins/hermes-paseo',
+                                   headers={**self.headers, 'origin': 'https://evil.test'})
+            self.assertEqual(r.status_code, 403)
+            self.assertEqual(self.order, [])
 
 
 if __name__ == '__main__':

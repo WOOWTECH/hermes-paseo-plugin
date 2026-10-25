@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Local DOM smoke test with real React and mocked plugin API (no paid/remote calls).
+"""Real React/Chromium tests with local plugin and host API fixtures only.
 
 Usage: python3 tests/ui-browser.py --react-node-modules /path/to/node_modules
        [--chromium-executable /path/to/chrome] [--screenshot /tmp/mobile.png]
-Requires an existing React/ReactDOM/scheduler installation and Python Playwright.
-No package installation or UI build is performed.
+Install the locked tests/ui-browser-deps packages and ui-browser-requirements.txt
+under /tmp, then install Playwright's Chromium under /tmp. CI shows the exact
+commands. No package installation or UI build is performed by this script.
+These tests verify browser behavior, not a live host, pairing or paid acceptance.
 """
 import argparse
 import json
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -79,6 +82,12 @@ class Fixture:
         self.completed = False
         self.ready_at = None
         self.missing_api = False
+        self.invalid_status = False
+        self.host_supported = False
+        self.generation = 'fixture-generation-before'
+        self.reload_status = 202
+        self.disconnect_reload = False
+        self.documents = 0
 
     def status(self):
         if self.ready_at and time.monotonic() >= self.ready_at:
@@ -91,8 +100,36 @@ class Fixture:
                                dict(provider='codex', label='未安裝 Codex', status='unavailable')],
                     onboarding=dict(required=not self.completed, id=self.onboarding_id, completed=self.completed))
 
-    def count(self, endpoint):
-        return sum(call['path'].endswith(endpoint) for call in self.calls)
+    def count(self, endpoint, method=None):
+        return sum(call['path'].endswith(endpoint) and
+                   (method is None or call['method'] == method) for call in self.calls)
+
+    @classmethod
+    def reloadable(cls, *, missing_api=False, paused=False):
+        fixture = cls()
+        fixture.host_supported = True
+        fixture.phase, fixture.enabled = ('disabled', False) if paused else ('running', True)
+        fixture.completed = True
+        fixture.missing_api = missing_api
+        return fixture
+
+
+def wait_for_calls(page, fixture, endpoint, count):
+    """Wait for an observed HTTP event, without assuming a response latency."""
+    deadline = time.monotonic() + 5
+    while fixture.count(endpoint) < count:
+        assert time.monotonic() < deadline, f'No fixture request for {endpoint}'
+        page.wait_for_timeout(20)
+
+
+def assert_posts(fixture, origin):
+    for call in fixture.calls:
+        if call['method'] != 'POST':
+            continue
+        expected = {'confirm': True} if call['path'] == '/api/hermes-paseo-host/reload' else {}
+        assert json.loads(call['body']) == expected
+        assert call['content_type'] == 'application/json'
+        assert call['origin'] == origin and call['site'] == 'same-origin'
 
 
 def run(args):
@@ -114,12 +151,17 @@ def run(args):
 
         def do_GET(self):
             path = urlsplit(self.path).path
+            if path == '/api/hermes-paseo-host/capabilities':
+                fixture.calls.append(dict(path=path, method='GET', generation=fixture.generation))
+                if not fixture.host_supported:
+                    return self.send({'detail': 'PRIVATE_BACKEND_BODY'}, status=404)
+                return self.send(dict(supported=True, generation=fixture.generation))
             if path.startswith('/api/plugins/hermes-paseo/'):
                 fixture.calls.append(dict(path=path, method='GET'))
                 if fixture.missing_api:
                     return self.send({'detail': 'PRIVATE_BACKEND_BODY'}, status=404)
                 if path.endswith('/status'):
-                    return self.send(fixture.status())
+                    return self.send({} if fixture.invalid_status else fixture.status())
                 if path.endswith('/models/hermes'):
                     return self.send(dict(models=[dict(id='acp-discovered-model', label='Hermes 即時模型')],
                                           modes=[dict(id='discovered-mode', label='ACP 動態模式')]))
@@ -132,8 +174,12 @@ def run(args):
                 return self.send((ROOT / 'dashboard/dist/index.js').read_bytes(), 'text/javascript')
             if path == '/style.css':
                 return self.send((ROOT / 'dashboard/dist/style.css').read_bytes(), 'text/css')
+            if path not in ['/paseo', '/plugins']:
+                return self.send({}, status=404)
+            fixture.documents += 1
             return self.send(b'''<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
               <meta name="viewport" content="width=device-width,initial-scale=1">
+              <link rel="icon" href="data:,">
               <link rel="stylesheet" href="/style.css"><style>body{margin:0;font-family:system-ui}</style>
               <div id="root"></div><script src="/react.js"></script><script src="/harness.js"></script>
               <script src="/plugin.js"></script><script>mountShell()</script></html>''', 'text/html')
@@ -143,6 +189,17 @@ def run(args):
             fixture.calls.append(dict(path=self.path, method='POST', body=body.decode(),
                                       content_type=self.headers.get('Content-Type'),
                                       origin=self.headers.get('Origin'), site=self.headers.get('Sec-Fetch-Site')))
+            if self.path == '/api/hermes-paseo-host/reload':
+                if (not fixture.host_supported or json.loads(body) != {'confirm': True} or
+                        self.headers.get('Content-Type') != 'application/json'):
+                    return self.send({}, status=400)
+                if fixture.disconnect_reload:
+                    fixture.generation = 'fixture-generation-after'
+                    self.connection.shutdown(socket.SHUT_RDWR)
+                    self.connection.close()
+                    return
+                return self.send(dict(ok=fixture.reload_status == 202, generation=fixture.generation),
+                                 status=fixture.reload_status)
             if body != b'{}' or self.headers.get('Content-Type') != 'application/json':
                 return self.send({}, status=400)
             if self.path.endswith('/start'):
@@ -167,6 +224,7 @@ def run(args):
     thread.start()
     origin = f'http://127.0.0.1:{server.server_port}'
     errors = []
+    blocked_requests = []
     try:
         with sync_playwright() as p:
             options = dict(headless=True, args=['--no-sandbox'])
@@ -182,6 +240,7 @@ def run(args):
                 elif request.request.url.startswith('https://app.paseo.sh/'):
                     request.fulfill(status=200, content_type='text/html', body='<p>Mock official binding</p>')
                 else:
+                    blocked_requests.append('Unexpected external request blocked')
                     request.abort()
             context.route('**/*', route)
             page = context.new_page()
@@ -195,6 +254,8 @@ def run(args):
             expect(page.get_by_role('button', name='產生配對連結')).to_be_enabled(timeout=10000)
             assert fixture.count('/start') == 1
             assert fixture.count('/acceptance') == 0
+            expect(page.get_by_role('button', name='重載 Dashboard', exact=True)).to_be_disabled()
+            expect(page.get_by_text('一次性主機設定', exact=False)).to_be_visible()
             expect(page.get_by_role('combobox', name='代理', exact=True)).to_have_value('hermes')
             assert page.get_by_role('combobox', name='代理', exact=True).locator('option').all_text_contents() == ['本機 Hermes ACP']
             expect(page.get_by_role('combobox', name='模型', exact=True)).to_have_value('acp-discovered-model', timeout=10000)
@@ -234,9 +295,7 @@ def run(args):
             before = len(fixture.calls)
             page.wait_for_timeout(5200)
             assert len(fixture.calls) == before, 'unmount must stop all polling'
-            posts = [call for call in fixture.calls if call['method'] == 'POST']
-            assert all(call['body'] == '{}' and call['content_type'] == 'application/json' and
-                       call['origin'] == origin and call['site'] == 'same-origin' for call in posts)
+            assert_posts(fixture, origin)
             context.close()
             fixture = Fixture()
             fixture.missing_api = True
@@ -245,15 +304,162 @@ def run(args):
             page = context.new_page()
             page.on('pageerror', lambda error: errors.append(str(error)))
             page.goto(origin + '/paseo')
-            expect(page.get_by_role('alert')).to_contain_text('重新啟動 hermes dashboard')
-            expect(page.get_by_role('alert')).to_contain_text('不需要升級映像')
+            expect(page.get_by_role('alert')).to_contain_text('外掛 API 尚未載入')
+            expect(page.get_by_role('alert')).to_contain_text('重載 Dashboard')
+            expect(page.get_by_role('button', name='重載 Dashboard', exact=True)).to_be_disabled()
+            expect(page.get_by_text('一次性主機設定', exact=False)).to_be_visible()
             expect(page.get_by_role('button', name='產生配對連結')).to_be_disabled()
             assert fixture.count('/start') == 0
             assert 'PRIVATE_BACKEND_BODY' not in page.inner_text('body')
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
             context.close()
+
+            def open_reload_scenario(current):
+                nonlocal fixture
+                fixture = current
+                ctx = browser.new_context(viewport=dict(width=390, height=844), service_workers='block')
+                ctx.route('**/*', route)
+                tab = ctx.new_page()
+                tab.on('pageerror', lambda error: errors.append(str(error)))
+                # Pause before loading any application code. Only the real
+                # browser's timers advance; production code is never patched.
+                tab.clock.install(time=1_700_000_000_000)
+                tab.clock.pause_at(1_700_000_001_000)
+                tab.goto(origin + '/paseo')
+                expect(tab.get_by_role('button', name='重載 Dashboard', exact=True)).to_be_enabled()
+                return ctx, tab
+
+            def confirm_reload(tab):
+                tab.get_by_role('button', name='重載 Dashboard', exact=True).click()
+                expect(tab.get_by_role('dialog', name='確認重載 Dashboard')).to_be_visible()
+                assert fixture.count('/reload', 'POST') == 0, 'opening confirmation must never POST'
+                tab.get_by_role('button', name='確認重載', exact=True).click()
+
+            def advance_poll(tab, *, reads_status=False):
+                def capabilities():
+                    with tab.expect_response(origin + '/api/hermes-paseo-host/capabilities') as response:
+                        tab.clock.run_for(2001)
+                    response.value.json()
+                if reads_status:
+                    with tab.expect_response(origin + '/api/plugins/hermes-paseo/status') as response:
+                        capabilities()
+                    # The application deliberately ignores error bodies. With
+                    # intercepted fetches Chromium may discard that body before
+                    # Playwright can read it, so inspect only successful JSON.
+                    if response.value.ok:
+                        response.value.json()
+                else:
+                    capabilities()
+
+            # Real DOM confirmation/cancel and both independent recovery gates.
+            context, page = open_reload_scenario(Fixture.reloadable(missing_api=True))
+            expect(page.get_by_role('alert')).to_contain_text('外掛 API 尚未載入')
+            page.get_by_role('button', name='重載 Dashboard', exact=True).click()
+            expect(page.get_by_role('dialog', name='確認重載 Dashboard')).to_be_visible()
+            assert fixture.count('/reload', 'POST') == 0
+            page.get_by_role('button', name='取消', exact=True).click()
+            expect(page.get_by_role('dialog')).to_have_count(0)
+            assert fixture.count('/reload', 'POST') == 0
+            confirm_reload(page)
+            expect(page.get_by_role('button', name='正在重載…', exact=True)).to_be_disabled()
+            wait_for_calls(page, fixture, '/capabilities', 2)
+            assert fixture.count('/reload', 'POST') == 1
+            assert fixture.documents == 1, 'POST acceptance alone must not refresh'
+            status_reads = fixture.count('/status')
+            fixture.missing_api = False
+            advance_poll(page)
+            assert fixture.documents == 1, 'ready API with unchanged generation must not refresh'
+            assert fixture.count('/status') == status_reads, 'old generation cannot establish recovery'
+            fixture.missing_api = True
+            fixture.generation = 'fixture-generation-after'
+            advance_poll(page, reads_status=True)
+            wait_for_calls(page, fixture, '/status', status_reads + 1)
+            assert fixture.documents == 1, 'new generation while API is 404 must not refresh'
+            fixture.missing_api, fixture.invalid_status = False, True
+            advance_poll(page, reads_status=True)
+            wait_for_calls(page, fixture, '/status', status_reads + 2)
+            assert fixture.documents == 1, 'HTTP 200 with invalid plugin status must not refresh'
+            fixture.invalid_status = False
+            with page.expect_navigation(wait_until='load'):
+                page.clock.run_for(2001)
+            expect(page).to_have_url(origin + '/paseo')
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_enabled()
+            assert fixture.documents == 2
+            assert fixture.count('/reload', 'POST') == 1
+            assert all(fixture.count(path, 'POST') == 0 for path in ['/start', '/pair', '/acceptance'])
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            assert_posts(fixture, origin)
+            context.close()
+            print('PASS: confirmation/cancel; reload requires a new generation and valid recovered API status.')
+
+            # A dropped response may mean the restart was accepted. Observe the
+            # new host once without repeating a destructive POST or losing pause.
+            current = Fixture.reloadable(paused=True)
+            current.disconnect_reload = True
+            context, page = open_reload_scenario(current)
+            expect(page.get_by_text('已手動停止', exact=True).last).to_be_visible()
+            with page.expect_navigation(wait_until='load'):
+                confirm_reload(page)
+            expect(page.get_by_role('button', name='恢復服務', exact=True)).to_be_enabled()
+            saved = page.evaluate('JSON.parse(sessionStorage.getItem("hermes-paseo:ui:v1"))')
+            assert saved['paused'] is True
+            assert fixture.documents == 2 and fixture.count('/reload', 'POST') == 1
+            assert fixture.count('/start', 'POST') == 0
+            assert_posts(fixture, origin)
+            context.close()
+            print('PASS: disconnected reload POST is not retried; manual pause survives actual refresh.')
+
+            for code, message in [(401, '登入已過期'), (403, '操作被拒絕'), (409, '上一項操作')]:
+                current = Fixture.reloadable()
+                current.reload_status = code
+                context, page = open_reload_scenario(current)
+                confirm_reload(page)
+                expect(page.get_by_role('alert')).to_contain_text(message)
+                page.clock.run_for(4001)
+                assert fixture.documents == 1 and fixture.count('/reload', 'POST') == 1
+                assert_posts(fixture, origin)
+                context.close()
+            print('PASS: reload auth/permission/busy failures remain actionable without refresh or POST retries.')
+
+            context, page = open_reload_scenario(Fixture.reloadable())
+            confirm_reload(page)
+            wait_for_calls(page, fixture, '/capabilities', 2)
+            page.clock.fast_forward(60001)
+            expect(page.get_by_role('alert')).to_contain_text('尚未確認重載完成')
+            assert fixture.documents == 1 and fixture.count('/reload', 'POST') == 1
+            assert_posts(fixture, origin)
+            context.close()
+            print('PASS: unchanged generation times out without refresh or automatic POST retries.')
+
+            context, page = open_reload_scenario(Fixture.reloadable(missing_api=True))
+            confirm_reload(page)
+            wait_for_calls(page, fixture, '/capabilities', 2)
+            page.evaluate('disablePlugin()')
+            expect(page.get_by_text('Host plugin settings')).to_be_visible()
+            before = len(fixture.calls)
+            page.clock.fast_forward(62001)
+            assert len(fixture.calls) == before, 'unmount must stop recovery polling and timeout work'
+            assert fixture.documents == 1 and fixture.count('/reload', 'POST') == 1
+            context.close()
+            print('PASS: unmount during reload cancels observation and never refreshes the host.')
+
+            for phase in ['installing', 'starting', 'stopping']:
+                current = Fixture.reloadable()
+                current.phase = phase
+                fixture = current
+                context = browser.new_context()
+                context.route('**/*', route)
+                page = context.new_page()
+                page.on('pageerror', lambda error: errors.append(str(error)))
+                page.goto(origin + '/paseo')
+                wait_for_calls(page, fixture, '/capabilities', 1)
+                expect(page.get_by_role('button', name='重載 Dashboard', exact=True)).to_be_disabled()
+                assert fixture.count('/reload', 'POST') == 0
+                context.close()
+            print('PASS: active installer/start/stop phases disable Dashboard reload.')
             browser.close()
         assert not errors, f'Browser React errors: {errors}'
+        assert not blocked_requests, blocked_requests
         print('PASS: real React DOM, host activation, first start, secure explicit link, dynamic ACP selectors, '
               'paid-action gating, manual pause/resume, unmount cleanup, mobile layout, old-host 404 guidance. '
               'API and official binding are local mocks; no real acceptance or deployment performed.')

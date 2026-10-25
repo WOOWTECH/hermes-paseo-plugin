@@ -36,7 +36,7 @@ class HostInstallerTests(unittest.TestCase):
                     installer.main()
                 self.assertFalse(any('apply' in c.args[0] or 'patch' in c.args[0] for c in run.call_args_list))
 
-    def test_verified_profile_dry_run_has_no_writes_and_removes_only_fsgroup(self):
+    def test_verified_profile_dry_run_preserves_platform_fsgroup(self):
         output = io.StringIO()
         with patch.object(sys, 'argv', self.args), \
                 patch.object(installer.subprocess, 'run', side_effect=self.replies()) as run, \
@@ -44,7 +44,7 @@ class HostInstallerTests(unittest.TestCase):
             installer.main()
         result = json.loads(output.getvalue())
         self.assertTrue(result['dry_run'])
-        self.assertEqual(result['patch']['spec']['template']['spec']['securityContext'], {'fsGroup': None})
+        self.assertNotIn('securityContext', result['patch']['spec']['template']['spec'])
         self.assertEqual(run.call_count, 3)
         self.assertFalse(any('apply' in c.args[0] or 'patch' in c.args[0] for c in run.call_args_list))
 

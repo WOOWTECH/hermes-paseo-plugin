@@ -19,9 +19,9 @@ hermes plugins enable hermes-paseo
 
 原生 Agent 插件與 Dashboard 頁面均包含在同一 repo。啟用後開啟 Paseo 頁面，按引導準備服務與產生配對；在新分頁開啟官方 Paseo，按 Connect 完成綁定，再選 Hermes、模型與權限模式。
 
-仍啟用的服務因容器或 daemon 重啟而中斷時，開啟 Hermes Web 會嘗試恢復服務；不會把意外中斷當成手動停止。真正的手動停止會保留，恢復失敗需要按按鈕重試。這是可見 Web 介面的恢復行為，不是容器啟動的背景 supervisor。
+配置 0.1.4 主機介面時，仍啟用的服務在容器啟動後會準備 runtime，並在 daemon 意外中斷後恢復，不需開啟瀏覽器。手動停止的狀態會保留；Hermes Web 停用／移除插件前也會先確認服務停止。未配置主機介面時，仍使用可見 Web 頁面的恢復流程，CLI 移除前須先停止服務。
 
-首次安裝的後端 API 是否能立即使用，依 Hermes 版本而異。v0.1.3 在 Paseo 頁提供「重載 Dashboard → 確認重載」；配置好主機介面後，即使插件 API 尚未載入也可使用，完成後自動回到目前頁面。管理者須先完成一次性 [Dashboard 主機設定](docs/dashboard-control.zh-TW.md)；未配置主機會停用此按鈕並說明原因。
+首次安裝的後端 API 是否能立即使用，依 Hermes 版本而異。Paseo 頁提供「重載 Dashboard → 確認重載」；配置好主機介面後，即使插件 API 尚未載入也可使用，完成後自動回到目前頁面。管理者須先完成一次性 [Dashboard 主機設定](docs/dashboard-control.zh-TW.md)；未配置主機會停用此按鈕並說明原因。
 
 Hermes 0.19 的 Web 插件列表只在頁面載入時讀取。從插件頁安裝或啟用後，請重新整理一次；插件載入後會自動開啟尚未完成的配對指南。
 

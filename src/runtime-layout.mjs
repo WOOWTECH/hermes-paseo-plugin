@@ -6,7 +6,7 @@ import {privateDirectory,atomicJson,RuntimeError,assertSafePath} from './state.m
 const template=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../runtime');
 const lock=fs.readFileSync(path.join(template,'package-lock.json'));
 const lockSha256=createHash('sha256').update(lock).digest('hex');
-export const RUNTIME_REVISION='0.11.2-r1-'+lockSha256.slice(0,12);
+export const RUNTIME_REVISION='0.11.2-r2-'+lockSha256.slice(0,12);
 export const runtimeDirectory=loc=>path.join(loc.runtimeDir,'releases',RUNTIME_REVISION);
 export function runtimeReady(loc) {
  try {

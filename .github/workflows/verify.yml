@@ -1,20 +1,108 @@
 name: Verify Hermes Paseo
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly UTC audit away from the busy start of the hour.
+    - cron: '23 4 * * 1'
 permissions:
   contents: read
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+  PIP_CACHE_DIR: /tmp/hermes-paseo-pip-cache
+  npm_config_cache: /tmp/hermes-paseo-npm-cache
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    name: Unit tests (Python ${{ matrix.python }}, Node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      # Paired minimum/production targets, not a four-way Cartesian product.
+      matrix:
+        include:
+          - python: '3.11'
+            node: '22.19.0'
+          - python: '3.14'
+            node: '26'
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.23.1'
+          node-version: ${{ matrix.node }}
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - run: python -m pip install 'fastapi>=0.115,<0.116' 'httpx>=0.28,<0.29' 'PyYAML>=6,<7'
+          python-version: ${{ matrix.python }}
+      - name: Install unit-test dependencies in /tmp
+        run: |
+          python -m venv /tmp/hermes-paseo-unit-venv
+          /tmp/hermes-paseo-unit-venv/bin/python -m pip install 'fastapi>=0.115,<0.116' 'httpx>=0.28,<0.29' 'PyYAML>=6,<7'
+          echo '/tmp/hermes-paseo-unit-venv/bin' >> "$GITHUB_PATH"
       - run: node --test tests/*.test.mjs
       - run: python -m unittest discover -s tests -p 'test_*.py'
       - run: node --check dashboard/dist/index.js
-      - run: npm audit --omit=dev --prefix runtime
+
+  browser:
+    name: Browser (Python ${{ matrix.python }}, Node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: '3.11'
+            node: '22.19.0'
+          - python: '3.14'
+            node: '26'
+    env:
+      BROWSER_DEPS: /tmp/hermes-paseo-browser-deps
+      PLAYWRIGHT_BROWSERS_PATH: /tmp/hermes-paseo-browser-binaries
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install locked browser-test dependencies in /tmp
+        run: |
+          python -m venv "$BROWSER_DEPS/venv"
+          "$BROWSER_DEPS/venv/bin/python" -m pip install -r tests/ui-browser-requirements.txt
+          mkdir -p "$BROWSER_DEPS/react"
+          cp tests/ui-browser-deps/package*.json "$BROWSER_DEPS/react/"
+          npm ci --prefix "$BROWSER_DEPS/react" --ignore-scripts --no-audit --no-fund
+      - name: Install matching Chromium and system libraries
+        run: '"$BROWSER_DEPS/venv/bin/python" -m playwright install --with-deps chromium'
+      - name: Exercise real React and Chromium against local API fixtures
+        run: |
+          python --version
+          node --version
+          "$BROWSER_DEPS/venv/bin/python" tests/ui-browser.py --react-node-modules "$BROWSER_DEPS/react/node_modules"
+
+  audit:
+    # Runs once per event, including manual and weekly runs; no browser matrix
+    # duplication and no runtime install, credentials or provider calls.
+    name: Locked dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+      - name: Audit the runtime lockfile
+        run: npm audit --omit=dev --prefix runtime
+      - name: Audit the browser fixture lockfile
+        if: ${{ !cancelled() }}
+        run: npm audit --omit=dev --prefix tests/ui-browser-deps

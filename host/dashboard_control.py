@@ -12,6 +12,8 @@ import signal
 import subprocess
 import threading
 import uuid
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
@@ -75,7 +77,7 @@ class Control:
                 self.pending = False
 
 
-def make_router(require_auth, public_origin, enabled, control=None):
+def make_router(require_auth, public_origin, enabled, control=None, lifecycle=None):
     control = control or Control()
     router = APIRouter(prefix=PREFIX)
 
@@ -106,7 +108,8 @@ def make_router(require_auth, public_origin, enabled, control=None):
     def capabilities(request: Request):
         check(request)
         return JSONResponse({'supported': control.supported() and origin(public_origin()) is not None,
-                             'generation': control.generation, 'pending': control.pending},
+                             'generation': control.generation, 'pending': control.pending,
+                             'lifecycleError': lifecycle.error if lifecycle else None},
                             headers=HEADERS)
 
     @router.post('/reload')
@@ -144,21 +147,65 @@ def make_router(require_auth, public_origin, enabled, control=None):
     return router
 
 
-def install(server, enabled=None, public_origin=None, control=None):
+def install(server, enabled=None, public_origin=None, control=None, lifecycle=None):
     if getattr(server.app.state, 'hermes_paseo_host_installed', False):
         return
     if enabled is None:
         from hermes_cli.plugins_cmd import _get_enabled_set, _get_disabled_set
         enabled = lambda: 'hermes-paseo' in _get_enabled_set() and 'hermes-paseo' not in _get_disabled_set()
+    public_origin = public_origin or (lambda: os.environ.get('HERMES_DASHBOARD_PUBLIC_URL', ''))
+    if lifecycle is None and control is None:
+        from profile_lifecycle import ProfileLifecycle, prepare_profile_origin
+        lifecycle = ProfileLifecycle(Path(os.environ.get('HERMES_HOME', '/opt/data')), enabled, public_origin)
+        try:
+            prepare_profile_origin(lifecycle.home, public_origin())
+        except Exception:
+            lifecycle.error = 'PROFILE_ORIGIN_SETUP_REQUIRED'
     existing = list(server.app.router.routes)
     server.app.include_router(make_router(
         server._require_token,
-        public_origin or (lambda: os.environ.get('HERMES_DASHBOARD_PUBLIC_URL', '')),
-        enabled, control,
+        public_origin, enabled, control, lifecycle,
     ))
     # Hermes calls mount_spa(app) while importing web_server. Exact control
     # routes must precede its /{full_path:path} fallback. Middleware/auth still
     # runs first, and only these fixed paths are moved ahead of existing routes.
     server.app.router.routes[:] = server.app.router.routes[len(existing):] + existing
     server.app.openapi_schema = None
+    if lifecycle is not None:
+        original_lifespan = server.app.router.lifespan_context
+        @asynccontextmanager
+        async def lifespan(app):
+            async with original_lifespan(app):
+                task = asyncio.create_task(lifecycle.run())
+                try:
+                    yield
+                finally:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+        server.app.router.lifespan_context = lifespan
+        @server.app.middleware('http')
+        async def stop_before_removal(request, call_next):
+            changing = ((request.method == 'POST' and request.url.path == '/api/dashboard/agent-plugins/hermes-paseo/disable')
+                        or (request.method == 'DELETE' and request.url.path == '/api/dashboard/agent-plugins/hermes-paseo'))
+            if changing:
+                try:
+                    server._require_token(request)
+                    actual = request.headers.get('origin')
+                    if (request.query_params or any(len(request.headers.getlist(key)) > 1
+                            for key in ('origin', 'sec-fetch-site', 'host'))):
+                        return JSONResponse({'detail': 'INVALID_REQUEST'}, status_code=400, headers=HEADERS)
+                    if (origin(public_origin()) is None or (actual and origin(actual) != origin(public_origin()))
+                            or request.headers.get('sec-fetch-site') not in ('same-origin', 'none')
+                            or (not actual and request.headers.get('sec-fetch-site') != 'same-origin')):
+                        return JSONResponse({'detail': 'ORIGIN_DENIED'}, status_code=403, headers=HEADERS)
+                    await asyncio.to_thread(lifecycle.stop_for_disable, False)
+                except HTTPException as error:
+                    return JSONResponse({'detail': error.detail}, status_code=error.status_code, headers=HEADERS)
+                except Exception:
+                    return JSONResponse({'detail': 'PLUGIN_STOP_PENDING'}, status_code=409, headers=HEADERS)
+            response = await call_next(request)
+            if changing and 200 <= response.status_code < 300:
+                await asyncio.to_thread(lifecycle.mark_disabled)
+            return response
     server.app.state.hermes_paseo_host_installed = True

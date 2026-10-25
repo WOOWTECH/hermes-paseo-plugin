@@ -19,10 +19,10 @@ def main():
     parser.add_argument('--workload', required=True)
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--preserve-private-profile', action='store_true',
-                        help='Remove recursive fsGroup chmod for an existing /opt/data profile owned by UID 10000.')
+                        help='Verify the existing service-owned profile; retain fsGroup and repair private Origin at startup.')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    data = {name: (root / 'host' / name).read_text() for name in ('hermes', 'dashboard_control.py')}
+    data = {name: (root / 'host' / name).read_text() for name in ('hermes', 'dashboard_control.py', 'profile_lifecycle.py')}
     digest = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:12]
     volume = 'hermes-paseo-dashboard-control'
     config_name = f'hermes-paseo-dashboard-control-{digest}'
@@ -65,7 +65,7 @@ def main():
                              check=True, capture_output=True, text=True).stdout.strip()
         if uid != '10000':
             raise SystemExit('The existing profile is not owned by the expected service UID; keep fsGroup and review ownership.')
-        patch['spec']['template']['spec']['securityContext'] = {'fsGroup': None}
+        # Keep fsGroup. Repair only the owned private Origin file after mount.
     if not args.apply:
         print(json.dumps({'dry_run': True, 'config_map': config_name,
                           'workload': args.workload, 'patch': patch}, indent=2))
