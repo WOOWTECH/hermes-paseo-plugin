@@ -28,6 +28,16 @@ hermes acp --help
 
 缺少 ACP 或模型登入時，先依 Hermes 的官方安裝／模型設定完成，再安裝此插件。Paseo runtime 會由插件下載；插件不替換 Hermes 核心、Python 環境或既有模型登入。
 
+### 設定 ChatGPT／Codex 訂閱模型（Hermes 0.22.5）
+
+1. 在目標 Hermes 開啟 **Keys**（`/env#section-oauth`），等待供應者清單載入。
+2. 在 **Provider Logins (OAuth)** 找到 **ChatGPT or Codex Subscription**，按 **Login**。
+3. 依畫面顯示的網址及一次性代碼，由帳號持有人完成瀏覽器授權；完成後確認該列顯示已連線。裝置碼登入的帳號前提見 [OpenAI 登入說明](https://learn.chatgpt.com/docs/auth#login-on-headless-devices)。
+4. 到 **Models → Main Model → Change**，選取該供應者及帳號實際可用的模型，按 **Switch**。只登入成功不等於原本的本機預設模型已切換。
+5. 完成進行中的對話後，在 Paseo 插件頁 **停止服務 → 恢復服務**，讓新的 ACP 程序讀取設定；接著依第 5、6 節選模型並實際驗收。
+
+這是目標 Hermes 自己的模型登入；更換用來操作本開發對話的 ChatGPT／Codex 帳號，不會自動完成此設定。無須把密碼、一次性代碼、token 或登入快取交給插件。若之後改用雲端模型，可在 Hermes 原生本機模型介面停止閒置引擎以釋放記憶體，保留已下載模型；確認其他工作沒有使用該引擎後再操作。
+
 ## 2. 安裝：Web 方式（建議）
 
 1. 正常登入 Hermes Web，進入 **Plugins**。
