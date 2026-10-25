@@ -142,6 +142,21 @@ hermes config set tools.tool_search.enabled off
 
 `off` 是設定值，不要把額外的雙引號字元存進值內。實測曾因值變成包含引號的字串而未關閉 Tool Search，導致小模型反覆搜尋工具、未完成對話。設定後完成或停止進行中的對話，再從 Paseo 頁停止／恢復服務，讓新的 ACP 程序載入。
 
+### 小模型測試的 ACP 工具範圍
+
+Hermes 0.22.5 會自動加入尚未在該平台記錄過的插件工具。只填 `platform_toolsets.acp: [hermes_paseo]`，仍可能載入其他插件。本次冷啟動實測因此出現小模型調用不相關工具、沒有回覆測試代碼的失敗。
+
+專用測試服務使用同版 Hermes 工具選單的保存函式，記錄 ACP 選擇及當時已知的插件工具集，再以 Hermes 的實際解析結果確認只有 `hermes_paseo`。保存後的相關片段如下；插件名稱是此服務的實測清單，其他主機須依自己的已安裝工具集處理：
+
+```yaml
+platform_toolsets:
+  acp: [hermes_paseo]
+known_plugin_toolsets:
+  acp: [a2a, hermes_paseo, omnigent]
+```
+
+這版 CLI 的 `hermes tools disable omnigent --platform acp` 會顯示 `Unknown platform 'acp'`，卻回傳退出碼 0；不能用它的退出碼判定成功。管理者應備份設定、使用與該 Hermes 版本相容的工具配置介面，並驗證實際載入的工具及真實對話。保存程序涉及 Hermes 內部介面，升級版本時須重驗。此服務僅限制 ACP，一般 CLI 工具保留；日後安裝新插件仍可能擴充實際工具範圍，需要重新檢查。此配置是小模型測試範圍，並非權限隔離或安全沙箱。
+
 ## 7. 停止、恢復及移除
 
 在 Paseo 插件頁按 **停止服務**，確認停止後重新整理；服務應保持停止。再按 **恢復服務**，確認回到就緒。這個操作保留配對設定與對話資料。
