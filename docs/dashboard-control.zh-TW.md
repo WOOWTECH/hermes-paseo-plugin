@@ -41,6 +41,14 @@ paseoDashboardControl:
 
 正式啟用需要同時保留已發布的新 chart 版本、服務專用 values，以及同 namespace 的 adapter ConfigMap。不能只把值寫入資料庫就宣稱部署完成；必須經平台實際 Redeploy 後重新驗證掛載、Dashboard 重載及模型對話。
 
+### 部署前比對與服務專用版本
+
+部署前應以平台當下組裝的服務設定進行 `helm upgrade --dry-run=server`，並比對運行中的工作負載。不要直接沿用 `helm get values` 作為完整設定：實測中，磁碟已擴容且平台已保存 `10Gi`，舊 Helm revision 仍記錄 `5Gi`；Pod 上手動加入的 CPU 執行緒限制也未出現在平台設定中。已將該測試服務既有的三個限制保存到其 `extraEnv`，保留其他設定，沒有觸發重啟。不同服務應依自己的 CPU 額度設定，不能照抄測試機的數字；合併 `extraEnv` 時保留原有項目。
+
+2026-10-25 的新版 chart 伺服器 dry-run 通過 22 項比對，包括映像、環境變數、資源、安全設定、健康檢查、原 PVC、10 GiB 設定、兩個唯讀掛載、四個 adapter 檔案與模式。Helm revision 及運行中的 Pod template 均未改動。這是候選設定驗證，尚非實際升級。
+
+平台若提供服務專用部署版本，須保存「期望的 chart 版本」及必要的映像 pin，再執行 Redeploy。`helm_chart_version` 若是已部署版本的紀錄，不能修改它來假裝已固定目標版本。此次平台 `.261` 尚未具備該能力；包含此功能的 `.262` 已建置，但仍待 staging／production 部署與實測。不要為一台測試服務改動所有租戶共用的商品範本。
+
 若工作負載設定 `fsGroup`，Kubernetes 重新掛載可能把 Origin 檔案從 `600` 改成 `660`。0.1.4 保留平台所需的 `fsGroup`，在 Dashboard 啟動時只修復服務帳戶擁有、無 symlink／hardlink、內容與正式 `HERMES_DASHBOARD_PUBLIC_URL` 一致的 Origin 檔案及其專用目錄。其他私有檔案及錯誤 Origin 不會被自動信任或改寫。舊的 `--preserve-private-profile` 參數保留作目錄 UID 驗證，相容既有部署命令，但不再移除 `fsGroup`。
 
 已啟用插件在主機啟動時自動準備 runtime；已啟用的服務意外中斷時，在 Dashboard 受管程序內恢復，不需要開啟瀏覽器。使用者手動停止的狀態仍保留。從 Hermes Web 停用或移除此插件時，主機會先停止其擁有的 Paseo daemon，再讓原生操作繼續；停止尚未確認時回傳錯誤，保留插件來源供重試。從 CLI 移除仍須先執行 `/paseo stop`。

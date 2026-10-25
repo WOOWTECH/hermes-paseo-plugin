@@ -95,6 +95,14 @@
 
 配對憑證、模型 API key、登入 cookie、對話逐字稿及測試帳號資料不放入公開驗收文件。
 
+### PaaS 部署設定預檢（2026-10-25 後續）
+
+已以平台實際組裝的服務 values 對候選 `hermes-agent` chart `0.4.0` 執行伺服器 dry-run。22 項比對通過；現有映像、環境、資源、安全設定、健康檢查與 PVC 符合預期，adapter 四個來源檔案與已安裝版本相同。Helm revision 與運行中的 Pod template 均未變動。
+
+預檢發現三個既有 CPU 執行緒限制只保存在 Pod template，已補存至該服務 `extraEnv`；其他 Helm values 逐項比對不變。採用平台當下的 `10Gi`，避免沿用舊 Helm revision 的 `5Gi`。完整流程見 [部署前比對](dashboard-control.zh-TW.md#部署前比對與服務專用版本)。
+
+正式平台仍是 `.261`，服務專用版本固定功能尚未部署。`.262` 的來源與映像已完成發布準備，但仍待平台部署與驗收，因此此結果不列為 PaaS Redeploy 通過。
+
 ## 歷史：0.1.2／Hermes 0.19
 
 2026-10-12；以下為 0.1.2 首次對話驗收。使用者授權實測目標為 woowtech Hermes，Hermes 0.19.0 / Python 3.13.5 / Node 22.22.3。未升級 Hermes 映像或更改既有模型登入。
