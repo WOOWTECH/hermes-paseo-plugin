@@ -34,7 +34,7 @@
 
 ### 尚未通過與使用限制
 
-Hermes 原生「Restart Gateway」接受了工作，但實際程序失敗，不能把收到 ACK 當作重啟成功。此映像的內部啟動入口需要已登記的 PM dependency environment，目前只有舊式 in-tree 套件與依賴清單。官方 `hermes pm repair` 沿用原清單建立環境時，5 GiB 資料磁碟空間不足；尚待容量處理後重跑官方修復及 Gateway 重啟、最終 Pod 重建驗收。插件自己的 Dashboard 重載已通過，但不代替 Gateway 重啟。
+Hermes 原生「Restart Gateway」接受了工作，但實際程序失敗，不能把收到 ACK 當作重啟成功。此映像的內部啟動入口需要已登記的 PM dependency environment，目前只有舊式 in-tree 套件與依賴清單。官方 `hermes pm repair` 沿用原清單建立環境時，5 GiB 資料磁碟空間不足；尚待容量處理後重跑官方修復及 Gateway 重啟、最終 Pod 重建驗收。失敗修復留下官方恢復標記後，重新啟動的 ACP 無法註冊到 Paseo，新的模型選單載入也未通過；因此上表的真實對話通過紀錄是修復嘗試前的證據，不代表此測試服務目前已完整可用。插件自己的 Dashboard 重載已通過，但不代替 Gateway 重啟。
 
 目前不能宣稱無條件正式上線。另有以下範圍尚未驗證：
 
