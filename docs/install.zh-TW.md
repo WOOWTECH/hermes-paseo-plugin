@@ -29,6 +29,17 @@ hermes acp --help
 
 缺少 ACP 或模型登入時，先依 Hermes 的官方安裝／模型設定完成，再安裝此插件。Paseo runtime 會由插件下載；插件不替換 Hermes 核心、Python 環境或既有模型登入。
 
+### Home Assistant add-on
+
+1. 在 Home Assistant 的附加元件商店加入 `https://github.com/WOOWTECH/Woow_HA_App_Store`，安裝或更新 **Woow Hermes Agent 0.1.11**。目前支援 amd64；此映像不支援 ARM／Pi 5。
+2. 從 HA 側欄操作時，在附加元件設定填入 `paseo_ingress_url`，例如 `https://ha.example.com`。填瀏覽器實際使用的協定、主機與選用 port，不含 `/api/hassio_ingress/…` 或其他路徑。保留 `public_url` 供區網 Dashboard 與 MCP OAuth 使用。
+3. 保存附加元件選項後重啟這個附加元件一次。這是載入主機環境設定；日後安裝／更新插件可在 Dashboard 內重載。
+4. 從 HA 側欄登入 Hermes，依下一節在 **Plugins** 安裝 `WOOWTECH/hermes-paseo-plugin` 並啟用。0.1.11 已包含主機介面，不必另外執行 Kubernetes 安裝腳本。
+5. 啟用後開啟 **Paseo**，等待自動下載 runtime；若提示後端未載入，按 **重載 Dashboard → 確認重載**。接著產生配對連結，親自開啟官方 Paseo 並按 **Connect**。
+6. 模型帳號在 Hermes 的 **Keys／Models** 設定；選擇模型及模式後驗收首輪與續聊。插件不附送模型額度。附件讀取還需要管理者開啟 Hermes 原生 `file` 工具集。
+
+完整附加元件教學：[HA Hermes DOCS](https://github.com/WOOWTECH/Woow_ha_hermes_add_on/blob/main/hermes/DOCS.md#paseo-remote-plugin-ha-ingress)。正式映像與實機測試範圍見 [HA 驗收紀錄](ha-acceptance-20261026.zh-TW.md)。
+
 ### 設定 ChatGPT／Codex 訂閱模型（Hermes 0.22.5）
 
 1. 在目標 Hermes 開啟 **Keys**（`/env#section-oauth`），等待供應者清單載入。
@@ -167,6 +178,12 @@ known_plugin_toolsets:
 ```
 
 這版 CLI 的 `hermes tools disable omnigent --platform acp` 會顯示 `Unknown platform 'acp'`，卻回傳退出碼 0；不能用它的退出碼判定成功。管理者應備份設定、使用與該 Hermes 版本相容的工具配置介面，並驗證實際載入的工具及真實對話。保存程序涉及 Hermes 內部介面，升級版本時須重驗。此服務僅限制 ACP，一般 CLI 工具保留；日後安裝新插件仍可能擴充實際工具範圍，需要重新檢查。此配置是小模型測試範圍，並非權限隔離或安全沙箱。
+
+### 更換自訂供應商金鑰後
+
+請使用 Hermes 原生自訂 Endpoint 設定保存金鑰，讓 `providers` 透過 `key_env` 引用 `.env`。不要直接覆寫舊對話使用的 inline `custom_providers.api_key`：HA 實測中，舊對話會保留舊憑證，重啟後可能回報 `launch_credentials_unavailable`，Paseo 也可能將同一錯誤顯示為不支援模型選擇。
+
+既有 inline provider 的遷移方式是先保留舊宣告、建立新的命名供應商，再在原對話明確選取新供應商／模型。確認切換與實際續聊成功後，才移除舊宣告並撤銷舊憑證。HA 已實測新命名供應商的模型切換；修正後實際模型回覆仍待驗。不要連續重送失敗訊息，詳見 [HA 驗收紀錄](ha-acceptance-20261026.zh-TW.md)。
 
 ### Paseo Web 實測注意事項
 

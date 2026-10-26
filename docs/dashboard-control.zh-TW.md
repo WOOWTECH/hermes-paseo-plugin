@@ -14,6 +14,8 @@ Paseo 頁提供「重載 Dashboard → 確認重載」。主機端確認請求�
 
 ### Home Assistant Ingress 的第二個 Origin
 
+**Woow Hermes add-on 0.1.11 已內建此介面。** 使用 [HA App Store](https://github.com/WOOWTECH/Woow_HA_App_Store) 更新後，在附加元件設定填入 `paseo_ingress_url` 並重啟一次；選項會轉成下述環境變數。從原生 Plugins 安裝本插件後即可在 HA 側欄重載 Dashboard，無須使用下面的 Kubernetes 安裝腳本。詳細步驟見 [HA 安裝教學](install.zh-TW.md#home-assistant-add-on)。
+
 管理者可在 Dashboard 程序環境設定 `HERMES_PASEO_INGRESS_ORIGIN=https://ha.example:8123`，額外允許一個精確的 Home Assistant 瀏覽器 Origin。只接受 `http://主機[:port]` 或 `https://主機[:port]`；不得包含帳密、路徑（包括結尾 `/`）、query、fragment、萬用字元或多個網址。不要填入 `/api/hassio_ingress/...` 路徑。未使用時請省略此環境變數；明確設成空字串或格式錯誤會拒絕請求，不會忽略設定繼續執行。
 
 原有 `HERMES_DASHBOARD_PUBLIC_URL` 與 profile 私有 `dashboard-origin.json` 仍保留 LAN／正式公開網址，不會被 Ingress Origin 覆寫。插件 API、主機重載及原生 Web 停用／移除共用相同的兩個允許 Origin；仍要求原生登入、Fetch Metadata、既有 profile query 與 body 驗證，不採用請求中的 `Forwarded`／`X-Forwarded-*` 作為 Origin 授權依據。變更環境設定後須由管理者重新啟動 Dashboard 程序。

@@ -175,10 +175,10 @@ Hermes 0.19 停用／移除沒有公開卸載 callback：必須先用插件頁�
 此功能要求一次性 [主機端設定](dashboard-control.zh-TW.md)。一般插件安裝不會自行改寫主機 CLI；沒有主機介面時按鈕會停用。Kubernetes 手動掛載與儲存選項需要納入正式部署模板，才能在 Helm 重建工作負載時保留。
 
 
-## 2026-10-26：HA Ingress 候選與公開鏡像
+## 2026-10-26：HA Ingress 發布與公開鏡像
 
 0.1.4-rc.3 增加由主機管理者提供的 `HERMES_PASEO_INGRESS_ORIGIN`，作為既有私有 primary Origin 之外的第二個精確來源。插件 API、Dashboard 重載及原生停用／移除共用相同來源限制；錯誤設定、跨站請求、未登入及任意 Forwarded 標頭不能取得授權。既有 primary Origin 檔案及 profile lifecycle 不變。
 
-本機驗證：81 項 Python、84 項 Node 與既有 React／Chromium fixture 測試通過。HAOS 候選環境正另行建立；此段不代表實機配對或模型對話已驗收。
+本機驗證：81 項 Python、84 項 Node 與既有 React／Chromium fixture 測試通過。HA add-on 0.1.11 已發布並經正常流程同步 App Store；另建全新 HAOS 完成原生安裝、真正側欄 iframe、官方配對、Dashboard 重載、首輪／續聊、附件讀取、原生停用／重新啟用與附加元件重啟。正式發布映像的 rootfs、設定與資料保留已逐項驗證。詳細紀錄及限制見 [HA 實機報告](ha-acceptance-20261026.zh-TW.md)。
 
-公開 Gitea pull mirror 已建立於 <https://git-prod.woowtech.io/mirror/hermes-paseo-plugin>；匿名 clone、Git 完整性、全部來源 refs／四個既有標籤及手動同步通過，設定每 8 小時更新。尚未等待完整 8 小時排程週期；GitHub Release metadata／附件不在 Git 鏡像範圍。
+公開 Gitea pull mirror 已建立於 <https://git-prod.woowtech.io/mirror/hermes-paseo-plugin>；匿名 clone、Git 完整性、來源 refs、標籤及手動同步通過，設定每 8 小時更新。尚未等待完整 8 小時排程週期；GitHub Release metadata／附件不在 Git 鏡像範圍。
