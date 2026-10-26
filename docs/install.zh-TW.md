@@ -167,6 +167,16 @@ known_plugin_toolsets:
 
 這版 CLI 的 `hermes tools disable omnigent --platform acp` 會顯示 `Unknown platform 'acp'`，卻回傳退出碼 0；不能用它的退出碼判定成功。管理者應備份設定、使用與該 Hermes 版本相容的工具配置介面，並驗證實際載入的工具及真實對話。保存程序涉及 Hermes 內部介面，升級版本時須重驗。此服務僅限制 ACP，一般 CLI 工具保留；日後安裝新插件仍可能擴充實際工具範圍，需要重新檢查。此配置是小模型測試範圍，並非權限隔離或安全沙箱。
 
+### Paseo Web 實測注意事項
+
+2026-10-26 以官方 Web 0.13.0、daemon 0.11.2、Hermes 0.22.5 實測；詳見 [Web 測試矩陣](web-acceptance-20261026.zh-TW.md)。Web 會提示主機版本較舊，不能把文字對話通過推論為所有新功能皆相容。
+
+- **重新整理／重連**：歷史與輸入框可能先於連線完成出現。如果送出時顯示 `Host is not connected` 或 `Transport not connected`，先保留草稿，至 Settings → 該主機 → Overview 確認 Online，再返回對話送出。實測未連線時送出會保留草稿，需要重送；不要連續點擊。
+- **附件**：上傳完成不等於模型已讀取。此版 daemon 將一般檔案的名稱、路徑、MIME 與大小交給 ACP，沒有直接嵌入檔案內容。上述小模型設定只開 `hermes_paseo`，缺少 `read_file`，因此文字附件讀取實測失敗。Hermes 原生 `file` 工具集包含 `read_file`、`write_file`、`patch`、`search_files`，會擴大模型可用能力；須由管理者核准後以相容介面設定並在新對話重驗。插件不自動擴權。檔案工具受服務帳戶的檔案權限約束，不能假定僅能存取當前工作區。測試站尚未套用此變更。
+- **移除未送出的附件**：桌面版先將滑鼠移到附件卡片，再點移除按鈕。直接點隱藏狀態的移除控制，可能被卡片遮擋。
+- **歸檔／還原**：在側欄工作區選單選 Archive。從 History 找回後，先按工作區的 Unarchive；若對話仍顯示 `This agent is archived`，再按對話內的 Unarchive。工作區與 agent 是分開還原的。
+- **額度不足**：本次後段實測收到訂閱供應商 HTTP 429，最後還伴隨 `Internal error: admitted_turn_failed`。應讀取前面的供應商訊息判斷原因，等待帳號額度恢復再重試。重新配對或重啟 daemon 不會恢復供應商額度。
+
 ## 7. 停止、恢復及移除
 
 在 Paseo 插件頁按 **停止服務**，確認停止後重新整理；服務應保持停止。再按 **恢復服務**，確認回到就緒。這個操作保留配對設定與對話資料。
