@@ -182,3 +182,10 @@ Hermes 0.19 停用／移除沒有公開卸載 callback：必須先用插件頁�
 本機驗證：81 項 Python、84 項 Node 與既有 React／Chromium fixture 測試通過。HA add-on 0.1.11 已發布並經正常流程同步 App Store；另建全新 HAOS 完成原生安裝、真正側欄 iframe、官方配對、Dashboard 重載、首輪／續聊、附件讀取、原生停用／重新啟用與附加元件重啟。正式發布映像的 rootfs、設定與資料保留已逐項驗證。詳細紀錄及限制見 [HA 實機報告](ha-acceptance-20261026.zh-TW.md)。
 
 公開 Gitea pull mirror 已建立於 <https://git-prod.woowtech.io/mirror/hermes-paseo-plugin>；匿名 clone、Git 完整性、來源 refs、標籤及手動同步通過，設定每 8 小時更新。尚未等待完整 8 小時排程週期；GitHub Release metadata／附件不在 Git 鏡像範圍。
+
+
+## 2026-10-26：rc.4 攔截回覆判斷
+
+HA 正式映像上的單輪 DeepSeek 記憶續聊已執行：LiteLLM 記錄一次成功請求，13 個輸出 tokens、US$0.000542164；assistant 回覆提示被攔截，沒有原始記憶碼，故內容驗收未通過。沒有新增工具呼叫或子代理，未重送，專用金鑰已撤銷。這項結果不等於先前的 401 或憑證恢復錯誤，詳見 [HA 實機報告](ha-acceptance-20261026.zh-TW.md)。
+
+rc.4 將觀察到的精確攔截回覆分類為 `PROVIDER_PROMPT_BLOCKED`，避免 idle 被對話工具誤報為 completed；引用此字句的一般敘述不匹配。兩個回歸測試先失敗後通過，完整 Node 86 項、Python 81 項通過。此修補未更動供應商的攔截規則，也未增加模型請求。

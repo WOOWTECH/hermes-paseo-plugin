@@ -30,3 +30,10 @@ test('a provider quota response is an error while timeout remains pending', asyn
   assert.equal(quota.status, 'error');
   assert.equal((await chatResult(client([], 'timeout'), 'agent', 'pi', 'model', 1000)).status, 'pending');
 });
+
+test('idle with the observed blocked-prompt reply is a failed chat', async () => {
+  const result = await chatResult(client([message(2, 'The tool call did not complete because the prompt was blocked.')]),
+    'agent', 'hermes', 'model', 1000, latestAssistantCursor([message(1)]));
+  assert.equal(result.status, 'error');
+  assert.equal(result.code, 'PROVIDER_PROMPT_BLOCKED');
+});
