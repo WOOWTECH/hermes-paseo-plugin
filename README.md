@@ -16,7 +16,7 @@ Gitea 原始碼鏡像：<https://git-prod.woowtech.io/mirror/hermes-paseo-plugin
 
 測試站使用自己已授權的 Hermes `openai-codex:gpt-6.1-sol`，另已通過三路並行共六段對話、插件資料還原及可控跨節點搬移。早期 0.8B 本機模型的失敗紀錄保留於驗收文件。此版本可公開下載試用；長期負載、整機災難復原及其他環境仍待驗收。
 
-0.1.4-rc.3 加入由管理者設定的第二個精確 HA Ingress Origin；原本的 Dashboard Origin 與登入保留。HA add-on 整合及實機驗收正在獨立候選環境進行，尚不以單元測試代替 HA 驗收。
+0.1.4-rc.3 加入由管理者設定的第二個精確 HA Ingress Origin；原本的 Dashboard Origin 與登入保留。HA add-on **0.1.11** 已發布並同步至 [HA App Store](https://github.com/WOOWTECH/Woow_HA_App_Store)。隔離 HAOS 完成原生安裝、官方配對、HA 側欄、Dashboard 重載、真實對話與附件、停用／重啟，以及正式映像升級的資料保留驗證；公開 Gitea URL 也通過原生 Web 安裝。換金鑰後的舊對話續聊仍待驗，未宣稱全部通過。詳細範圍見 [HA 驗收報告](docs/ha-acceptance-20261026.zh-TW.md) 與 [HA 安裝步驟](docs/install.zh-TW.md#home-assistant-add-on)。
 
 ## 安裝與配對
 
