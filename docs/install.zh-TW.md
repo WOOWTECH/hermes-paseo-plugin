@@ -1,16 +1,16 @@
 # Hermes Paseo：下載、安裝、部署與測試
 
-適用於 v0.1.4-rc.3 公開候選版。本教學將插件部署到已有的 Hermes Agent / Dashboard；Hermes 核心與可用的模型端點須先準備好。實測範圍與待驗項目見 [驗收紀錄](validation.md)。
+適用於 v0.1.4-rc.4 公開候選版。本教學將插件部署到已有的 Hermes Agent / Dashboard；Hermes 核心與可用的模型端點須先準備好。實測範圍與待驗項目見 [驗收紀錄](validation.md)。
 
 ## 下載網址
 
 - 原始碼：https://github.com/WOOWTECH/hermes-paseo-plugin
 - Gitea 原始碼鏡像：https://git-prod.woowtech.io/mirror/hermes-paseo-plugin
-- v0.1.4-rc.3：https://github.com/WOOWTECH/hermes-paseo-plugin/releases/tag/v0.1.4-rc.3
-- 固定版本 ZIP：https://github.com/WOOWTECH/hermes-paseo-plugin/archive/refs/tags/v0.1.4-rc.3.zip
+- v0.1.4-rc.4：https://github.com/WOOWTECH/hermes-paseo-plugin/releases/tag/v0.1.4-rc.4
+- 固定版本 ZIP：https://github.com/WOOWTECH/hermes-paseo-plugin/archive/refs/tags/v0.1.4-rc.4.zip
 - Paseo 官方介面：https://app.paseo.sh
 
-公開下載不需要 GitHub token。Web / CLI 從 GitHub 安裝會取得目前 main；ZIP 固定為 v0.1.4-rc.3。候選版不代表已完成所有正式部署環境的驗收。
+公開下載不需要 GitHub token。Web / CLI 從 GitHub 安裝會取得目前 main；ZIP 固定為 v0.1.4-rc.4。候選版不代表已完成所有正式部署環境的驗收。
 
 ## 1. 確認環境
 
@@ -82,7 +82,7 @@ hermes plugins enable hermes-paseo
 
 若要使用固定版本 ZIP：
 
-1. 下載上述 v0.1.4-rc.3 ZIP 並解壓。
+1. 下載上述 v0.1.4-rc.4 ZIP 並解壓。
 2. 將包含 `plugin.yaml`、`__init__.py`、`dashboard/`、`runtime/` 的那一層資料夾命名為 `hermes-paseo`。
 3. 放入同一 Hermes profile 的 `plugins/` 目錄：預設為 `~/.hermes/plugins/hermes-paseo/`；自訂 `HERMES_HOME` 時為 `$HERMES_HOME/plugins/hermes-paseo/`。檔案須由 Hermes 服務帳戶擁有。
 4. 確認 `plugin.yaml` 直接位於該目錄，然後執行 `hermes plugins enable hermes-paseo`。
@@ -183,7 +183,7 @@ known_plugin_toolsets:
 
 請使用 Hermes 原生自訂 Endpoint 設定保存金鑰，讓 `providers` 透過 `key_env` 引用 `.env`。不要直接覆寫舊對話使用的 inline `custom_providers.api_key`：HA 實測中，舊對話會保留舊憑證，重啟後可能回報 `launch_credentials_unavailable`，Paseo 也可能將同一錯誤顯示為不支援模型選擇。
 
-既有 inline provider 的遷移方式是先保留舊宣告、建立新的命名供應商，再在原對話明確選取新供應商／模型。確認切換與實際續聊成功後，才移除舊宣告並撤銷舊憑證。HA 已實測新命名供應商的模型切換；修正後實際模型回覆仍待驗。不要連續重送失敗訊息，詳見 [HA 驗收紀錄](ha-acceptance-20261026.zh-TW.md)。
+既有 inline provider 的遷移方式是先保留舊宣告、建立新的命名供應商，再在原對話明確選取新供應商／模型。確認切換與實際續聊成功後，才移除舊宣告並撤銷舊憑證。HA 已實測新命名供應商的模型切換與重啟保留；後續 DeepSeek 真實回覆為提示被攔截，記憶續聊未通過。rc.4 將這段精確回覆分類為 `PROVIDER_PROMPT_BLOCKED`，不再誤報完成。不要連續重送失敗訊息，詳見 [HA 驗收紀錄](ha-acceptance-20261026.zh-TW.md)。
 
 ### Paseo Web 實測注意事項
 
@@ -214,6 +214,7 @@ Hermes 0.19 的首次引導為插件頁配對精靈；此版沒有公開的新�
 | Restart Gateway 顯示已啟動但未完成 | 查看工作最終狀態；若為 `no dependency environment is committed`，須由管理者處理官方 PM 環境及修復所需空間，詳見 [主機說明](dashboard-control.zh-TW.md)。 |
 | 403／Origin 被拒絕 | 確認插件已啟用及登入有效；使用服務帳戶設定精確正式 Origin。 |
 | 沒有模型或無法回覆 | 確認 Hermes ACP 已安裝，並完成 Hermes 官方模型登入／設定。 |
+| `PROVIDER_PROMPT_BLOCKED` | 已收到提示被攔截的回覆，未取得有效答案。查看供應商與主機日誌；不要把 idle 當成成功，也不要自動重送。 |
 | `PROVIDER_TURN_FAILED` | 到 Hermes 的 Logs 檢查該次錯誤；可能是模型登入、context 不足或推理服務失敗。修正後重新執行首輪／續聊，不能僅依 ready 狀態判定成功。 |
 | 切換預設模型後仍出現舊模型 | 完成進行中的對話後，停止並恢復 Paseo 服務，讓 ACP 重新載入。 |
 | 沒有 Claude Code、Codex 或 Pi | 需先在同容器安裝與完成各官方登入，才會被插件偵測。 |
