@@ -42,38 +42,36 @@ class RequestError(Exception):
 
 def _origin(value):
     try:
-        parsed = urlsplit(value)
-        if (parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username
-                or parsed.password or parsed.path or parsed.query or parsed.fragment):
-            return None
+        parsed = urlsplit(bridge.validate_dashboard_origin(value))
         return parsed.scheme, parsed.hostname.lower(), parsed.port or (443 if parsed.scheme == 'https' else 80)
-    except ValueError:
+    except bridge.BridgeError:
         return None
 
 
 def check_origin(request):
     # Duplicate security headers are ambiguous; do not silently use the first.
-    for header in ('origin', 'sec-fetch-site', 'content-type', 'content-length', 'host'):
+    for header in ('origin', 'sec-fetch-site', 'sec-fetch-mode', 'content-type',
+                   'content-length', 'content-encoding', 'host'):
         if len(request.headers.getlist(header)) > 1:
             raise RequestError('INVALID_REQUEST', 400)
     if request.headers.get('sec-fetch-site') not in (None, 'same-origin', 'none'):
         raise RequestError('ORIGIN_DENIED', 403)
     if request.headers.get('sec-fetch-mode') in ('navigate', 'no-cors'):
         raise RequestError('ORIGIN_DENIED', 403)
+    configured = bridge.get_bridge().dashboard_origins(str(request.base_url).rstrip('/'))
+    expected = {_origin(value) for value in configured}
     origin = request.headers.get('origin')
-    if origin:
+    if origin is not None:
         actual = _origin(origin)
-        configured = bridge.get_bridge().dashboard_origin()
-        expected = _origin(configured or str(request.base_url).rstrip('/'))
-        if actual is None or actual != expected:
+        if actual is None or actual not in expected:
             raise RequestError('ORIGIN_DENIED', 403)
     elif request.method not in ('GET', 'HEAD', 'OPTIONS'):
         if request.headers.get('sec-fetch-site') != 'same-origin':
             raise RequestError('ORIGIN_REQUIRED', 403)
     # Never trust client-supplied Forwarded/X-Forwarded-Host here. Operators may
-    # configure one exact public Origin in a private, profile-scoped local file
-    # when an HTTP proxy loses the original scheme/host. Browser requests cannot
-    # create or update this file. Fetch Metadata remains enforced above.
+    # configure the primary Origin in a private profile file and one additional
+    # exact Ingress Origin in the process environment. Neither is request-owned.
+    # Fetch Metadata remains enforced above.
 
 
 async def read_json(request):

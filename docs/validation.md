@@ -173,3 +173,12 @@ Hermes 0.19 停用／移除沒有公開卸載 callback：必須先用插件頁�
 本機 Node/runtime/UI 測試 48/48、Python bridge/host/installer 測試 51/51 通過；[實作與修正 CI](https://github.com/WOOWTECH/hermes-paseo-plugin/actions/runs/38234388548) 通過。回歸包含 SPA 兜底路由順序、首次 API 404、明確確認、重複點擊、斷線觀察、不同 generation 與 API readiness、timeout、保留手動暫停、服務 PID 驗證、Origin/body 防護及拒絕錯誤 profile UID。
 
 此功能要求一次性 [主機端設定](dashboard-control.zh-TW.md)。一般插件安裝不會自行改寫主機 CLI；沒有主機介面時按鈕會停用。Kubernetes 手動掛載與儲存選項需要納入正式部署模板，才能在 Helm 重建工作負載時保留。
+
+
+## 2026-10-26：HA Ingress 候選與公開鏡像
+
+0.1.4-rc.3 增加由主機管理者提供的 `HERMES_PASEO_INGRESS_ORIGIN`，作為既有私有 primary Origin 之外的第二個精確來源。插件 API、Dashboard 重載及原生停用／移除共用相同來源限制；錯誤設定、跨站請求、未登入及任意 Forwarded 標頭不能取得授權。既有 primary Origin 檔案及 profile lifecycle 不變。
+
+本機驗證：81 項 Python、84 項 Node 與既有 React／Chromium fixture 測試通過。HAOS 候選環境正另行建立；此段不代表實機配對或模型對話已驗收。
+
+公開 Gitea pull mirror 已建立於 <https://git-prod.woowtech.io/mirror/hermes-paseo-plugin>；匿名 clone、Git 完整性、全部來源 refs／四個既有標籤及手動同步通過，設定每 8 小時更新。尚未等待完整 8 小時排程週期；GitHub Release metadata／附件不在 Git 鏡像範圍。
