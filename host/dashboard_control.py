@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -27,15 +28,59 @@ HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
            'X-Content-Type-Options': 'nosniff'}
 
 
-def origin(value):
+def origin(value, allow_trailing_slash=False):
+    # This adapter is installed before the plugin and survives its removal.
+    # Keep the strict syntax aligned with hermes_paseo.validate_dashboard_origin.
+    if not isinstance(value, str) or not value or len(value) > 2048 or re.search(r'[\s\x00-\x1f\x7f\\?#]', value):
+        return None
     try:
         p = urlsplit(value)
-        if (p.scheme not in ('http', 'https') or not p.hostname or p.username
-                or p.password or p.path not in ('', '/') or p.query or p.fragment):
+        label = r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+        authority = rf'(?:{label}(?:\.{label})*\.?|\[[0-9A-Fa-f:.]+\])(?::[0-9]+)?'
+        if (p.scheme not in ('http', 'https') or not p.hostname
+                or not re.fullmatch(authority, p.netloc)
+                or p.username is not None or p.password is not None
+                or p.path not in (('', '/') if allow_trailing_slash else ('',))
+                or p.query or p.fragment
+                or (p.port is not None and not 1 <= p.port <= 65535)):
             return None
         return p.scheme, p.hostname.lower(), p.port or (443 if p.scheme == 'https' else 80)
     except (ValueError, TypeError):
         return None
+
+
+def allowed_origins(primary):
+    # Preserve the public URL callback (including its historical root slash).
+    expected = origin(primary, allow_trailing_slash=True)
+    ingress = os.environ.get('HERMES_PASEO_INGRESS_ORIGIN')
+    extra = origin(ingress) if ingress is not None else None
+    if ingress is not None and extra is None:
+        raise HTTPException(503, detail='INVALID_DASHBOARD_ORIGIN')
+    # Ingress supplements, never replaces, the required public URL.
+    return {expected, extra} - {None} if expected else set()
+
+
+def check_origin(request, primary, require_metadata=False):
+    for name in ('origin', 'sec-fetch-site', 'sec-fetch-mode', 'content-type',
+                 'content-length', 'content-encoding', 'host'):
+        if len(request.headers.getlist(name)) > 1:
+            raise HTTPException(400, detail='INVALID_REQUEST')
+    if request.query_params:
+        raise HTTPException(400, detail='INVALID_REQUEST')
+    site = request.headers.get('sec-fetch-site')
+    if site not in (('same-origin', 'none') if require_metadata else (None, 'same-origin', 'none')):
+        raise HTTPException(403, detail='ORIGIN_DENIED')
+    if request.headers.get('sec-fetch-mode') in ('navigate', 'no-cors'):
+        raise HTTPException(403, detail='ORIGIN_DENIED')
+    expected = allowed_origins(primary)
+    actual = request.headers.get('origin')
+    if actual is not None:
+        if origin(actual) not in expected:
+            raise HTTPException(403, detail='ORIGIN_DENIED')
+    elif request.method not in ('GET', 'HEAD', 'OPTIONS'):
+        if site != 'same-origin' or not expected:
+            raise HTTPException(403, detail='ORIGIN_REQUIRED')
+    return expected
 
 
 def supervised_pid():
@@ -85,31 +130,15 @@ def make_router(require_auth, public_origin, enabled, control=None, lifecycle=No
 
     def check(request):
         require_auth(request)
-        for name in ('origin', 'sec-fetch-site', 'sec-fetch-mode', 'content-type',
-                     'content-length', 'content-encoding', 'host'):
-            if len(request.headers.getlist(name)) > 1:
-                raise HTTPException(400, detail='INVALID_REQUEST')
-        if request.query_params:
-            raise HTTPException(400, detail='INVALID_REQUEST')
-        if request.headers.get('sec-fetch-site') not in (None, 'same-origin', 'none'):
-            raise HTTPException(403, detail='ORIGIN_DENIED')
-        if request.headers.get('sec-fetch-mode') in ('navigate', 'no-cors'):
-            raise HTTPException(403, detail='ORIGIN_DENIED')
-        expected = origin(public_origin())
-        actual = origin(request.headers.get('origin'))
-        if request.headers.get('origin'):
-            if not expected or actual != expected:
-                raise HTTPException(403, detail='ORIGIN_DENIED')
-        elif request.method == 'POST':
-            if request.headers.get('sec-fetch-site') != 'same-origin' or not expected:
-                raise HTTPException(403, detail='ORIGIN_REQUIRED')
+        expected = check_origin(request, public_origin())
         if not enabled():
             raise HTTPException(403, detail='PLUGIN_DISABLED')
+        return expected
 
     @router.get('/capabilities')
     def capabilities(request: Request):
-        check(request)
-        return JSONResponse({'supported': control.supported() and origin(public_origin()) is not None,
+        expected = check(request)
+        return JSONResponse({'supported': control.supported() and bool(expected),
                              'generation': control.generation, 'pending': control.pending,
                              'lifecycleError': lifecycle.error if lifecycle else None},
                             headers=HEADERS)
@@ -192,14 +221,7 @@ def install(server, enabled=None, public_origin=None, control=None, lifecycle=No
             if changing:
                 try:
                     server._require_token(request)
-                    actual = request.headers.get('origin')
-                    if (request.query_params or any(len(request.headers.getlist(key)) > 1
-                            for key in ('origin', 'sec-fetch-site', 'host'))):
-                        return JSONResponse({'detail': 'INVALID_REQUEST'}, status_code=400, headers=HEADERS)
-                    if (origin(public_origin()) is None or (actual and origin(actual) != origin(public_origin()))
-                            or request.headers.get('sec-fetch-site') not in ('same-origin', 'none')
-                            or (not actual and request.headers.get('sec-fetch-site') != 'same-origin')):
-                        return JSONResponse({'detail': 'ORIGIN_DENIED'}, status_code=403, headers=HEADERS)
+                    check_origin(request, public_origin(), require_metadata=True)
                     await asyncio.to_thread(lifecycle.stop_for_disable, False)
                 except HTTPException as error:
                     return JSONResponse({'detail': error.detail}, status_code=error.status_code, headers=HEADERS)

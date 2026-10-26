@@ -1,6 +1,6 @@
 {
   "name": "@woowtech/hermes-paseo",
-  "version": "0.1.4-rc.2",
+  "version": "0.1.4-rc.3",
   "type": "module",
   "private": true,
   "engines": {

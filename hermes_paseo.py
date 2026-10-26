@@ -310,12 +310,18 @@ def run_process(argv, payload, env, timeout, output_limit=MAX_OUTPUT):
 
 
 def validate_dashboard_origin(value):
-    if not isinstance(value, str) or not value or len(value) > 2048 or re.search(r'[\s\x00-\x1f\x7f\\]', value):
+    # Keep this syntax in sync with the independently installed host adapter.
+    # urlsplit alone accepts empty credentials, delimiters and invalid hosts.
+    if not isinstance(value, str) or not value or len(value) > 2048 or re.search(r'[\s\x00-\x1f\x7f\\?#]', value):
         raise BridgeError('INVALID_DASHBOARD_ORIGIN')
     try:
         parsed = urlsplit(value)
-        if (parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username
-                or parsed.password or parsed.path or parsed.query or parsed.fragment
+        label = r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+        authority = rf'(?:{label}(?:\.{label})*\.?|\[[0-9A-Fa-f:.]+\])(?::[0-9]+)?'
+        if (parsed.scheme not in ('http', 'https') or not parsed.hostname
+                or not re.fullmatch(authority, parsed.netloc)
+                or parsed.username is not None or parsed.password is not None
+                or parsed.path or parsed.query or parsed.fragment
                 or (parsed.port is not None and not 1 <= parsed.port <= 65535)):
             raise ValueError()
     except ValueError:
@@ -355,6 +361,16 @@ class Bridge:
         value = validate_dashboard_origin(value)
         with _state_lock(self.state_dir):
             _write_json(self.state_dir / 'dashboard-origin.json', {'origin': value})
+
+    def dashboard_origins(self, fallback):
+        """At most two operator origins; never persist Ingress over the primary."""
+        primary = self.dashboard_origin() or validate_dashboard_origin(fallback)
+        ingress = os.environ.get('HERMES_PASEO_INGRESS_ORIGIN')
+        if ingress is None:
+            return (primary,)
+        # An explicitly empty or malformed setting is a configuration failure,
+        # including on requests without Origin. Never silently drop the setting.
+        return (primary, validate_dashboard_origin(ingress))
 
 
     def environment(self):

@@ -3,7 +3,7 @@
   "label": "Paseo",
   "description": "在 Paseo 連接 Hermes、探索模型並驗證對話。",
   "icon": "MessageSquare",
-  "version": "0.1.4-rc.1",
+  "version": "0.1.4-rc.3",
   "tab": { "path": "/paseo", "position": "end" },
   "slots": ["header-right"],
   "entry": "dist/index.js",

@@ -4,6 +4,8 @@ Hermes Agent / Web 插件：啟用後準備固定 Paseo runtime，在受保護�
 
 公開 repo：<https://github.com/WOOWTECH/hermes-paseo-plugin>。下載不需要 GitHub 帳號或 token。
 
+Gitea 原始碼鏡像：<https://git-prod.woowtech.io/mirror/hermes-paseo-plugin>。每 8 小時從 GitHub 拉取 Git 分支與標籤；Release 說明及附件仍以 GitHub 為準。
+
 完整中文教學：[下載、安裝、部署與測試](docs/install.zh-TW.md)。
 
 目前為公開預覽版本。部署到正式環境前，請在自己的主機完成 Web 安裝／啟用、官方配對及首輪／續聊驗收；各版本的支援範圍與驗收方式見 [實測紀錄](docs/validation.md)。
@@ -13,6 +15,8 @@ Hermes Agent / Web 插件：啟用後準備固定 Paseo runtime，在受保護�
 同日追加 [官方 Paseo Web 詳細測試](docs/web-acceptance-20261026.zh-TW.md)：新裝置配對、手機模擬續聊、即時模型／模式切換、中止、雙裝置並行、明確斷線後重連與歷史歸檔通過。附件首測因缺少檔案工具失敗；使用者核准後已啟用原生 `file` 工具，工具載入及原生讀寫測試通過。模型附件回覆與還原後續聊仍待訂閱 HTTP 429 額度恢復後重測，不能宣稱所有功能正常。
 
 測試站使用自己已授權的 Hermes `openai-codex:gpt-6.1-sol`，另已通過三路並行共六段對話、插件資料還原及可控跨節點搬移。早期 0.8B 本機模型的失敗紀錄保留於驗收文件。此版本可公開下載試用；長期負載、整機災難復原及其他環境仍待驗收。
+
+0.1.4-rc.3 加入由管理者設定的第二個精確 HA Ingress Origin；原本的 Dashboard Origin 與登入保留。HA add-on 整合及實機驗收正在獨立候選環境進行，尚不以單元測試代替 HA 驗收。
 
 ## 安裝與配對
 
