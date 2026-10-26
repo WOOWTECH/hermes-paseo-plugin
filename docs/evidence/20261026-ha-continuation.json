@@ -1,0 +1,182 @@
+{
+  "schema": 1,
+  "verifiedAt": "2026-10-26T16:23:15.710583+00:00",
+  "scope": "isolated amd64 HAOS; official Store 0.1.11 and candidate with identical published rootfs layers",
+  "storePluginCommit": "76b6dff9ec798cc5ca6085afa39afd8abcc522b8",
+  "pluginVersion": "0.1.4-rc.4",
+  "cases": [
+    {
+      "result": "pass",
+      "model": "custom:ha-rotated:deepseek/deepseek-v4-flash-0731",
+      "exactExpectedReply": true,
+      "assistantEntriesAdded": 1,
+      "completedAt": "2026-10-26T14:20:47.188532+00:00",
+      "case": "fresh-deepseek"
+    },
+    {
+      "result": "pass",
+      "model": "custom:ha-rotated:deepseek/deepseek-v4-flash-0731",
+      "exactExpectedReply": true,
+      "assistantEntriesAdded": 1,
+      "completedAt": "2026-10-26T14:22:45.431969+00:00",
+      "case": "deepseek-followup"
+    },
+    {
+      "result": "pass",
+      "model": "custom:ha-rotated:deepseek/deepseek-v4-flash-0731",
+      "exactExpectedReply": true,
+      "assistantEntriesAdded": 1,
+      "completedAt": "2026-10-26T14:24:26.263372+00:00",
+      "case": "original-deepseek"
+    },
+    {
+      "result": "pass",
+      "model": "custom:ha-rotated:xiaomi/mimo-v2.6-flash",
+      "exactExpectedReply": true,
+      "assistantEntriesAdded": 1,
+      "completedAt": "2026-10-26T14:25:48.516483+00:00",
+      "case": "switch-xiaomi"
+    },
+    {
+      "result": "pass",
+      "model": "custom:ha-rotated:xiaomi/mimo-v2.6-flash",
+      "exactExpectedReply": true,
+      "assistantEntriesAdded": 1,
+      "completedAt": "2026-10-26T14:33:14.418013+00:00",
+      "case": "cold-followup"
+    },
+    {
+      "result": "pass",
+      "model": "custom:ha-acceptance:deepseek/deepseek-v4-flash-0731",
+      "exactExpectedReply": true,
+      "assistantEntriesAdded": 1,
+      "completedAt": "2026-10-26T14:52:35.896857+00:00",
+      "case": "store-first"
+    },
+    {
+      "result": "pass",
+      "model": "custom:ha-acceptance:deepseek/deepseek-v4-flash-0731",
+      "exactExpectedReply": true,
+      "assistantEntriesAdded": 1,
+      "completedAt": "2026-10-26T14:54:10.709147+00:00",
+      "case": "store-attachment"
+    },
+    {
+      "result": "pass",
+      "model": "custom:ha-acceptance:deepseek/deepseek-v4-flash-0731",
+      "exactExpectedReply": true,
+      "assistantEntriesAdded": 1,
+      "completedAt": "2026-10-26T15:04:55.513566+00:00",
+      "case": "store-backup-followup"
+    }
+  ],
+  "preSubmissionFailure": {
+    "reason": "project missing on fresh Paseo device",
+    "agentCreated": false,
+    "providerRequests": 0,
+    "correctedThroughOfficialAddProjectUI": true
+  },
+  "nativeReadFileObserved": true,
+  "backupRestore": {
+    "nativeEncryptedBackup": true,
+    "nativeScopedRestore": true,
+    "restoreMarkerReverted": true,
+    "configurationAndKeyEnvIdentical": true,
+    "pluginCommitIdentical": true,
+    "sameDeviceReconnected": true,
+    "sameConversationAndAttachmentHistory": true,
+    "normalizedAssistantTextAndOrderIdentical": true,
+    "transportEnvelopeRebuilt": true,
+    "officialStoreVersion": "0.1.11",
+    "inferenceRequestsSubmitted": 0,
+    "scope": "single add-on restore in same QA HAOS; not full-machine disaster recovery"
+  },
+  "readOnlyBurst": {
+    "requests": 60,
+    "concurrency": 4,
+    "http200": 60,
+    "reachableResponses": 60,
+    "errors": 0,
+    "p50Milliseconds": 148.6,
+    "p95Milliseconds": 1556.6,
+    "maxMilliseconds": 1926.9,
+    "durationSeconds": 7.85,
+    "before": {
+      "memoryCurrentBytes": 1804791808,
+      "memoryEvents": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      }
+    },
+    "after": {
+      "memoryCurrentBytes": 1807859712,
+      "memoryEvents": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      }
+    },
+    "inferenceRequestsSubmitted": 0,
+    "scope": "bounded read-only status burst, not a long-duration load test or SLA"
+  },
+  "stabilityObservation": {
+    "passed": true,
+    "samples": 21,
+    "durationSeconds": 607.2,
+    "allHttp200AndReachable": true,
+    "before": {
+      "memoryCurrentBytes": 1302831104,
+      "events": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      }
+    },
+    "after": {
+      "memoryCurrentBytes": 1125261312,
+      "events": {
+        "low": 0,
+        "high": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      }
+    },
+    "scope": "ten-minute read-only observation, including backup work on the separate Store add-on; not long-term soak or SLA",
+    "inferenceRequestsSubmitted": 0
+  },
+  "billing": {
+    "inferenceRequests": 11,
+    "metadataRequests": 2,
+    "budgetUsd": 0.02,
+    "spendUsd": 0.0021995292,
+    "revoked": true,
+    "keyStatus": "deleted",
+    "submittedUserTurns": 8,
+    "uiSubmitClicks": 9,
+    "maxOutputTokensPerRequest": 512,
+    "metadataRequestsAfterRevocation": 2,
+    "postRevocationMetadataZeroTokensAndSpend": true
+  },
+  "roundTestWorkspacesArchived": true,
+  "historyPreserved": true,
+  "priorBlockedReplyRootCauseConfirmed": false,
+  "exclusions": [
+    "original PaaS subscription quota retest",
+    "long-term soak and SLA",
+    "whole-machine or volume disaster recovery",
+    "ARM/Pi 5",
+    "uninstalled Claude Code/Codex/Pi companions"
+  ]
+}

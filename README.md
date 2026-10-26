@@ -16,7 +16,7 @@ Gitea 原始碼鏡像：<https://git-prod.woowtech.io/mirror/hermes-paseo-plugin
 
 測試站使用自己已授權的 Hermes `openai-codex:gpt-6.1-sol`，另已通過三路並行共六段對話、插件資料還原及可控跨節點搬移。早期 0.8B 本機模型的失敗紀錄保留於驗收文件。此版本可公開下載試用；長期負載、整機災難復原及其他環境仍待驗收。
 
-0.1.4-rc.3 加入由管理者設定的第二個精確 HA Ingress Origin；原本的 Dashboard Origin 與登入保留。HA add-on **0.1.11** 已發布並同步至 [HA App Store](https://github.com/WOOWTECH/Woow_HA_App_Store)。隔離 HAOS 完成原生安裝、官方配對、HA 側欄、Dashboard 重載、真實對話與附件、停用／重啟，以及正式映像升級的資料保留驗證；公開 Gitea URL 也通過原生 Web 安裝。換金鑰與重啟後的 DeepSeek 續聊已實測，但回傳提示被攔截，記憶驗收未通過；rc.4 補上此回覆的錯誤分類，避免對話工具誤報完成。詳細範圍見 [HA 驗收報告](docs/ha-acceptance-20261026.zh-TW.md) 與 [HA 安裝步驟](docs/install.zh-TW.md#home-assistant-add-on)。
+0.1.4-rc.3 加入由管理者設定的第二個精確 HA Ingress Origin；原本的 Dashboard Origin 與登入保留。HA add-on **0.1.11** 已發布並同步至 [HA App Store](https://github.com/WOOWTECH/Woow_HA_App_Store)。隔離 HAOS 完成原生安裝、官方配對、HA 側欄、Dashboard 重載、真實對話與附件、停用／重啟，以及正式映像升級的資料保留驗證；公開 Gitea URL 也通過原生 Web 安裝。rc.4 補上攔截回覆的錯誤分類。後續八輪實測全部通過：新舊 DeepSeek 對話、Xiaomi 切換與冷啟動續聊，以及官方商店成品的新配對、附件讀取和加密備份還原後續聊；首次新增 project 的必要步驟已補進教學。先前攔截回覆的上游根因仍未確診。詳細範圍見 [HA 驗收報告](docs/ha-acceptance-20261026.zh-TW.md) 與 [HA 安裝步驟](docs/install.zh-TW.md#home-assistant-add-on)。
 
 ## 安裝與配對
 
@@ -27,7 +27,7 @@ hermes plugins install WOOWTECH/hermes-paseo-plugin
 hermes plugins enable hermes-paseo
 ```
 
-原生 Agent 插件與 Dashboard 頁面均包含在同一 repo。啟用後開啟 Paseo 頁面，按引導準備服務與產生配對；在新分頁開啟官方 Paseo，按 Connect 完成綁定，再選 Hermes、模型與權限模式。
+原生 Agent 插件與 Dashboard 頁面均包含在同一 repo。啟用後開啟 Paseo 頁面，按引導準備服務與產生配對；在新分頁開啟官方 Paseo，按 Connect 完成綁定。全新 Paseo 裝置若顯示 No projects yet，先用 Add project 選擇或建立工作目錄，再於 New workspace 選定 project、Hermes、模型與權限模式。
 
 配置 0.1.4 主機介面時，仍啟用的服務在容器啟動後會準備 runtime，並在 daemon 意外中斷後恢復，不需開啟瀏覽器。手動停止的狀態會保留；Hermes Web 停用／移除插件前也會先確認服務停止。未配置主機介面時，仍使用可見 Web 頁面的恢復流程，CLI 移除前須先停止服務。
 

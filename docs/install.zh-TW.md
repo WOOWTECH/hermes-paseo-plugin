@@ -55,7 +55,7 @@ hermes acp --help
 1. 正常登入 Hermes Web，進入 **Plugins**。
 2. 找到 **Install from GitHub / Git URL**。
 3. 在 **Git URL or owner/repo** 輸入 `WOOWTECH/hermes-paseo-plugin`。
-4. 新安裝時，開啟 **Enable after install**，按 **Install**。
+4. 新安裝時，開啟 **Enable after install**，按 **Install**。若原生掃描回報 `Security scan blocked plugin install`／`Requires confirmation (caution verdict)`，安裝尚未完成；依下方說明核對來源及掃描項目，再使用這次安裝的 **Force reinstall** 確認，不要關閉全域掃描。
 5. 確認 `hermes-paseo` 卡片顯示 `enabled`；若未啟用，按 **Enable**。
 6. Hermes 0.19 需重新整理頁面一次，才會載入剛安裝／啟用的插件。
 7. 若 Paseo 頁顯示後端 API 尚未載入或 404，在 Paseo 頁按 **重載 Dashboard → 確認重載**。準備好的主機會等待後端重新啟動及插件 API 恢復，再自動重新整理目前頁面。
@@ -118,7 +118,10 @@ python3 ~/.hermes/plugins/hermes-paseo/bin/configure-origin.py https://hermes.ex
 2. 等待 **服務已就緒**。第一次會下載並啟動固定 Paseo runtime；已手動停止時，按 **恢復服務**。
 3. 按 **產生配對連結**。
 4. 按 **開啟 Paseo 官方網站並綁定**，在新分頁按 **Connect**。
-5. 在 Paseo 按 **New workspace**，開啟 **Select model**。若先看到供應者清單，按 **Hermes** 再選模型；第一次測試使用 **Default** 權限模式。
+5. 全新裝置若顯示 **No projects yet**，先按側欄 **Add project**。可用 **Search for directory** 選擇已有工作目錄；或選 **New directory**，輸入主機上的父目錄，按 **Use this parent**，再填 **Directory name** 並按 Enter。HA 可在 `/opt/data` 下建立自己的專案子目錄，資料會持久保存；這是 Hermes 主機上的路徑。
+6. 按 **New workspace**，確認已選定 project；若仍顯示 **Choose project**，先選取剛建立的專案。再開啟 **Select model**；若先看到供應者清單，按 **Hermes** 再選模型，第一次使用 **Default** 權限模式，填訊息並按 **Create**。
+
+全新 HA 商店實例已重現：配對 Online 但沒有 project 時，無法建立代理；沒有新增模型請求。必須先完成上述 project 步驟，不能只依模型清單或 Create 按鈕判定可對話。
 
 Hermes 頁面的模型／模式選單用於探索可用選項；實際對話設定在 Paseo 建立對話時選擇。官方 relay 不需要額外的 Paseo 密碼。配對連結可能授予存取權，請保留給自己的裝置使用。
 
@@ -183,7 +186,7 @@ known_plugin_toolsets:
 
 請使用 Hermes 原生自訂 Endpoint 設定保存金鑰，讓 `providers` 透過 `key_env` 引用 `.env`。不要直接覆寫舊對話使用的 inline `custom_providers.api_key`：HA 實測中，舊對話會保留舊憑證，重啟後可能回報 `launch_credentials_unavailable`，Paseo 也可能將同一錯誤顯示為不支援模型選擇。
 
-既有 inline provider 的遷移方式是先保留舊宣告、建立新的命名供應商，再在原對話明確選取新供應商／模型。確認切換與實際續聊成功後，才移除舊宣告並撤銷舊憑證。HA 已實測新命名供應商的模型切換與重啟保留；後續 DeepSeek 真實回覆為提示被攔截，記憶續聊未通過。rc.4 將這段精確回覆分類為 `PROVIDER_PROMPT_BLOCKED`，不再誤報完成。不要連續重送失敗訊息，詳見 [HA 驗收紀錄](ha-acceptance-20261026.zh-TW.md)。
+既有 inline provider 的遷移方式是先保留舊宣告、建立新的命名供應商，再在原對話明確選取新供應商／模型。確認切換與實際續聊成功後，才移除舊宣告並撤銷舊憑證。HA 已實測新命名供應商的模型切換與重啟保留。早前一次 DeepSeek 回覆為提示被攔截，rc.4 將這段精確回覆分類為 `PROVIDER_PROMPT_BLOCKED`，不再誤報完成；後續原對話的記憶續聊、兩模型切換、冷啟動與備份還原後續聊均已通過。早前攔截的上游原因仍未確診，不要連續重送結果不明的訊息，詳見 [HA 驗收紀錄](ha-acceptance-20261026.zh-TW.md)。
 
 ### Paseo Web 實測注意事項
 
