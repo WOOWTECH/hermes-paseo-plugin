@@ -21,7 +21,7 @@ HA add-on **0.1.11** 已發布，HA App Store 已同步。公開插件 **v0.1.4-
 | 項目 | 實際結果 |
 | --- | --- |
 | 原生 Web 安裝 | 在 Plugins 從公開 GitHub 安裝並啟用；自動進入 `/paseo`，下載 runtime 並啟動 daemon。 |
-| 原生 HA 商店 | 在新 HAOS 加入官方商店，實際可見可安裝的 0.1.11／amd64；Supervisor 取得的設定與公開 Store、來源及映像 digest 相符。 |
+| 原生 HA 商店 | 在新 HAOS 加入官方商店，實際下載並安裝 0.1.11／amd64（`build: false`），下載映像 digest 與公開發佈相符。此第二實例保持停止；功能驗收由前述正式檔案層實例執行。 |
 | HA 側欄 | 從真正 HA 側欄點擊進入 iframe，插件 API 200；正式映像升級後再次通過。 |
 | 官方配對 | 從插件產生配對連結，點擊開啟官方 Paseo 並 Connect；新裝置完成配對，已儲存裝置能重連。 |
 | Dashboard 內重載 | 點擊重載並確認，後端 generation 改變、Ingress 前綴保留、API 與配對按鈕恢復；正式映像再次通過。 |
