@@ -181,7 +181,9 @@ known_plugin_toolsets:
 
 ### 更換自訂供應商金鑰後
 
-Hermes 0.22.5 的既有對話可能保留建立時的模型設定。HA 實測中，更新 profile 的自訂 provider 金鑰後，新設定解析已讀到新金鑰，但既有對話仍送出已撤銷的舊金鑰而回傳 401；單純重啟未修復。先確認新的 provider 設定，再在原對話明確選擇供應商／模型並等待切換完成；必要時用新對話分別檢查新憑證。不要連續重送失敗訊息。這個情境的修正後續聊仍待實測，見 [HA 驗收紀錄](ha-acceptance-20261026.zh-TW.md)。
+請使用 Hermes 原生自訂 Endpoint 設定保存金鑰，讓 `providers` 透過 `key_env` 引用 `.env`。不要直接覆寫舊對話使用的 inline `custom_providers.api_key`：HA 實測中，舊對話會保留舊憑證，重啟後可能回報 `launch_credentials_unavailable`，Paseo 也可能將同一錯誤顯示為不支援模型選擇。
+
+既有 inline provider 的遷移方式是先保留舊宣告、建立新的命名供應商，再在原對話明確選取新供應商／模型。確認切換與實際續聊成功後，才移除舊宣告並撤銷舊憑證。HA 已實測新命名供應商的模型切換；修正後實際模型回覆仍待驗。不要連續重送失敗訊息，詳見 [HA 驗收紀錄](ha-acceptance-20261026.zh-TW.md)。
 
 ### Paseo Web 實測注意事項
 

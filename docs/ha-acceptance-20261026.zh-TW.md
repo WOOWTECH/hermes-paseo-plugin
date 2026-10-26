@@ -27,20 +27,24 @@ HA add-on **0.1.11** 已發布，HA App Store 已同步。公開插件 **v0.1.4-
 | Dashboard 內重載 | 點擊重載並確認，後端 generation 改變、Ingress 前綴保留、API 與配對按鈕恢復；正式映像再次通過。 |
 | 停止與恢復 | UI 停止後重新整理仍保持停止；明確恢復後重新可連線。 |
 | Gitea 直接安裝／移除 | 原生 Plugins 移除後，以公開 Gitea clone URL 安裝並啟用成功；相同配對、資料與對話歷史保留，來源 commit 相符。 |
-| 原生停用／啟用 | 已停止 daemon 後，Plugins Disable／Enable 成功，Enable 後恢復服務；此案例未單獨驗證 Disable 終止運行中 daemon。 |
+| 原生停用／啟用 | 已補測運行中 daemon：Plugins Disable 確實停止程序，Enable 後重新可連線。 |
 | 附加元件重啟 | Supervisor restart 後插件、原配對及相同對話／附件歷史保留。 |
 | 來源與登入限制 | Ingress／LAN 共 16 組真實 HTTP 檢查通過：正確登入與來源可讀取、外站來源 403、未登入 401，沒有對外站開放 CORS。 |
 | 插件真實驗收 | 按插件頁驗收按鈕一次，首輪與記憶續聊皆通過，測試 agent／workspace 歸檔成功。 |
-| 官方 Web 模型與模式 | 清單顯示兩個已設定模型，Default／Accept Edits／Don't Ask 三種模式可見；用預設 Xiaomi 與 Default 建立實際對話。舊對話切換 DeepSeek 尚未通過，見下文。 |
+| 官方 Web 模型與模式 | 清單顯示兩個已設定模型，Default／Accept Edits／Don't Ask 三種模式可見；用預設 Xiaomi 與 Default 建立實際對話。原對話透過新命名供應商切換 DeepSeek 已通過，實際回覆待驗，見下文。 |
 | 官方 Web 附件 | 從 UI 上傳含隨機碼的文字檔，模型回覆正確檔案內容；以後端 assistant timeline 核對，沒有把使用者輸入當成模型回覆。 |
 
-## 尚未通過：換金鑰後的舊對話續聊
+## 換金鑰驗證：模型切換已恢復，實際續聊待驗
 
 正式映像升級後，原配對及對話／附件歷史可讀取。原兩小時測試金鑰在開發工作中斷期間到期，後續已撤銷並換成相同限制的新金鑰。首次舊對話續聊得到 HTTP 401，仍送出已撤銷的舊金鑰。完整附加元件重啟後的第二次嘗試回報 `admitted_turn_failed`；gateway 日誌進一步確認為 `launch_credentials_unavailable`。兩者是不同失敗，不能都記為 401，也不能僅憑畫面宣稱未執行任何工作。新金鑰在 10:38 UTC 查核仍為零推論請求、零費用。
 
-profile 的 named provider 已使用新金鑰，但 Hermes 0.22.5 原生 gateway 對話會固定 session model policy。更新 profile 或重啟未讓此舊對話恢復。原生模型變更流程會重新讀取目前 profile 的供應商設定，但本次從官方 Paseo Web 選擇 DeepSeek 兩次均未持久化，daemon 明確回報 `acp does not expose ACP model selection`。此相容性問題尚未解決。
+原生模型切換控制重現了根因：`custom_providers.0.api_key` 與該 session 建立時的設定不同。Hermes 有回傳兩個模型；Paseo 將這次底層例外轉成 `acp does not expose ACP model selection`，因此該訊息不代表 Hermes 沒有模型清單。單純更新 profile 或重啟無法替固定 session policy 更新原 inline 金鑰。
 
-已完成官方 Web 的歸檔與還原操作。**正式映像上的換金鑰記憶續聊，以及還原後切換第二模型並回覆，仍為未通過**。前面候選環境的四輪成功回覆、附件驗收及正式映像資料保留結果仍有效，但不能替代這兩項。現階段不應把模型清單可見等同於模型切換成功，也不應把重啟或重新選模型寫成已驗證的修復方法。
+在隔離 QA 透過 Dashboard 原生自訂 endpoint API 建立使用 `key_env`／`.env` 的新命名供應商，保留舊宣告供原生 session 明確遷移。從官方 Paseo Web 選取新供應商的 DeepSeek 後，對話儲存的 model 與 runtime model 皆更新成功。隨後設為預設並移除舊供應商宣告；原金鑰始終保持撤銷，沒有重新啟用。整個附加元件重啟後，原配對 Online、原對話與附件歷史、新模型選擇均保留；再呼叫原生模型變更控制也未出現憑證恢復錯誤。以上設定／模型控制均未提交推論訊息，也未修改 session 資料庫或上游程式。
+
+已完成官方 Web 的歸檔與還原操作。**正式映像上的換金鑰記憶續聊，以及還原後第二模型的真實回覆，仍待一輪明確授權的付費驗收**。模型選擇成功不能替代該回覆驗證。前面候選環境的四輪成功回覆、附件驗收及正式映像資料保留結果仍有效。
+
+新部署請使用 Hermes 原生自訂 Endpoint 的憑證設定，避免把輪替金鑰寫成會被既有對話固定的 inline `custom_providers.api_key`。需遷移既有 inline provider 時，應先保留舊宣告、建立新命名供應商、明確切換對話，完成驗證後再移除舊宣告與撤銷舊憑證。直接覆寫舊金鑰的相容性問題仍存在；本次不宣稱已修補上游。
 
 ## 安裝
 
