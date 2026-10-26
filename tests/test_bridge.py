@@ -253,7 +253,8 @@ class ProcessTests(unittest.TestCase):
             for _ in range(30):
                 try:
                     status = Path(f'/proc/{pid}/stat').read_text().split(') ')[1].split()[0]
-                except FileNotFoundError:
+                except (FileNotFoundError, ProcessLookupError):
+                    # procfs can report ESRCH if the child is reaped after open.
                     break
                 if status == 'Z':
                     break
