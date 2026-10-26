@@ -1,6 +1,6 @@
 # Hermes Paseo 驗收紀錄
 
-## 0.1.4-rc.2：2026-10-25 專用服務實測
+## 0.1.4-rc.2：2026-10-25／26 專用服務實測
 
 **最新重測結論：雲端模型的核心連線與對話驗收已通過，完整商業上線驗收仍有待辦。** 使用者已在專用 Hermes 完成 ChatGPT／Codex 訂閱授權；以該帳號可用的 `openai-codex:gpt-6.1-sol` 重跑官方 UI、原生工具及容器重建後的真實對話，結果如下。早期 0.8B 本機模型兩次冷啟動失敗仍保留，不能將更換模型後的成功視為該本機模型已修復。
 
@@ -15,7 +15,7 @@
 | 十分鐘狀態觀察 | 四路同時請求、每批後間隔五秒，約 602 秒完成 404 次已登入狀態請求，零錯誤、容器零重啟、cgroup 記憶體事件未增加。HTTP 中位數約 559 ms、p95 約 3399 ms、最大約 4993 ms；期間包含真實並行與模型切換。稀疏記憶體採樣起始約 1866 MiB、結束約 1587 MiB，採樣最高約 1890 MiB；不能代表瞬間峰值或洩漏檢測。這不是長期 soak、飽和負載或 SLA 驗收。 |
 | 插件資料還原 | 停止並保存暫停意圖後，將 165 個持久檔案備份至另一個私人儲存位置，再從該備份替換原資料。checksum 全部一致，安裝／伺服器／配對金鑰身分保留，Origin 為 600。原對話記憶續聊通過；官方 Paseo 使用原配對再完成兩輪，約 30.3 秒。Hermes 原生帳號、session、runtime 及模型快取保留，因此不是完整主機災難復原。 |
 | 可控跨節點搬移 | 僅調整專用 StatefulSet 的暫時排程條件，讓 PVC 在另一個健康節點重新掛載。無瀏覽器約 154.8 秒恢復；原身分／配對保留，官方 UI 首輪與記憶續聊通過。還原排程條件後約 94.9 秒再次恢復，兩個容器重啟計數均為 0。未模擬斷電、網路分割或強制磁碟卸載。 |
-| Helm 模板修正 | 選用式、預設停用的 chart `0.4.0` 已發布至 Gitea Helm／OCI，完整倉庫 CI 通過；17 組 Hermes 測試包含新行為回歸 55 項。另修復共用 Console checker 的埠占用問題，新增 6 項回歸。兩個 channel 重新下載套件完全相同，26 個檔案 hash 符合驗證候選。現行平台缺少單一服務部署版本固定欄位，故尚未部署此 chart 或驗收 PaaS Redeploy；沒有更改全租戶模板。 |
+| Helm 模板修正 | 選用式、預設停用的 chart `0.4.0` 已發布至 Gitea Helm／OCI，完整倉庫 CI 通過；17 組 Hermes 測試包含新行為回歸 55 項。另修復共用 Console checker 的埠占用問題，新增 6 項回歸。兩個 channel 重新下載套件完全相同，26 個檔案 hash 符合驗證候選。2026-10-26 已透過 PaaS `.263` 的服務專用版本固定與原生 Redeploy 部署到測試服務，實際掛載及對話驗證通過；沒有更改全租戶模板。 |
 
 新增可重複使用的 `tests/live-concurrency.mjs`，需要明確 `--run` 與模型 ID；預設三路，最多四路、兩輪、八段對話。建立與清理無法確認時保留私人復原紀錄，不重送可能計費的請求。首次實機執行在初始化發現 Node 26 對 CommonJS `ws` 模組的匯出格式不同，尚未呼叫模型即失敗；加入相容處理與實際 CommonJS namespace 回歸後，重新通過上述並行測試。這是新驗收工具的修正；插件 daemon 核心沿用前版，舊候選版 tag 保持不變。
 
@@ -91,7 +91,7 @@
 - 雲端模型授權與上述兩個雲端模型已實測通過；其他模型、額度耗盡、撤銷登入與長期 token 更新尚未逐一驗證。此 Hermes 容器未安裝獨立 Claude Code、Codex、Pi，不列為可用 companions。
 - 語音／聽寫未啟用、未驗收。原映像缺少部分語音解壓縮工具；需要該功能時另行部署及測試。
 - 已通過三路並行、插件資料還原及可控跨節點搬移；大量負載、長期 soak、整機／整卷災難復原、非預期節點故障及 SLA 仍未完成。
-- 主機 adapter 目前仍為指定工作負載的持久掛載；正式 Helm 掛載支援 `0.4.0` 已發布，尚未部署並驗收平台 Redeploy。未宣稱任意平台重新部署都會保留。
+- 專用服務已通過 PaaS `.263`／chart `0.4.0` 的原生 Redeploy 與掛載保留；其他平台或未保存服務專用 values 的部署仍須另行驗收。
 
 配對憑證、模型 API key、登入 cookie、對話逐字稿及測試帳號資料不放入公開驗收文件。
 
@@ -101,11 +101,26 @@
 
 預檢發現三個既有 CPU 執行緒限制只保存在 Pod template，已補存至該服務 `extraEnv`；其他 Helm values 逐項比對不變。採用平台當下的 `10Gi`，避免沿用舊 Helm revision 的 `5Gi`。完整流程見 [部署前比對](dashboard-control.zh-TW.md#部署前比對與服務專用版本)。
 
-正式平台仍是 `.261`，服務專用版本固定功能尚未部署。`.262` 的來源與映像已完成發布準備，但仍待平台部署與驗收，因此此結果不列為 PaaS Redeploy 通過。
+當時正式平台為 `.261`，服務專用版本固定功能尚未部署，因此該次 dry-run 不列為 PaaS Redeploy 通過。2026-10-26 平台升到 `.263` 後，已完成下方的原生 Redeploy 實測。
 
 後續已修復阻擋 chart CI 的測試工具缺陷：舊 Console checker 假定公開埠號的下一個埠可用，強制占用該埠可重現 missing listener／ttyd 與 `ConnectionRefusedError`。修正版為三個 listener 分別選埠，等待有期限的帶驗證 HTTP 回應，檢查自己的 ttyd，並遮蔽啟動失敗日誌中的憑證。新增 6 項回歸、24 次並行啟動與兩個 chart 的 fake／real ttyd 測試通過；沒有改動 Console 的 production template。原 CI 未保留子程序日誌，不能斷言原失敗執行的埠占用者。
 
 Chart `0.4.0` 隨後通過 push／PR 全倉庫 CI 並發布。Gitea Helm 與 OCI 的回下載套件逐位元相同，全部 26 個檔案 hash 符合驗證候選；套件 SHA-256 為 `8e5918aa94237c51e36a1794e09414749dec05d68a05f47560643d5d7fa251ce`。Gitea index 未提供 digest，因此使用實際下載內容與候選檔案清單驗證，沒有將缺少的 index digest 誤記為已比對。
+
+### 原生 PaaS Redeploy：2026-10-26
+
+正式平台 ORM 確認為 `18.0.1.0.263`，服務專用版本固定欄位已可用。將專用測試服務設為 `pinned`、目標 chart `0.4.0`，固定原本已驗收的 Hermes 映像並保存 adapter values，再呼叫平台原生 `action_redeploy`。沒有直接執行手動 Helm upgrade，也沒有修改觀測版本帳本或共用商品範本。
+
+- 原生動作約 39 秒返回；平台最終為 Running，部署核對完成且無錯誤。Helm 為 deployed、revision 3、chart 0.4.0；原版本為 revision 2／0.3.13。
+- 新 Pod 在沒有開啟瀏覽器時自動恢復 Paseo；觀察程序約 85 秒確認 Ready／reachable。這段時間從觀察開始計算，並非完整停機時間或 SLA。
+- 20 項部署比對通過：原映像與實際 imageID、環境、資源、安全設定、健康檢查、fsGroup、Helm 與實際掛載、保存及實際磁碟容量 10 GiB。兩個容器皆零重啟；Longhorn 為 healthy、兩份副本。
+- 10 項身分／環境比對通過：安裝、伺服器與配對金鑰、正式 Origin 內容不變，Origin 為 600；模型登入、預設模型、CPU 限制、插件 commit 與已登記依賴環境保留；容器身分更新為新容器。
+- 重新部署前建立的真實雲端對話，在部署後仍能回覆之前記住的隨機代碼；測試 agent／工作區歸檔。
+- 官方 Paseo 使用已配對裝置重新連線，實際選取 `gpt-6.1-sol` 與 Default；首輪、新 assistant 訊息的記憶續聊及歸檔全部通過，約 30.6 秒。第一次 UI runner 參數誤用另一個模型顯示名稱，停在選單且沒有建立 agent／送出模型訊息；改用頁面實際名稱後重新驗證。
+- Dashboard 背景驗收約 0.19 秒回傳 202；重新整理、確認重載 Dashboard 及關閉提交瀏覽器後仍使用同一工作，首輪／記憶續聊、UI 成功與歸檔全部通過。
+- 六個原生 handler 再次通過：status、models、真實 chat／continue、stop／start；約 32.1 秒完成，等待恢復 reachable 才通過並確認測試資料歸檔。另由原生 Hermes 模型實際呼叫一次 `paseo_status`，最終 assistant 正確回傳 prompt 未提供的初始化 ID，退出 0。
+- Default、Accept edits、Don't ask 透過正式 SDK 逐一切換，讀回 runtime／current mode 確認，再還原 Default 並歸檔；此項不發送模型訊息。
+- 未登入 401、跨 Origin 403、非法 body／profile query 400 均通過，這些拒絕請求未觸發 Dashboard 重載。
 
 ## 歷史：0.1.2／Hermes 0.19
 

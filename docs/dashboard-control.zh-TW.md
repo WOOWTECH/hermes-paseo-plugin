@@ -29,9 +29,9 @@ python3 bin/install-dashboard-control-k8s.py \
 
 ### 正式 chart 整合狀態
 
-`hermes-agent` chart `0.4.0` 已發布至平台 Gitea Helm 與 OCI registry，提供選用式 `paseoDashboardControl` 掛載支援，預設停用；管理者指定由自己維護的現有 ConfigMap，chart 固定掛載四個 adapter 檔案與 CLI wrapper。完整 chart 倉庫 CI 已通過，兩個 channel 重新下載的套件完全相同，26 個檔案的 SHA-256 均符合驗證候選。此 chart 尚未部署到本測試服務，平台 Redeploy 仍待下方前置條件與實測。
+`hermes-agent` chart `0.4.0` 已發布至平台 Gitea Helm 與 OCI registry，提供選用式 `paseoDashboardControl` 掛載支援，預設停用；管理者指定由自己維護的現有 ConfigMap，chart 固定掛載四個 adapter 檔案與 CLI wrapper。完整 chart 倉庫 CI 已通過，兩個 channel 重新下載的套件完全相同，26 個檔案的 SHA-256 均符合驗證候選。2026-10-26 已在 PaaS `.263` 以原生 Redeploy 部署到專用測試服務，Helm 從 revision 2／chart 0.3.13 升為 revision 3／chart 0.4.0，實際掛載及原配對對話均通過驗證。
 
-`0.4.0` 的服務 values 形狀如下；**現行測試服務的 0.3.13 chart 不支援此設定**，單獨填入不會建立掛載：
+`0.4.0` 的服務 values 形狀如下；舊版 `0.3.13` 不支援此設定，必須一併更新服務的目標 chart 版本：
 
 ```yaml
 paseoDashboardControl:
@@ -47,7 +47,9 @@ paseoDashboardControl:
 
 2026-10-25 的新版 chart 伺服器 dry-run 通過 22 項比對，包括映像、環境變數、資源、安全設定、健康檢查、原 PVC、10 GiB 設定、兩個唯讀掛載、四個 adapter 檔案與模式。Helm revision 及運行中的 Pod template 均未改動。這是候選設定驗證，尚非實際升級。
 
-平台若提供服務專用部署版本，須保存「期望的 chart 版本」及必要的映像 pin，再執行 Redeploy。`helm_chart_version` 若是已部署版本的紀錄，不能修改它來假裝已固定目標版本。此次平台 `.261` 尚未具備該能力；包含此功能的 `.262` 已建置，但仍待 staging／production 部署與實測。不要為一台測試服務改動所有租戶共用的商品範本。
+平台須保存「期望的 chart 版本」及必要的映像 pin，再執行 Redeploy。`helm_chart_version` 是已部署版本的紀錄，不能修改它來假裝已固定目標版本。2026-10-26 正式平台已升為 `.263`，具備此功能；測試服務使用 `deployment_policy=pinned`、`deployment_chart_version=0.4.0`，並以 `deployment_image_overrides` 固定原本已驗收的 Hermes 映像。共用商品範本在這段期間已更換預設映像，因此此固定也實際驗證了 Redeploy 不會把測試服務換成範本的新映像。
+
+管理者應依序完成：確認同 namespace 的 adapter ConfigMap 與內容、保存服務專用 chart／映像 pin、合併上述 values 與原有 `extraEnv`／磁碟設定，再透過平台原生 Redeploy 部署。部署後同時核對期望版本、實際 Helm 版本、Pod 的 imageID、掛載及平台最終 Running 狀態。此次實測也確認 10 GiB、三個 CPU 執行緒限制、fsGroup、模型登入及配對金鑰保留，並完成原對話記憶續聊。不要為一台測試服務改動所有租戶共用的商品範本。
 
 若工作負載設定 `fsGroup`，Kubernetes 重新掛載可能把 Origin 檔案從 `600` 改成 `660`。0.1.4 保留平台所需的 `fsGroup`，在 Dashboard 啟動時只修復服務帳戶擁有、無 symlink／hardlink、內容與正式 `HERMES_DASHBOARD_PUBLIC_URL` 一致的 Origin 檔案及其專用目錄。其他私有檔案及錯誤 Origin 不會被自動信任或改寫。舊的 `--preserve-private-profile` 參數保留作目錄 UID 驗證，相容既有部署命令，但不再移除 `fsGroup`。
 
