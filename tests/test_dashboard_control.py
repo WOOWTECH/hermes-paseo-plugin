@@ -96,14 +96,18 @@ class DashboardControlTests(unittest.TestCase):
         def spa(full_path):
             return {'spa': True}
         server = SimpleNamespace(app=app, _require_token=lambda request: None)
-        for _ in range(2):
-            module.install(server, lambda: True, lambda: 'https://hermes.test', self.control)
+        module.install(server, lambda: True, lambda: 'https://hermes.test', self.control)
+        routes_after_first_install = tuple(app.router.routes)
+        module.install(server, lambda: True, lambda: 'https://hermes.test', self.control)
+        self.assertEqual(tuple(app.router.routes), routes_after_first_install)
         client = TestClient(app)
         r = client.get(module.PREFIX + '/capabilities', headers=self.headers)
         self.assertTrue(r.json()['supported'])
         self.assertNotIn('spa', r.json())
         self.assertEqual(client.get('/sessions').json(), {'spa': True})
-        self.assertEqual(len([r for r in app.routes if getattr(r, 'path', '') == module.PREFIX + '/reload']), 1)
+        self.assertEqual(client.post(module.PREFIX + '/reload', headers=self.headers,
+                                     json={'confirm': False}).status_code, 400)
+        self.signaler.assert_not_called()
 
 
 class LifecycleMiddlewareTests(unittest.TestCase):
