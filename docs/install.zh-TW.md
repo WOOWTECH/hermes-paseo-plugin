@@ -156,7 +156,7 @@ hermes config set tools.tool_search.enabled off
 
 Hermes 0.22.5 會自動加入尚未在該平台記錄過的插件工具。只填 `platform_toolsets.acp: [hermes_paseo]`，仍可能載入其他插件。本次冷啟動實測因此出現小模型調用不相關工具、沒有回覆測試代碼的失敗。
 
-專用測試服務使用同版 Hermes 工具選單的保存函式，記錄 ACP 選擇及當時已知的插件工具集，再以 Hermes 的實際解析結果確認只有 `hermes_paseo`。保存後的相關片段如下；插件名稱是此服務的實測清單，其他主機須依自己的已安裝工具集處理：
+早期小模型測試使用同版 Hermes 工具選單的保存函式，記錄 ACP 選擇及當時已知的插件工具集，再以 Hermes 的實際解析結果確認只有 `hermes_paseo`。當時的相關片段如下；插件名稱是此服務的實測清單，其他主機須依自己的已安裝工具集處理：
 
 ```yaml
 platform_toolsets:
@@ -172,7 +172,7 @@ known_plugin_toolsets:
 2026-10-26 以官方 Web 0.13.0、daemon 0.11.2、Hermes 0.22.5 實測；詳見 [Web 測試矩陣](web-acceptance-20261026.zh-TW.md)。Web 會提示主機版本較舊，不能把文字對話通過推論為所有新功能皆相容。
 
 - **重新整理／重連**：歷史與輸入框可能先於連線完成出現。如果送出時顯示 `Host is not connected` 或 `Transport not connected`，先保留草稿，至 Settings → 該主機 → Overview 確認 Online，再返回對話送出。實測未連線時送出會保留草稿，需要重送；不要連續點擊。
-- **附件**：上傳完成不等於模型已讀取。此版 daemon 將一般檔案的名稱、路徑、MIME 與大小交給 ACP，沒有直接嵌入檔案內容。上述小模型設定只開 `hermes_paseo`，缺少 `read_file`，因此文字附件讀取實測失敗。Hermes 原生 `file` 工具集包含 `read_file`、`write_file`、`patch`、`search_files`，會擴大模型可用能力；須由管理者核准後以相容介面設定並在新對話重驗。插件不自動擴權。檔案工具受服務帳戶的檔案權限約束，不能假定僅能存取當前工作區。測試站尚未套用此變更。
+- **附件**：上傳完成不等於模型已讀取。此版 daemon 將一般檔案的名稱、路徑、MIME 與大小交給 ACP，沒有直接嵌入檔案內容。上述小模型設定只開 `hermes_paseo`，缺少 `read_file`，因此文字附件讀取實測失敗。Hermes 原生 `file` 工具集包含 `read_file`、`write_file`、`patch`、`search_files`，會擴大模型可用能力；須由管理者核准後以相容介面設定並在新對話重驗。插件不自動擴權。檔案工具受服務帳戶的檔案權限約束，不能假定僅能存取當前工作區。測試站在使用者明確核准後已套用 `[file, hermes_paseo]`，確認 CLI／其他配置不變，並通過新 ACP 實例的工具載入與原生讀寫測試；模型附件回覆仍待額度恢復後重測。
 - **移除未送出的附件**：桌面版先將滑鼠移到附件卡片，再點移除按鈕。直接點隱藏狀態的移除控制，可能被卡片遮擋。
 - **歸檔／還原**：在側欄工作區選單選 Archive。從 History 找回後，先按工作區的 Unarchive；若對話仍顯示 `This agent is archived`，再按對話內的 Unarchive。工作區與 agent 是分開還原的。
 - **額度不足**：本次後段實測收到訂閱供應商 HTTP 429，最後還伴隨 `Internal error: admitted_turn_failed`。應讀取前面的供應商訊息判斷原因，等待帳號額度恢復再重試。重新配對或重啟 daemon 不會恢復供應商額度。
