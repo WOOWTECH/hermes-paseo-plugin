@@ -1,16 +1,16 @@
 # Hermes Paseo：下載、安裝、部署與測試
 
-適用於 v0.1.4-rc.4 公開候選版。本教學將插件部署到已有的 Hermes Agent / Dashboard；Hermes 核心與可用的模型端點須先準備好。實測範圍與待驗項目見 [驗收紀錄](validation.md)。
+適用於 v0.1.4-rc.5 公開候選版。本教學將插件部署到已有的 Hermes Agent / Dashboard；Hermes 核心與可用的模型端點須先準備好。實測範圍與待驗項目見 [驗收紀錄](validation.md)。
 
 ## 下載網址
 
 - 原始碼：https://github.com/WOOWTECH/hermes-paseo-plugin
 - Gitea 原始碼鏡像：https://git-prod.woowtech.io/mirror/hermes-paseo-plugin
-- v0.1.4-rc.4：https://github.com/WOOWTECH/hermes-paseo-plugin/releases/tag/v0.1.4-rc.4
-- 固定版本 ZIP：https://github.com/WOOWTECH/hermes-paseo-plugin/archive/refs/tags/v0.1.4-rc.4.zip
+- v0.1.4-rc.5：https://github.com/WOOWTECH/hermes-paseo-plugin/releases/tag/v0.1.4-rc.5
+- 固定版本 ZIP：https://github.com/WOOWTECH/hermes-paseo-plugin/archive/refs/tags/v0.1.4-rc.5.zip
 - Paseo 官方介面：https://app.paseo.sh
 
-公開下載不需要 GitHub token。Web / CLI 從 GitHub 安裝會取得目前 main；ZIP 固定為 v0.1.4-rc.4。候選版不代表已完成所有正式部署環境的驗收。
+公開下載不需要 GitHub token。Web / CLI 從 GitHub 安裝會取得目前 main；ZIP 固定為 v0.1.4-rc.5。候選版不代表已完成所有正式部署環境的驗收。
 
 ## 1. 確認環境
 
@@ -82,7 +82,7 @@ hermes plugins enable hermes-paseo
 
 若要使用固定版本 ZIP：
 
-1. 下載上述 v0.1.4-rc.4 ZIP 並解壓。
+1. 下載上述 v0.1.4-rc.5 ZIP 並解壓。
 2. 將包含 `plugin.yaml`、`__init__.py`、`dashboard/`、`runtime/` 的那一層資料夾命名為 `hermes-paseo`。
 3. 放入同一 Hermes profile 的 `plugins/` 目錄：預設為 `~/.hermes/plugins/hermes-paseo/`；自訂 `HERMES_HOME` 時為 `$HERMES_HOME/plugins/hermes-paseo/`。檔案須由 Hermes 服務帳戶擁有。
 4. 確認 `plugin.yaml` 直接位於該目錄，然後執行 `hermes plugins enable hermes-paseo`。
@@ -219,6 +219,7 @@ Hermes 0.19 的首次引導為插件頁配對精靈；此版沒有公開的新�
 | 沒有模型或無法回覆 | 確認 Hermes ACP 已安裝，並完成 Hermes 官方模型登入／設定。 |
 | `PROVIDER_PROMPT_BLOCKED` | 已收到提示被攔截的回覆，未取得有效答案。查看供應商與主機日誌；不要把 idle 當成成功，也不要自動重送。 |
 | `PROVIDER_TURN_FAILED` | 到 Hermes 的 Logs 檢查該次錯誤；可能是模型登入、context 不足或推理服務失敗。修正後重新執行首輪／續聊，不能僅依 ready 狀態判定成功。 |
+| `MODEL_SELECTION_UNAVAILABLE` | Hermes ACP 沒有套用選定模型；插件不會把首則訊息送到其他預設模型。請檢查本機模型服務、帳號與模型權限，再重新建立對話。直接在 Paseo Web 建立的對話仍須自行核對實際模型。 |
 | 切換預設模型後仍出現舊模型 | 完成進行中的對話後，停止並恢復 Paseo 服務，讓 ACP 重新載入。 |
 | 沒有 Claude Code、Codex 或 Pi | 需先在同容器安裝與完成各官方登入，才會被插件偵測。 |
 | Hermes 對話找不到插件工具 | 檢查 profile 的工具集白名單是否包含 `hermes_paseo`。 |

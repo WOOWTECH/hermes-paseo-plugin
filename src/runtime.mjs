@@ -8,6 +8,7 @@ import { locations, readState, updateState, atomicJson, privateDirectory, withRu
 import { findExecutable, runProcess } from './process.mjs';
 import { resolveProviderLaunchers, configureProviders } from './provider-launchers.mjs';
 import { providerReplyError } from './provider-reply.mjs';
+import { sendVerifiedHermesMessage } from './model-selection.mjs';
 import { assistantEntries, latestAssistantCursor, chatResult } from './chat-result.mjs';
 import {singleFlight,daemonStatusWindow} from './single-flight.mjs';
 import {usingAcceptanceAgent,usingAcceptanceWorkspace} from './acceptance-agent.mjs';
@@ -289,15 +290,22 @@ export async function acceptance(options = {}) {
       row.model = model; row.modeId = modeId || null;
       await withClient(async client => {
         const marker = `HERMES_PASEO_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
+        const prompt = `Connection check only. Do not use tools or edit files. Remember ${marker}. Reply with exactly ${marker}.`;
         await usingAcceptanceWorkspace(client,{source:{kind:'directory',path:cwd}},row,async workspace=>{
-        await usingAcceptanceAgent(client,{ provider, model, modeId, cwd, workspaceId: workspace.id, title: `Hermes Paseo ${provider} connection check`, initialPrompt: `Connection check only. Do not use tools or edit files. Remember ${marker}. Reply with exactly ${marker}.`, labels: { 'hermes-paseo-acceptance': 'true' } },row,async agent=>{
+        await usingAcceptanceAgent(client,{ provider, model, modeId, cwd, workspaceId: workspace.id, title: `Hermes Paseo ${provider} connection check`, ...(provider === 'hermes' ? {} : { initialPrompt: prompt }), labels: { 'hermes-paseo-acceptance': 'true' } },row,async agent=>{
+        if (provider === 'hermes') await sendVerifiedHermesMessage(client, agent, model, prompt);
         const first = await client.waitForFinish(agent.id, timeoutMs);
         if (first.status !== 'idle') throw new RuntimeError(first.status === 'permission' ? 'PERMISSION_REQUIRED' : first.status === 'timeout' ? 'PROVIDER_TIMEOUT' : 'PROVIDER_TURN_FAILED');
         const firstEntries = await assistantEntries(client, agent.id);
         const firstReply = firstEntries.at(-1)?.item.text || ''; row.firstReply = String(firstReply).includes(marker);
         if (providerReplyError(firstReply)) throw new RuntimeError(providerReplyError(firstReply));
         if (!row.firstReply) throw new RuntimeError('EMPTY_OR_UNEXPECTED_REPLY');
-        await client.sendAgentMessage(agent.id, 'What marker did I ask you to remember? Reply with that marker only. Do not use tools.');
+        if (provider === 'hermes') {
+          const current = await client.fetchAgent({ agentId: agent.id });
+          await sendVerifiedHermesMessage(client, current?.agent, model, 'What marker did I ask you to remember? Reply with that marker only. Do not use tools.');
+        } else {
+          await client.sendAgentMessage(agent.id, 'What marker did I ask you to remember? Reply with that marker only. Do not use tools.');
+        }
         const second = await client.waitForFinish(agent.id, timeoutMs);
         if (second.status !== 'idle') throw new RuntimeError(second.status === 'permission' ? 'PERMISSION_REQUIRED' : second.status === 'timeout' ? 'PROVIDER_TIMEOUT' : 'PROVIDER_TURN_FAILED');
         const secondEntries = await assistantEntries(client, agent.id);
@@ -341,8 +349,18 @@ export async function createChat(options = {}) {
     return await withClient(async client => {
       const workspace = await client.createWorkspace({ source: { kind: 'directory', path: cwd } });
       if (!workspace.workspace?.id) throw new RuntimeError('WORKSPACE_CREATE_FAILED');
-      const agent = await client.createAgent({ provider, model, modeId, thinkingOptionId, cwd, workspaceId: workspace.workspace.id, title: options.title || `Hermes ${provider}`, initialPrompt: options.message, labels: { 'hermes-paseo-plugin': readState().installationId } });
+      const agent = await client.createAgent({ provider, model, modeId, thinkingOptionId, cwd, workspaceId: workspace.workspace.id, title: options.title || `Hermes ${provider}`, ...(provider === 'hermes' ? {} : { initialPrompt: options.message }), labels: { 'hermes-paseo-plugin': readState().installationId } });
       agentId = agent.id;
+      if (provider === 'hermes') {
+        try {
+          await sendVerifiedHermesMessage(client, agent, model, options.message);
+        } catch (error) {
+          if (error.code === 'MODEL_SELECTION_UNAVAILABLE') {
+            await Promise.allSettled([client.archiveAgent(agentId), client.archiveWorkspace(workspace.workspace.id)]);
+          }
+          throw error;
+        }
+      }
       return chatResult(client, agentId, provider, model, timeoutMs);
     }, timeoutMs + 30000);
   } catch (error) {
@@ -361,7 +379,8 @@ export async function continueChat(options = {}) {
       if (!found?.agent) throw new RuntimeError('AGENT_NOT_FOUND');
       provider = found.agent.provider; model = found.agent.model || found.agent.config?.model || null;
       const previousCursor = latestAssistantCursor(await assistantEntries(client, options.agentId));
-      await client.sendAgentMessage(options.agentId, options.message);
+      if (provider === 'hermes') await sendVerifiedHermesMessage(client, found.agent, model, options.message);
+      else await client.sendAgentMessage(options.agentId, options.message);
       return chatResult(client, options.agentId, provider, model, timeoutMs, previousCursor);
     }, timeoutMs + 30000);
   } catch (error) {
