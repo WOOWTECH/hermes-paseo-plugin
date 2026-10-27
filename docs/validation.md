@@ -1,5 +1,14 @@
 # Hermes Paseo 驗收紀錄
 
+## 0.1.4-rc.6：官方 relay 迴路自我驗證
+
+`relayVerified` 在 rc.5 以前是保留欄位：程式只讀取、從不寫入，所以永遠是 `false`，與 relay 是否可用無關。rc.6 補上實際驗證：`control.mjs relay`（Dashboard API `POST /relay`；Dashboard 的啟動流程在 daemon 就緒後會自動檢查，從未驗證或上次成功已超過 24 小時才再做）用剛產生的配對邀請，從本機以官方 Paseo 用戶端經 `relay.paseo.sh` 連回同一個 daemon，完成端對端加密握手並讀取 daemon 狀態。成功寫入 `relayVerified: true` 與 `relayVerifiedAt`；失敗寫入 `false` 並回傳 `RELAY_UNVERIFIED`。
+
+- 邀請等同存取憑證，只存在記憶體，不寫入狀態檔、日誌或回應。
+- 驗證涵蓋出站連線、官方 relay 轉送與加密握手；不代替瀏覽器配對、模型對話或手機網路的實測。
+- 結果是單次時間點，請看 `relayVerifiedAt`；relay 之後中斷不會自動把欄位改回 `false`，需要再執行一次。
+- 2026-10-27 在 PaaS 兩台 Hermes（rc.5，以官方 CLI 用 pairing URL 做同一種連線）實測：兩台都在約 7 秒內經 relay 讀回 daemon 的 agent 清單。
+
 ## 0.1.4-rc.5：Hermes 模型選擇防護
 
 插件發起的 Hermes 驗收、建立對話及續聊會在送出訊息前核對代理回報的實際模型；不一致或沒有可靠回報時返回 `MODEL_SELECTION_UNAVAILABLE`。模型清單只代表可選項，不保證切換成功。這項檢查只覆蓋插件的呼叫路徑；使用者直接在 Paseo Web 建立的對話仍須核對實際模型。Node 89 項、Python 81 項與本機 Chromium 介面測試通過；此處不宣稱遠端配對或所有模型對話均已驗收。

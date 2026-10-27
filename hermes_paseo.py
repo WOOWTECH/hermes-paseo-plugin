@@ -39,9 +39,9 @@ MAX_INPUT = 16 * 1024
 MAX_OUTPUT = 256 * 1024  # combined stdout/stderr, before decoding
 PROVIDERS = frozenset({'hermes', 'claude', 'codex', 'pi'})
 TIMEOUTS = {'status': 20, 'start': 480, 'stop': 60, 'models': 165,
-            'pair': 40, 'acceptance': 480, 'chat': 240, 'continue': 240}
+            'pair': 40, 'relay': 75, 'acceptance': 480, 'chat': 240, 'continue': 240}
 FIELDS = {'status': (), 'start': (), 'stop': (), 'models': ('provider',),
-          'pair': (), 'acceptance': ('providers',),
+          'pair': (), 'relay': (), 'acceptance': ('providers',),
           'chat': ('provider', 'model', 'mode', 'thinking', 'message'),
           'continue': ('agentId', 'message')}
 CODES = frozenset('''INVALID_REQUEST INVALID_PROVIDER INVALID_MESSAGE INVALID_AGENT_ID
@@ -599,6 +599,7 @@ class Bridge:
                 self._condition.notify_all()
 
     def _initialize(self):
+        verify = False
         try:
             with self._operation_lock:
                 with self._condition:
@@ -615,10 +616,24 @@ class Bridge:
                     if not self._pause_requested:
                         self._cache = copy.deepcopy(result)
                         self._cached_at = time.monotonic()
+                daemon = result.get('daemon') or {}
+                verify = not self._pause_requested and daemon.get('reachable') is True and relay_check_due(daemon)
         except Exception as error:
             with self._condition:
                 self._phase = 'error'
                 self._error = error.code if isinstance(error, BridgeError) else 'START_FAILED'
+        finally:
+            self.invalidate()
+        if verify:
+            self._verify_relay()
+
+    def _verify_relay(self):
+        # Best effort and only after setup is already visible as running: the hosted relay
+        # being unreachable must not block onboarding. The outcome is kept in the plugin state.
+        try:
+            self._invoke('relay')
+        except Exception:
+            pass
         finally:
             self.invalidate()
 
@@ -704,6 +719,20 @@ class Bridge:
         finally:
             if action != 'models':
                 self.invalidate()
+
+
+RELAY_RECHECK = datetime.timedelta(hours=24)
+
+
+def relay_check_due(daemon):
+    """True when the relay was never verified or the last good check is a day old (or unreadable)."""
+    if daemon.get('relayVerified') is not True:
+        return True
+    try:
+        when = datetime.datetime.fromisoformat(str(daemon.get('relayVerifiedAt')).replace('Z', '+00:00'))
+        return datetime.datetime.now(datetime.timezone.utc) - when > RELAY_RECHECK
+    except (TypeError, ValueError):
+        return True
 
 
 _BRIDGES = {}

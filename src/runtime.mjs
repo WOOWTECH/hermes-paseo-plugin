@@ -213,7 +213,7 @@ export async function status() {
 }
 async function readStatus() {
   const state = readState(); const installed = runtimeReady(locations()); const owned = ownsHome();
-  const daemon = { running: false, reachable: false, owned, pid: null, listen: null, relayEnabled: false, relayConnected: null, relayVerified: state.relayVerification?.verified === true, relayVerifiedAt: state.relayVerification?.checkedAt || null };
+  const daemon = { running: false, reachable: false, owned, pid: null, listen: null, relayEnabled: false, relayConnected: null, relayVerified: state.relayVerification?.verified === true, relayVerifiedAt: state.relayVerification?.verified === true ? state.relayVerification.checkedAt || null : null };
   let providers = [], diagnosticCode = state.lastError?.code === 'RESTART_REQUIRED' ? 'RESTART_REQUIRED' : null;
   if ((installed||legacyVersion()===PASEO_VERSION) && owned) {
     try {
@@ -261,15 +261,53 @@ async function readModels(provider) {
     return { ...safeProvider(entry || { provider, status: 'unknown' }), models: (result.models || []).map(model => ({ id: model.id, label: model.label || model.id, isDefault: model.isDefault === true, defaultThinkingOptionId: model.defaultThinkingOptionId || null, thinkingOptions: (model.thinkingOptions || []).map(option => ({ id: option.id, label: option.label || option.id, isDefault: option.isDefault === true })) })) };
   }, 150000);
 }
-export async function pair() {
-  const result = await status(); if (!result.daemon.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
+async function relayOffer() {
   const offer = await cli(['daemon', 'pair', '--relay'], { timeoutMs: 15000 });
   if (!offer.url || !offer.relayEnabled) throw new RuntimeError('PAIRING_UNAVAILABLE');
   const url = new URL(offer.url); if (url.protocol !== 'https:' || url.hostname !== 'app.paseo.sh') throw new RuntimeError('PAIRING_ORIGIN_INVALID');
+  return offer;
+}
+export async function pair() {
+  const result = await status(); if (!result.daemon.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
+  const offer = await relayOffer();
   const pairing = { url: offer.url, createdAt: new Date().toISOString() };
   atomicJson(path.join(locations().stateDir, 'pairing.private.json'), pairing);
   updateState({ pairingCreatedAt: pairing.createdAt });
   return pairing;
+}
+async function connectViaOffer(url, work, timeoutMs = 30000) {
+  const { connectToDaemon } = await import(pathToFileURL(path.join(packageRoot(), 'dist/utils/client.js')).href);
+  // An endpoint target keeps its client id under $PASEO_HOME; use the managed home, never ~/.paseo.
+  const saved = process.env.PASEO_HOME; process.env.PASEO_HOME = locations().paseoHome;
+  let client;
+  try { client = await connectToDaemon({ target: { kind: 'endpoint', host: url }, timeout: 20000 }); }
+  finally { if (saved === undefined) delete process.env.PASEO_HOME; else process.env.PASEO_HOME = saved; }
+  let timer;
+  try {
+    return await Promise.race([work(client), new Promise((_, reject) => { timer = setTimeout(() => reject(new RuntimeError('DAEMON_REQUEST_TIMEOUT')), timeoutMs); timer.unref(); })]);
+  } finally { clearTimeout(timer); await client.close().catch(() => {}); }
+}
+/**
+ * Proves the hosted relay path end to end: a fresh pairing offer is used by a client that leaves this
+ * host, enters through the relay and completes the encrypted handshake with this daemon, like the Paseo
+ * app does. The offer is a credential; it stays in memory and is never stored, logged or returned.
+ * `deps` lets tests replace the daemon, the offer and the connection.
+ */
+export async function verifyRelay(deps = {}) {
+  return singleFlight(`relay:${locations().paseoHome}`, () => readRelay(deps));
+}
+async function readRelay({ daemon = async () => (await status()).daemon, offer = relayOffer, connect = connectViaOffer } = {}) {
+  if (!(await daemon()).reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
+  const checkedAt = new Date().toISOString();
+  try {
+    const { url } = await offer();
+    await connect(url, client => client.getDaemonStatus({ timeout: 10000 }));
+  } catch {
+    updateState({ relayVerification: { verified: false, checkedAt, code: 'RELAY_UNVERIFIED' } });
+    throw new RuntimeError('RELAY_UNVERIFIED');
+  }
+  updateState({ relayVerification: { verified: true, checkedAt } });
+  return { verified: true, checkedAt };
 }
 /** Runs exactly two tiny turns per selected provider. Call only after user authorization. */
 export async function acceptance(options = {}) {

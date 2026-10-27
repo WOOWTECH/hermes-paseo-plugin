@@ -168,6 +168,12 @@ async def pair(request: Request):
     return await asyncio.to_thread(bridge.get_bridge().call, 'pair', body, allow_pair=True)
 
 
+@router.post('/relay')
+async def relay(request: Request):
+    body = await read_json(request)
+    return await asyncio.to_thread(bridge.get_bridge().call, 'relay', body)
+
+
 @router.post('/acceptance')
 async def acceptance(request: Request):
     body = await read_json(request)
