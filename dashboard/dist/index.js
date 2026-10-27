@@ -78,6 +78,7 @@
     if (!value || typeof value.passed !== "boolean" || !Array.isArray(value.providers)) throw fault("DATA");
     return { passed: value.passed, providers: value.providers.filter(row => row && typeof row.provider === "string").map(row => ({
       provider: text(row.provider, ""), passed: row.passed === true,
+      code: typeof row.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(row.code) ? row.code : "",
       first: row.firstReply === true || !!(row.firstReply && row.firstReply.passed === true),
       followup: row.followup === true || !!(row.followup && row.followup.passed === true),
       cleanup: row.cleanup === true || !!(row.cleanup && row.cleanup.archived === true && row.cleanup.workspaceArchived !== false),
@@ -386,7 +387,7 @@
     }
     return h("section", { className: "hp-card", "aria-label": "模型與模式" },
       h("h2", null, "3. 探索模型與模式"),
-      h("p", { className: "hp-muted" }, "模型與模式由 ACP 即時探索。只列出 Hermes 及此主機可用的伴隨代理；選擇後請在 Paseo 建立對話時使用相同設定。"),
+      h("p", { className: "hp-muted" }, "模型與模式由 ACP 即時探索；清單代表可選項，仍須以實際模型切換與回覆確認可用性。選擇後請在 Paseo 建立對話時使用相同設定。"),
       h("div", { className: "hp-fields" },
         select("代理", provider, setProvider, providers.map(row => ({ id: row.provider, label: row.label })), !ready),
         select("模型", model, setModel, catalog ? catalog.models : [], !ready || !catalog || !catalog.models.length),
@@ -578,7 +579,10 @@
         acceptanceIssue && h("p", { className: "hp-error", role: "alert" }, acceptanceIssue),
         h("p", { className: "hp-muted hp-small" }, "驗收採用後端的代理預設設定；上方選單用於探索，不會變更驗收設定。"),
         snapshot.acceptance && h("div", { className: "hp-result", role: "status", "aria-live": "polite" },
-          h("strong", null, snapshot.acceptance.passed ? "後端回報：真實對話驗收通過" : "真實對話驗收未全部通過；請確認代理的官方登入與服務狀態。"),
+          h("strong", null, snapshot.acceptance.passed ? "後端回報：真實對話驗收通過" :
+            snapshot.acceptance.providers.some(row => row.code === "MODEL_SELECTION_UNAVAILABLE")
+              ? "Hermes 未成功套用選定模型；驗收未向其他模型送出訊息。請先檢查 Hermes 模型服務。"
+              : "真實對話驗收未全部通過；請確認代理的官方登入與服務狀態。"),
           h("ul", null, snapshot.acceptance.providers.map((row, index) => h("li", { key: index },
             ((status ? status.providers : []).find(provider => provider.provider === row.provider) || {}).label || row.provider,
             "：", row.passed ? "通過首輪與續聊驗收" : "未通過", row.cleanup ? "；測試代理已清理" : "；請檢查測試清理狀態", row.workspaceArchived ? "，工作區已歸檔" : ""))))));
