@@ -33,13 +33,28 @@ Paseo 插件資料位於 `$HERMES_HOME/plugin-data/hermes-paseo`。可重建的 
 
 ## 驗證官方 relay 迴路
 
-Dashboard 啟動流程在 daemon 就緒後會自動做一次（從未驗證或上次成功已超過 24 小時才做，失敗不影響配對與對話）；也可以隨時手動重做，不需要瀏覽器，也不會呼叫模型：
+Dashboard 啟動流程在 daemon 就緒後會自動做一次（從未驗證或上次成功已超過 24 小時才做，失敗不影響配對與對話）。啟動流程由使用者開啟 Paseo 頁面觸發，Pod 重啟或 PaaS 自動更新後不會自動重做；需要最新結果時可以隨時手動重做，不需要瀏覽器，也不會呼叫模型：
 
 ```bash
 node "$HERMES_HOME/plugins/hermes-paseo/bin/control.mjs" relay <<< '{}'
 ```
 
 回傳的 `daemon.relayVerified` 與 `relayVerifiedAt` 就是結果；失敗時輸出 `{"ok":false,"code":"RELAY_UNVERIFIED"}` 並以非零結束。常見原因是 Pod 不能出站連到 `relay.paseo.sh:443`、daemon 的 relay 被設定關閉，或 Paseo 官方 relay 暫時不可用。這個檢查只證明 relay 到本 daemon 的路徑；要確認使用者端能用，仍須從官方 Paseo 頁面實際配對一次。
+
+## 發佈新版與 PaaS 自動更新
+
+啟用 Hermes chart 的 `paseoAutoUpdate`（0.4.3 起含回滾）的 PaaS 服務，每天在排程時間檢查本 repo **最新已發布的 release**，符合以下全部條件才安裝；任何一項不符就拒絕（Job 顯示失敗，外掛不動）：
+
+- release 的 commit 在 `main` 上，且 `Unit tests`、`Browser`（各兩組）與 `Locked dependency audit` 五項檢查**每項最新一輪**都成功。
+- `host/` 的四個主機轉接檔逐位元組不變；`plugin.yaml` 除 `version` 行外不變，且 `version` 等於 tag；`package.json` 沒有相依套件。
+- Hermes 原生安全掃描沒有新增項目（以 pattern、severity、category、檔案、說明比對，不含行號；同檔同模式多出一處仍會被擋）。
+
+發 release 時請注意：
+
+1. **tag 一推就會再跑一輪 CI**（約 1–2 分鐘；Chromium 安裝偶爾卡住，要重跑）。這段時間排程剛好執行，會因為檢查還沒全綠而拒絕，不計入失敗次數，隔天再試。要立刻更新時，先等這一輪綠燈。
+2. 變更 `host/`、`plugin.yaml` 能力或新增相依套件的版本不會被自動安裝，需要另外發 chart／HA 映像。
+3. 更新後若重載的 Dashboard、daemon 或 Plugin Doctor 不健康，更新器會自動裝回上一版、重啟 daemon 並再重載一次，Job 仍標示失敗以便察覺；失敗的版本只重試一次，之後要等更新的 release。
+4. 多台服務各自排程、互不把關。要先在專用服務驗證時：暫停其他服務的 CronJob（`spec.suspend: true`），在專用服務以 `kubectl create job --from=cronjob/<名稱>` 手動執行並驗證，通過後再逐台執行並恢復排程。rc.6 就是這樣發佈的。
 
 ## 發版前的判定
 
