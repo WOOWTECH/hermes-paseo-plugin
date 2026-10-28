@@ -1,16 +1,16 @@
 # Hermes Paseo：下載、安裝、部署與測試
 
-適用於 v0.1.4-rc.5 公開候選版。本教學將插件部署到已有的 Hermes Agent / Dashboard；Hermes 核心與可用的模型端點須先準備好。實測範圍與待驗項目見 [驗收紀錄](validation.md)。
+適用於 v0.1.4-rc.6 公開候選版。本教學將插件部署到已有的 Hermes Agent / Dashboard；Hermes 核心與可用的模型端點須先準備好。實測範圍與待驗項目見 [驗收紀錄](validation.md)。
 
 ## 下載網址
 
 - 原始碼：https://github.com/WOOWTECH/hermes-paseo-plugin
 - Gitea 原始碼鏡像：https://git-prod.woowtech.io/mirror/hermes-paseo-plugin
-- v0.1.4-rc.5：https://github.com/WOOWTECH/hermes-paseo-plugin/releases/tag/v0.1.4-rc.5
-- 固定版本 ZIP：https://github.com/WOOWTECH/hermes-paseo-plugin/archive/refs/tags/v0.1.4-rc.5.zip
+- v0.1.4-rc.6：https://github.com/WOOWTECH/hermes-paseo-plugin/releases/tag/v0.1.4-rc.6
+- 固定版本 ZIP：https://github.com/WOOWTECH/hermes-paseo-plugin/archive/refs/tags/v0.1.4-rc.6.zip
 - Paseo 官方介面：https://app.paseo.sh
 
-公開下載不需要 GitHub token。Web / CLI 從 GitHub 安裝會取得目前 main；ZIP 固定為 v0.1.4-rc.5。候選版不代表已完成所有正式部署環境的驗收。
+公開下載不需要 GitHub token。Web / CLI 從 GitHub 安裝會取得目前 main；ZIP 固定為 v0.1.4-rc.6。候選版不代表已完成所有正式部署環境的驗收。
 
 ## 1. 確認環境
 
@@ -82,7 +82,7 @@ hermes plugins enable hermes-paseo
 
 若要使用固定版本 ZIP：
 
-1. 下載上述 v0.1.4-rc.5 ZIP 並解壓。
+1. 下載上述 v0.1.4-rc.6 ZIP 並解壓。
 2. 將包含 `plugin.yaml`、`__init__.py`、`dashboard/`、`runtime/` 的那一層資料夾命名為 `hermes-paseo`。
 3. 放入同一 Hermes profile 的 `plugins/` 目錄：預設為 `~/.hermes/plugins/hermes-paseo/`；自訂 `HERMES_HOME` 時為 `$HERMES_HOME/plugins/hermes-paseo/`。檔案須由 Hermes 服務帳戶擁有。
 4. 確認 `plugin.yaml` 直接位於該目錄，然後執行 `hermes plugins enable hermes-paseo`。
