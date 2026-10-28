@@ -8,6 +8,8 @@
 - 驗證涵蓋出站連線、官方 relay 轉送與加密握手；不代替瀏覽器配對、模型對話或手機網路的實測。
 - 結果是單次時間點，請看 `relayVerifiedAt`；relay 之後中斷不會自動把欄位改回 `false`，需要再執行一次。
 - 2026-10-27 在 PaaS 兩台 Hermes（rc.5，以官方 CLI 用 pairing URL 做同一種連線）實測：兩台都在約 7 秒內經 relay 讀回 daemon 的 agent 清單。
+- 2026-10-28 rc.6 經 PaaS 自動更新器（Hermes chart 0.4.3）從真實 GitHub pre-release 完成第一次自動安裝：先在專用測試服務，通過後才在使用中的服務；兩台各 12 項檢查全數通過。更新 Job 約 52–55 秒完成（`reload` → `verified`）；外掛為發佈的 commit `39775c4`，Plugin Doctor 正常、註冊的工具／掛鉤數與 rc.5 相同（6／1）；更新帳本記錄上一版 rc.5，沒有待處理或失敗項目；Pod 沒有重啟，Paseo daemon 以新程式碼重啟、Dashboard 重載後恢復；rc.6 自己的 relay 檢查約 6 秒經 `relay.paseo.sh` 通過（兩台 `relayVerified` 皆為 `true`）；第二次執行更新器回報 `unchanged`。
+- 同一次實測的限制：更新並重載 Dashboard 後約一分半鐘內沒有觀察到自動的 relay 檢查（原本為 `false` 的使用中服務維持 `false`，直到手動執行 `control.mjs relay`）。自動檢查掛在使用者開啟 Paseo 頁面所觸發的啟動流程上，Pod 重啟或自動更新不會觸發。
 
 ## 0.1.4-rc.5：Hermes 模型選擇防護
 
