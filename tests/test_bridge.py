@@ -166,7 +166,7 @@ class BridgeTests(unittest.TestCase):
         seen = []
         def invoke(*_):
             seen.append(scope.get())
-            return {'enabled': True, 'phase': 'running', 'daemon': {'reachable': True}}
+            return {'enabled': True, 'phase': 'running', 'daemon': {'reachable': True, 'relayVerified': True, 'relayVerifiedAt': '2999-01-01T00:00:00+00:00'}}
         with patch.object(self.bridge, '_invoke', side_effect=invoke):
             scope.set('profile-a')
             self.bridge.start()
@@ -333,6 +333,21 @@ class RouteTests(unittest.TestCase):
                 response = self.client.post(self.prefix + '/pair', json={}, headers=headers)
                 self.assertEqual(response.status_code, 403)
                 self.privacy(response)
+
+    def test_relay_route_is_origin_protected_and_returns_status_only(self):
+        with patch.object(self.runtime, 'call', side_effect=AssertionError('untrusted invocation')):
+            response = self.client.post(self.prefix + '/relay', json={}, headers={'Origin': 'https://evil.test'})
+        self.assertEqual(response.status_code, 403)
+        self.privacy(response)
+        with patch.object(self.runtime, '_invoke', return_value={'daemon': {'relayVerified': True, 'relayVerifiedAt': 'now'}}) as invoke:
+            response = self.client.post(self.prefix + '/relay', json={}, headers=self.origin)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()['daemon']['relayVerified'])
+        invoke.assert_called_once_with('relay', {})
+        with patch.object(self.runtime, '_invoke', side_effect=b.BridgeError('RELAY_UNVERIFIED')):
+            response = self.client.post(self.prefix + '/relay', json={}, headers=self.origin)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {'ok': False, 'code': 'RELAY_UNVERIFIED'})
 
     def test_get_security_applies_to_status_and_models(self):
         with patch.object(self.runtime, '_invoke', side_effect=AssertionError('untrusted invocation')):

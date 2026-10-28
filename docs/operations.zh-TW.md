@@ -31,6 +31,16 @@ Paseo 插件資料位於 `$HERMES_HOME/plugin-data/hermes-paseo`。可重建的 
 
 這是可控的跨節點重新排程；沒有關閉共享節點、強制卸載磁碟或模擬網路分割，不能推論為所有節點故障情境已通過。
 
+## 驗證官方 relay 迴路
+
+Dashboard 啟動流程在 daemon 就緒後會自動做一次（從未驗證或上次成功已超過 24 小時才做，失敗不影響配對與對話）；也可以隨時手動重做，不需要瀏覽器，也不會呼叫模型：
+
+```bash
+node "$HERMES_HOME/plugins/hermes-paseo/bin/control.mjs" relay <<< '{}'
+```
+
+回傳的 `daemon.relayVerified` 與 `relayVerifiedAt` 就是結果；失敗時輸出 `{"ok":false,"code":"RELAY_UNVERIFIED"}` 並以非零結束。常見原因是 Pod 不能出站連到 `relay.paseo.sh:443`、daemon 的 relay 被設定關閉，或 Paseo 官方 relay 暫時不可用。這個檢查只證明 relay 到本 daemon 的路徑；要確認使用者端能用，仍須從官方 Paseo 頁面實際配對一次。
+
 ## 發版前的判定
 
 驗收必須分別記錄：模型回覆、記憶續聊、測試資料歸檔、服務健康與部署設定保留。收到 HTTP 202、Pod Ready、模型出現在選單或能開啟頁面，都不是對話成功證據。短時間並行與狀態請求樣本也不構成容量上限、長期穩定性或 SLA 承諾。

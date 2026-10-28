@@ -1,10 +1,10 @@
 import * as runtime from './runtime.mjs';
 import {RuntimeError} from './state.mjs';
 const providers=new Set(['hermes','claude','codex','pi']);
-const actions=new Set(['status','start','stop','models','pair','acceptance','chat','continue']);
+const actions=new Set(['status','start','stop','models','pair','relay','acceptance','chat','continue']);
 export function validateInput(action,input) {
  if(!actions.has(action)||!input||typeof input!=='object'||Array.isArray(input))throw new RuntimeError('INVALID_REQUEST');
- const fields={status:[],start:[],stop:[],models:['provider'],pair:[],acceptance:['providers'],chat:['provider','model','mode','thinking','message'],continue:['agentId','message']}[action];
+ const fields={status:[],start:[],stop:[],models:['provider'],pair:[],relay:[],acceptance:['providers'],chat:['provider','model','mode','thinking','message'],continue:['agentId','message']}[action];
  if(Object.keys(input).some(k=>!fields.includes(k)))throw new RuntimeError('INVALID_REQUEST');
  if(input.provider!==undefined&&!providers.has(input.provider))throw new RuntimeError('INVALID_PROVIDER');
  if(action==='models'&&!providers.has(input.provider))throw new RuntimeError('INVALID_PROVIDER');
@@ -25,6 +25,7 @@ export async function control(action,input={}) {
  if(action==='stop'){await runtime.deactivate();return publicStatus(await runtime.status());}
  if(action==='models')return runtime.listModels(input.provider);
  if(action==='pair')return runtime.pair();
+ if(action==='relay'){await runtime.verifyRelay();return publicStatus(await runtime.status());}
  if(action==='acceptance')return runtime.acceptance(input);
  if(action==='chat')return runtime.createChat({...input,cwd:runtime.locations().agentDir,title:'Hermes Paseo conversation'});
  if(action==='continue')return runtime.continueChat(input);
