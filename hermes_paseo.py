@@ -38,6 +38,18 @@ ROOT = Path(__file__).resolve().parent
 MAX_INPUT = 16 * 1024
 MAX_OUTPUT = 256 * 1024  # combined stdout/stderr, before decoding
 PROVIDERS = frozenset({'hermes', 'claude', 'codex', 'pi'})
+# Credentials the HOST uses to authenticate ITS OWN callers, which the Paseo runtime must never
+# receive. The runtime is reachable from outside the tenant through the hosted relay, and a
+# process can always read its own environment, so forwarding these lets a paired device recover
+# the dashboard / auth-proxy / web-shell password and the key that signs dashboard sessions.
+# Provider credentials (model API keys) are deliberately NOT here: the agents need them to answer.
+# Mirrored in src/runtime.mjs inheritedEnv() so the daemon stays protected even when control.mjs
+# is run directly rather than through this bridge.
+HOST_CREDENTIALS = (
+    'HERMES_DASHBOARD_BASIC_AUTH_PASSWORD',
+    'HERMES_DASHBOARD_BASIC_AUTH_SECRET',
+    'API_SERVER_KEY',
+)
 TIMEOUTS = {'status': 20, 'start': 480, 'stop': 60, 'models': 165,
             'pair': 40, 'relay': 75, 'acceptance': 480, 'chat': 240, 'continue': 240}
 FIELDS = {'status': (), 'start': (), 'stop': (), 'models': ('provider',),
@@ -375,6 +387,8 @@ class Bridge:
 
     def environment(self):
         env = os.environ.copy()  # preserve active credentials without opening their files
+        for name in HOST_CREDENTIALS:
+            env.pop(name, None)
         env['HERMES_HOME'] = str(self.home)
         env['HERMES_PASEO_STATE_DIR'] = str(self.state_dir)
         # Runtime must also be isolated even if the parent carries another profile's override.

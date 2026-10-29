@@ -87,6 +87,20 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(env['HERMES_PASEO_HERMES_COMMAND'], str(Path(sys.executable).resolve()))
         self.assertEqual(env['EXAMPLE_ACTIVE_AUTH'], 'test-only')
 
+    def test_host_credentials_are_not_handed_to_the_runtime(self):
+        """The runtime is reachable through the hosted relay and can read its own environment, so
+        the credentials the host uses to authenticate its own callers must not reach it. Provider
+        credentials must still pass: the agents need them to answer."""
+        host = {name: 'host-secret' for name in b.HOST_CREDENTIALS}
+        with patch.dict(os.environ, {**host, 'OPENROUTER_API_KEY': 'provider-only',
+                                     'HERMES_DASHBOARD_BASIC_AUTH_USERNAME': 'admin'}, clear=False):
+            env = self.bridge.environment()
+        for name in b.HOST_CREDENTIALS:
+            self.assertNotIn(name, env, name)
+        self.assertNotIn('host-secret', ''.join(str(value) for value in env.values()))
+        self.assertEqual(env['OPENROUTER_API_KEY'], 'provider-only')
+        self.assertEqual(env['HERMES_DASHBOARD_BASIC_AUTH_USERNAME'], 'admin')
+
     def test_context_home_selects_independent_bridge(self):
         home_var = contextvars.ContextVar('home')
         resolver = type(sys)('hermes_constants')
