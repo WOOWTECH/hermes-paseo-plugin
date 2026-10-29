@@ -22,11 +22,18 @@ const safeCode = error => /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code || '') ? err
 function packageRoot(pkg = 'cli') { return path.join(runtimeDirectory(locations()), 'node_modules/@getpaseo', pkg); }
 function cliPath() { return path.join(packageRoot(), 'bin/paseo'); }
 function runtimeVersion() { try { return JSON.parse(fs.readFileSync(path.join(packageRoot(), 'package.json'), 'utf8')).version; } catch { return null; } }
-function inheritedEnv() {
+export function inheritedEnv() {
   const loc = locations(); const env = { ...process.env, HOME: loc.home, HERMES_HOME: loc.agentDir, PASEO_HOME: loc.paseoHome, NO_COLOR: '1' };
   delete env.PASEO_HOST; delete env.PASEO_AGENT_ID; delete env.PASEO_WORKSPACE_ID; delete env.PASEO_PASSWORD;
   // Web login protects the host UI; provider children do not need this credential.
   delete env.PI_WEB_PASSWORD;
+  // The same rule for the Hermes host: these authenticate ITS callers — the dashboard login, the
+  // auth-proxy in front of it and the web shell share one password, and the secret signs dashboard
+  // sessions. The relay makes this runtime reachable from outside the tenant, so it must not carry
+  // them. Kept in step with hermes_paseo.py HOST_CREDENTIALS. Provider keys stay: agents need them.
+  delete env.HERMES_DASHBOARD_BASIC_AUTH_PASSWORD;
+  delete env.HERMES_DASHBOARD_BASIC_AUTH_SECRET;
+  delete env.API_SERVER_KEY;
   env.HERMES_PASEO_RUNTIME_REVISION=RUNTIME_REVISION;
   return env;
 }

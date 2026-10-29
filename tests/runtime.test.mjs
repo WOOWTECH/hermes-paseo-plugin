@@ -6,7 +6,7 @@ import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { locations, readState, updateState, withRuntimeLock, processIdentity } from '../src/state.mjs';
 import { runProcess } from '../src/process.mjs';
-import { activate, deactivate, status, listModels } from '../src/runtime.mjs';
+import { activate, deactivate, status, listModels, inheritedEnv } from '../src/runtime.mjs';
 import { demonstrablyReusedPid, linuxProcessBirth, linuxContainerIdentity, instanceFromPreviousContainer } from '../src/daemon-identity.mjs';
 
 function fixture() {
@@ -16,6 +16,23 @@ function fixture() {
   process.env.HERMES_PASEO_STATE_DIR = path.join(dir,'state'); process.env.HERMES_PASEO_RUNTIME_DIR = path.join(dir,'runtime'); delete process.env.HERMES_PASEO_PORT;
   return { dir, close() { for (const [key,value] of Object.entries(saved)) value === undefined ? delete process.env[key] : process.env[key] = value; fs.rmSync(dir,{recursive:true,force:true}); } };
 }
+
+test('the daemon environment carries provider keys but never the host own credentials', () => {
+  const f = fixture(); try {
+    const host = ['HERMES_DASHBOARD_BASIC_AUTH_PASSWORD','HERMES_DASHBOARD_BASIC_AUTH_SECRET','API_SERVER_KEY'];
+    for (const key of host) process.env[key] = 'host-secret';
+    process.env.OPENROUTER_API_KEY = 'provider-only';
+    try {
+      const env = inheritedEnv();
+      for (const key of host) assert.equal(key in env, false, key);
+      assert.equal(Object.values(env).includes('host-secret'), false);
+      assert.equal(env.OPENROUTER_API_KEY, 'provider-only');
+      assert.equal(env.PI_WEB_PASSWORD, undefined);
+    } finally {
+      for (const key of [...host,'OPENROUTER_API_KEY']) delete process.env[key];
+    }
+  } finally { f.close(); }
+});
 
 test('state merges preserve host onboarding fields and files remain private', () => {
   const f = fixture(); try {
