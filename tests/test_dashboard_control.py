@@ -161,5 +161,128 @@ class LifecycleMiddlewareTests(unittest.TestCase):
             self.assertEqual(self.order, [])
 
 
+class UnusablePublicUrlTests(unittest.TestCase):
+    """Turning the plugin off must not need the public URL the plugin itself needs.
+
+    This middleware is installed by the adapter and survives the plugin, so an unset
+    or malformed HERMES_DASHBOARD_PUBLIC_URL used to leave the host unable to disable
+    or remove the plugin at all: allowed_origins() returned an empty set, every Origin
+    header then failed the comparison, and both routes answered 403 without ever
+    calling stop_for_disable.
+    """
+
+    def build(self, public_url):
+        self.order = []
+        self.life = SimpleNamespace(error=None)
+        async def run():
+            await asyncio.Event().wait()
+        self.life.run = run
+        self.life.stop_for_disable = lambda record: self.order.append('stopped')
+        self.life.mark_disabled = lambda: self.order.append('recorded')
+        app = FastAPI()
+        @app.middleware('http')
+        async def native_auth_gate(request, call_next):
+            if request.headers.get('x-test-session') == 'valid':
+                request.state.session = 'verified-by-native-gate'
+            return await call_next(request)
+        @app.post('/api/dashboard/agent-plugins/hermes-paseo/disable')
+        def disable():
+            self.order.append('disabled')
+            return {'ok': True}
+        @app.delete('/api/dashboard/agent-plugins/hermes-paseo')
+        def remove():
+            self.order.append('removed')
+            return {'ok': True}
+        def auth(request):
+            if getattr(request.state, 'session', None) != 'verified-by-native-gate':
+                raise HTTPException(401)
+        server = SimpleNamespace(app=app, _require_token=auth)
+        module.install(server, enabled=lambda: True, public_origin=lambda: public_url,
+                       control=module.Control(lambda: os.getpid(), Mock(), 0), lifecycle=self.life)
+        return TestClient(app)
+
+    HEADERS = {'x-test-session': 'valid', 'origin': 'https://hermes.test',
+               'sec-fetch-site': 'same-origin'}
+
+    def test_disable_and_remove_survive_an_unusable_public_url(self):
+        for public_url in ('', 'not an origin', 'https://hermes.test/dashboard'):
+            with self.subTest(public_url=public_url):
+                client = self.build(public_url)
+                with client:
+                    self.assertEqual(client.post('/api/dashboard/agent-plugins/hermes-paseo/disable',
+                                                 headers=self.HEADERS).status_code, 200)
+                    self.assertEqual(self.order, ['stopped', 'disabled', 'recorded'])
+                    self.order.clear()
+                    self.assertEqual(client.delete('/api/dashboard/agent-plugins/hermes-paseo',
+                                                   headers=self.HEADERS).status_code, 200)
+                    self.assertEqual(self.order, ['stopped', 'removed', 'recorded'])
+
+    def test_an_unusable_public_url_does_not_open_the_route_to_anyone_else(self):
+        client = self.build('')
+        with client:
+            for headers in ({'origin': 'https://hermes.test', 'sec-fetch-site': 'same-origin'},
+                            {**self.HEADERS, 'sec-fetch-site': 'cross-site'},
+                            {**self.HEADERS, 'sec-fetch-mode': 'no-cors'},
+                            {'x-test-session': 'valid'}):
+                with self.subTest(headers=sorted(headers)):
+                    r = client.delete('/api/dashboard/agent-plugins/hermes-paseo', headers=headers)
+                    self.assertIn(r.status_code, (401, 403))
+            self.assertEqual(self.order, [])
+
+    def test_a_malformed_ingress_origin_still_closes_both_routes(self):
+        # Unlike an absent public URL, this value is set deliberately: a broken one is
+        # a signal, so require_origin_config=False must not relax it.
+        os.environ['HERMES_PASEO_INGRESS_ORIGIN'] = 'ftp://ha.example'
+        self.addCleanup(os.environ.pop, 'HERMES_PASEO_INGRESS_ORIGIN', None)
+        client = self.build('https://hermes.test')
+        with client:
+            for method, path in (('POST', '/api/dashboard/agent-plugins/hermes-paseo/disable'),
+                                 ('DELETE', '/api/dashboard/agent-plugins/hermes-paseo')):
+                with self.subTest(route=(method, path)):
+                    r = client.request(method, path, headers=self.HEADERS)
+                    self.assertEqual((r.status_code, r.json()['detail']),
+                                     (503, 'INVALID_DASHBOARD_ORIGIN'))
+            self.assertEqual(self.order, [])
+
+
+class UnusablePublicUrlRouterTests(unittest.TestCase):
+    """The control routes name the host's own misconfiguration instead of blaming the
+    caller's origin, and no longer let a request without an Origin header through
+    unchecked just because nothing could be compared."""
+
+    def build(self, public_url):
+        def require_auth(request):
+            if request.headers.get('x-test-session') != 'valid':
+                raise HTTPException(401)
+        app = FastAPI()
+        app.include_router(module.make_router(
+            require_auth, lambda: public_url, lambda: True,
+            module.Control(lambda: os.getpid(), Mock(), 0)))
+        return TestClient(app)
+
+    def test_unusable_public_url_is_reported_not_blamed_on_the_caller(self):
+        for public_url in ('', 'not an origin', 'https://hermes.test/dashboard'):
+            client = self.build(public_url)
+            for headers in ({'x-test-session': 'valid', 'origin': 'https://hermes.test',
+                             'sec-fetch-site': 'same-origin'},
+                            {'x-test-session': 'valid'}):       # no Origin: used to pass
+                with self.subTest(public_url=public_url, headers=sorted(headers)):
+                    r = client.get(module.PREFIX + '/capabilities', headers=headers)
+                    self.assertEqual((r.status_code, r.json()['detail']),
+                                     (503, 'INVALID_DASHBOARD_ORIGIN'))
+                    r = client.post(module.PREFIX + '/reload', headers=headers,
+                                    json={'confirm': True})
+                    self.assertEqual((r.status_code, r.json()['detail']),
+                                     (503, 'INVALID_DASHBOARD_ORIGIN'))
+
+    def test_a_usable_public_url_is_unaffected(self):
+        client = self.build('https://hermes.test')
+        headers = {'x-test-session': 'valid', 'origin': 'https://hermes.test',
+                   'sec-fetch-site': 'same-origin'}
+        r = client.get(module.PREFIX + '/capabilities', headers=headers)
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()['supported'])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -275,7 +275,17 @@ class IngressRouteTests(unittest.TestCase):
         origin_file.chmod(0o666)
         for headers in ({**self.headers, 'origin': INGRESS}, {'sec-fetch-site': 'same-origin', 'x-test-session': 'valid'}):
             self.assertEqual(self.client.post(self.plugin_prefix + '/pair', headers=headers, json={}).status_code, 503)
-        self.assertEqual(host.allowed_origins(''), set())
+        # An unusable public URL now says so instead of returning an empty set that
+        # read as ORIGIN_DENIED to a browser and as "nothing to compare" to anything
+        # without an Origin header. The invariant this test exists for is unchanged:
+        # the ingress origin never substitutes for the primary.
+        for primary in ('', 'not an origin', PRIMARY + '/dashboard'):
+            with self.subTest(primary=primary):
+                with self.assertRaises(HTTPException) as caught:
+                    host.allowed_origins(primary)
+                self.assertEqual((caught.exception.status_code, caught.exception.detail),
+                                 (503, 'INVALID_DASHBOARD_ORIGIN'))
+                self.assertEqual(host.allowed_origins(primary, required=False), set())
         self.assertEqual(host.allowed_origins(PRIMARY + '/'), {host.origin(PRIMARY), host.origin(INGRESS)})
         self.assert_no_actions()
 
