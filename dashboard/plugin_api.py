@@ -31,6 +31,14 @@ if name not in sys.modules:
         sys.modules.pop(name, None)
         raise
 bridge = sys.modules[name]
+
+# Re-anchor the stored Origin to the operator environment at import, which runs before the
+# host adapter's install() reads the same file. Wrapped so a failure can never stop the
+# plugin API from mounting; the code is reported on /status for the operator to see.
+try:
+    ORIGIN_ADOPTION = bridge.get_bridge().adopt_environment_origin()
+except BaseException:
+    ORIGIN_ADOPTION = 'ORIGIN_ADOPTION_FAILED'
 HEADERS = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
            'X-Content-Type-Options': 'nosniff'}
 
@@ -145,7 +153,11 @@ router = APIRouter(route_class=ProtectedRoute)
 
 @router.get('/status')
 async def status():
-    return await asyncio.to_thread(bridge.get_bridge().status)
+    result = await asyncio.to_thread(bridge.get_bridge().status)
+    # Say what happened to the stored Origin at load. Without it, a bad or missing public URL
+    # is silent: the adapter simply refuses every request and nothing names the cause.
+    result['originAdoption'] = ORIGIN_ADOPTION
+    return result
 
 
 @router.post('/start')

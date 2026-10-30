@@ -237,7 +237,11 @@ async function readStatus() {
       }
     } catch (error) { diagnosticCode = safeCode(error); }
   }
-  const phase = state.phase === 'running' && !daemon.running ? 'stopped' : state.phase || 'not_installed';
+  // A start interrupted by a Dashboard restart is as stuck as 'running' with no daemon:
+  // the persisted phase stays 'installing'/'starting' forever, and the host adapter's
+  // unattended recovery accepts only 'not_installed' / 'stopped'.
+  const stalled = ['running', 'installing', 'starting'].includes(state.phase);
+  const phase = stalled && !daemon.running ? 'stopped' : state.phase || 'not_installed';
   return { installed, version: installed ? PASEO_VERSION : null, enabled: state.desiredEnabled === true, phase, daemon, providers, chatVerified: state.acceptance?.passed === true, pairingAvailable: fs.existsSync(path.join(locations().stateDir, 'pairing.private.json')), diagnosticCode, state };
 }
 export async function diagnose() {
