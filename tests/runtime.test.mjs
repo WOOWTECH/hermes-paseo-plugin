@@ -34,6 +34,25 @@ test('the daemon environment carries provider keys but never the host own creden
   } finally { f.close(); }
 });
 
+test('a start interrupted mid-flight is reported as recoverable, not stuck', async () => {
+  const f = fixture(); try {
+    // The host adapter's unattended recovery accepts only not_installed / stopped. A Dashboard
+    // restart during install left the PERSISTED phase on 'installing'/'starting' with no daemon,
+    // which is just as stuck as 'running' with no daemon but was not reported as recoverable.
+    for (const stuck of ['installing', 'starting', 'running']) {
+      updateState({ phase: stuck, desiredEnabled: true });
+      const result = await status();
+      assert.equal(result.daemon.running, false, stuck);
+      assert.equal(result.phase, 'stopped', stuck + ' with no daemon must read as stopped');
+    }
+    // A phase the host must not touch stays as it is.
+    for (const keep of ['error', 'restart_required', 'disabled']) {
+      updateState({ phase: keep });
+      assert.equal((await status()).phase, keep, keep);
+    }
+  } finally { f.close(); }
+});
+
 test('state merges preserve host onboarding fields and files remain private', () => {
   const f = fixture(); try {
     updateState({ onboardingSessionId:'existing', desiredEnabled:true }); updateState({ phase:'running', port:6770 });

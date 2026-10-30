@@ -38,6 +38,12 @@ ROOT = Path(__file__).resolve().parent
 MAX_INPUT = 16 * 1024
 MAX_OUTPUT = 256 * 1024  # combined stdout/stderr, before decoding
 PROVIDERS = frozenset({'hermes', 'claude', 'codex', 'pi'})
+# A failed start used to latch phase='error' for the life of the Dashboard process, and the
+# host adapter's unattended recovery arms only on 'not_installed' / 'stopped'. These let the
+# bridge offer itself for one more start after a bounded, growing delay. No new thread: the
+# adapter's own reconcile loop is the clock.
+RETRY_BACKOFF = (30, 60, 120, 300, 600, 900)  # seconds; the last value repeats
+RETRY_LIMIT = 8
 # Credentials the HOST uses to authenticate ITS OWN callers, which the Paseo runtime must never
 # receive. The runtime is reachable from outside the tenant through the hosted relay, and a
 # process can always read its own environment, so forwarding these lets a paired device recover
@@ -176,8 +182,22 @@ def _read_json(path, private=False):
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_INPUT:
             raise BridgeError('STATE_CORRUPT')
-        if private and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
-            raise BridgeError('STATE_UNAVAILABLE')
+        if private:
+            # Kubelet reapplies fsGroup to the PVC on every Pod restart, which adds group
+            # read/write to files it already wrote. Rejecting that made a restart answer
+            # STATE_UNAVAILABLE on every plugin route, because this is the predicate behind
+            # dashboard_origin(). Accept our own primary group inside the owner-only state
+            # directory; never accept access for other users. Same predicate the chart
+            # updater already ships and tests (files/paseo-auto-update.py load_state).
+            if (info.st_uid != os.geteuid()
+                    or info.st_mode & 0o007
+                    or (info.st_mode & 0o070 and info.st_gid != os.getegid())):
+                raise BridgeError('STATE_UNAVAILABLE')
+            if info.st_mode & 0o077:
+                try:
+                    os.fchmod(fd, 0o600)  # do not leave it group-readable for the next reader
+                except OSError:
+                    pass  # best effort: a read must not fail because the retighten did
         data = os.read(fd, MAX_INPUT + 1)
         value = json.loads(data)
         if not isinstance(value, dict):
@@ -356,6 +376,8 @@ class Bridge:
         self._pause_requested = False
         self._phase = None
         self._error = None
+        self._retry_at = None
+        self._retry_count = 0
         self._operation_lock = threading.Lock()
 
     def dashboard_origin(self):
@@ -373,6 +395,33 @@ class Bridge:
         value = validate_dashboard_origin(value)
         with _state_lock(self.state_dir):
             _write_json(self.state_dir / 'dashboard-origin.json', {'origin': value})
+
+    def adopt_environment_origin(self):
+        """Re-point the stored Origin when the operator environment moved. Never raises.
+
+        The independently installed host adapter writes dashboard-origin.json once and
+        thereafter only COMPARES it, so an operator changing the Dashboard's public URL
+        (on Home Assistant it is derived from a DHCP address) leaves the adapter raising
+        ORIGIN_MISMATCH forever, with no way back from the UI. The environment variable is
+        the same authority the adapter itself trusts: a request cannot set it.
+
+        Returns a short code naming what happened, for the Dashboard to show.
+        """
+        value = os.environ.get('HERMES_DASHBOARD_PUBLIC_URL', '')
+        try:
+            canonical = validate_dashboard_origin(value.rstrip('/'))
+        except BridgeError:
+            return 'PUBLIC_URL_NOT_AN_ORIGIN' if value else 'PUBLIC_URL_MISSING'
+        try:
+            if self.dashboard_origin() == canonical:
+                return 'ORIGIN_CURRENT'
+        except BridgeError:
+            pass  # unreadable or corrupt: fall through and re-anchor it
+        try:
+            self.set_dashboard_origin(canonical)
+        except BridgeError as error:
+            return error.code
+        return 'ORIGIN_ADOPTED'
 
     def dashboard_origins(self, fallback):
         """At most two operator origins; never persist Ingress over the primary."""
@@ -574,6 +623,14 @@ class Bridge:
                 result['phase'] = self._phase
                 if self._phase == 'installing':
                     result['enabled'] = True
+                # Offer a failed start back to the host adapter once our backoff has elapsed:
+                # its recovery predicate accepts only 'not_installed' / 'stopped', so a latched
+                # 'error' disarms unattended recovery for the life of the process.
+                # diagnosticCode below still carries the real failure code.
+                if (self._phase == 'error' and self._retry_at is not None
+                        and time.monotonic() >= self._retry_at
+                        and not (self._worker is not None and self._worker.is_alive())):
+                    result['phase'] = 'stopped'
             if self._pause_requested or (_read_json(self.state_dir / 'onboarding.json') or {}).get('paused'):
                 result['enabled'] = False
             if self._error:
@@ -627,6 +684,7 @@ class Bridge:
                 with self._condition:
                     self._phase = 'stopping' if self._pause_requested else None
                     self._error = result.get('diagnosticCode')
+                    self._retry_count, self._retry_at = 0, None
                     if not self._pause_requested:
                         self._cache = copy.deepcopy(result)
                         self._cached_at = time.monotonic()
@@ -636,6 +694,12 @@ class Bridge:
             with self._condition:
                 self._phase = 'error'
                 self._error = error.code if isinstance(error, BridgeError) else 'START_FAILED'
+                self._retry_count += 1
+                if self._retry_count <= RETRY_LIMIT:
+                    delay = RETRY_BACKOFF[min(self._retry_count - 1, len(RETRY_BACKOFF) - 1)]
+                    self._retry_at = time.monotonic() + delay
+                else:
+                    self._retry_at = None  # give up rather than restart the daemon forever
         finally:
             self.invalidate()
         if verify:

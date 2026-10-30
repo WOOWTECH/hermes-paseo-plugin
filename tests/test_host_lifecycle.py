@@ -30,6 +30,41 @@ class ProfileOriginTests(unittest.TestCase):
         self.assertEqual(self.file.parent.stat().st_mode & 0o777, 0o700)
         self.assertEqual(json.loads(self.file.read_text()), {'origin': 'https://hermes.test'})
 
+    def test_a_moved_public_url_no_longer_wedges_the_adapter_forever(self):
+        """End-to-end proof for the real failure, using the adapter's own code.
+
+        The adapter writes this file once and thereafter only compares it, so an operator
+        changing the Dashboard's public URL (on Home Assistant it is derived from a DHCP
+        address) left prepare_profile_origin raising ORIGIN_MISMATCH on every reconcile, with
+        no way back from the UI. The plugin bridge now re-anchors it from the same
+        environment variable the adapter itself treats as authoritative.
+        """
+        import importlib.util as _util
+        import os as _os
+        from unittest.mock import patch as _patch
+        spec = _util.spec_from_file_location('paseo_bridge_d1', ROOT / 'hermes_paseo.py')
+        bridge_module = _util.module_from_spec(spec)
+        spec.loader.exec_module(bridge_module)
+
+        old, new = 'https://old.hermes.test', 'https://new.hermes.test'
+        module.prepare_profile_origin(self.home, old)
+        self.assertEqual(json.loads(self.file.read_text())['origin'], old)
+
+        # The defect: the operator environment moved, and the adapter refuses for good.
+        with self.assertRaises(module.LifecycleError) as caught:
+            module.prepare_profile_origin(self.home, new)
+        self.assertEqual(str(caught.exception), 'ORIGIN_MISMATCH')
+
+        # The fix: the bridge adopts the new origin from the same authority.
+        bridge = bridge_module.Bridge(home=self.home)
+        with _patch.dict(_os.environ, {'HERMES_DASHBOARD_PUBLIC_URL': new}):
+            self.assertEqual(bridge.adopt_environment_origin(), 'ORIGIN_ADOPTED')
+
+        # The adapter now agrees, and the file is still owner-only.
+        module.prepare_profile_origin(self.home, new)
+        self.assertEqual(json.loads(self.file.read_text())['origin'], new)
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
+
     def test_fresh_origin_is_created_before_plugin_initialization(self):
         module.prepare_profile_origin(self.home, 'https://hermes.test')
         self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)

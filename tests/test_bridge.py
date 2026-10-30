@@ -101,6 +101,60 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(env['OPENROUTER_API_KEY'], 'provider-only')
         self.assertEqual(env['HERMES_DASHBOARD_BASIC_AUTH_USERNAME'], 'admin')
 
+    def test_fsgroup_group_bits_after_a_pod_restart_do_not_503_every_route(self):
+        """Kubelet reapplies fsGroup on every Pod restart, adding group read/write to the file
+        behind dashboard_origin(). Rejecting that answered STATE_UNAVAILABLE on every plugin
+        route; other users' access must still fail closed."""
+        self.bridge.set_dashboard_origin('https://hermes.test')
+        path = self.bridge.state_dir / 'dashboard-origin.json'
+        path.chmod(0o660)
+        self.assertEqual(self.bridge.dashboard_origin(), 'https://hermes.test')
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600, 'the read should retighten it')
+        path.chmod(0o604)
+        with self.assertRaises(b.BridgeError) as caught:
+            self.bridge.dashboard_origin()
+        self.assertEqual(caught.exception.code, 'STATE_UNAVAILABLE')
+
+    def test_origin_is_re_anchored_when_the_operator_environment_moved(self):
+        """The host adapter writes this file once and thereafter only compares it, so a changed
+        public URL (on HA it comes from a DHCP address) wedged ORIGIN_MISMATCH forever."""
+        self.bridge.set_dashboard_origin('https://old.hermes.test')
+        with patch.dict(os.environ, {'HERMES_DASHBOARD_PUBLIC_URL': 'https://new.hermes.test/'}):
+            self.assertEqual(self.bridge.adopt_environment_origin(), 'ORIGIN_ADOPTED')
+            self.assertEqual(self.bridge.dashboard_origin(), 'https://new.hermes.test')
+            self.assertEqual(self.bridge.adopt_environment_origin(), 'ORIGIN_CURRENT')
+
+    def test_origin_adoption_reports_a_bad_or_missing_public_url_instead_of_raising(self):
+        for value, expected in (('', 'PUBLIC_URL_MISSING'),
+                                ('https://hermes.test/with/path', 'PUBLIC_URL_NOT_AN_ORIGIN'),
+                                ('not-a-url', 'PUBLIC_URL_NOT_AN_ORIGIN')):
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {'HERMES_DASHBOARD_PUBLIC_URL': value}):
+                    self.assertEqual(self.bridge.adopt_environment_origin(), expected)
+
+    def test_a_failed_start_is_offered_back_for_recovery_after_the_backoff(self):
+        """The host adapter's unattended recovery arms only on not_installed / stopped, so a
+        latched phase='error' disarmed it for the life of the Dashboard process."""
+        with self.bridge._condition:
+            self.bridge._phase = 'error'
+            self.bridge._error = 'START_FAILED'
+            self.bridge._retry_count = 1
+            self.bridge._retry_at = time.monotonic() + 3600
+        held = self.bridge._decorate({})
+        self.assertEqual(held['phase'], 'error')
+        with self.bridge._condition:
+            self.bridge._retry_at = time.monotonic() - 1
+        due = self.bridge._decorate({})
+        self.assertEqual(due['phase'], 'stopped', 'the adapter can only recover from stopped')
+        self.assertEqual(due['diagnosticCode'], 'START_FAILED', 'the real cause must survive')
+
+    def test_retrying_is_bounded_so_a_broken_runtime_is_not_restarted_forever(self):
+        with self.bridge._condition:
+            self.bridge._phase = 'error'
+            self.bridge._retry_count = b.RETRY_LIMIT + 1
+            self.bridge._retry_at = None
+        self.assertEqual(self.bridge._decorate({})['phase'], 'error')
+
     def test_context_home_selects_independent_bridge(self):
         home_var = contextvars.ContextVar('home')
         resolver = type(sys)('hermes_constants')
