@@ -74,6 +74,8 @@ Woowtech Smart 與 Apporo Smart 的網頁 App 要求 daemon 的握手（`server_
 
 本版不改 `host/` 的轉接檔（`dashboard_control.py`、`profile_lifecycle.py`、`resource_limits.py`、`hermes` 與其餘），`plugin.yaml` 只改 `version` 行，`package.json` 沒有相依套件，`runtime/package.json` 與 `runtime/package-lock.json` 與 0.1.4-rc.9 位元組相同；`git diff 1101a5d HEAD --stat -- host runtime bin` 沒有輸出可以重現這一點。daemon 與 runtime 鎖定檔不變，所以更新器的相依套件檢查不會擋；這個 release 走一般流程：先在專用測試服務（canary），通過後再逐台更新整批服務，**沒有**需要凍結整批服務的 runtime 變更。Hermes 原生安全掃描以本機的 Hermes v0.22.5 plugin-guard 對 rc.9 比對，沒有新增項目（見[驗收紀錄](validation.md)）；這是比對方式的模擬，不是更新器本身的執行結果。
 
+**CI 的 `Locked dependency audit` 要另外看。** 更新器要求這項檢查在 release 的 commit 上為綠燈，而它不看檔案是否改動，只看稽核結果。2026-11-25 對這份鎖定檔（與 rc.9 位元組相同）執行 `npm audit --omit=dev --prefix runtime`，回報 2 項 moderate：`hono` 與 `@hono/node-server`（上游新公告；對 rc.9 的檔案樹執行得到相同結果）。本版依規定不改 `runtime/`，所以這項檢查的結果與 rc.9 相同、不由本版造成；它若為紅燈，更新器會拒絕這個 release，要處理須另行更新鎖定檔，那是 runtime 變更，會走另一條發版流程（需要凍結整批服務的流程），不在本版範圍。
+
 更新前後 daemon 的行為：更新（Git pull 與 Dashboard 重載）不會重啟仍在執行的 daemon，連線標的與品牌補丁在下一次停止再啟動才套用。若更新器因 Dashboard 或 daemon 不健康而自動裝回上一版，上一版（rc.9）接受已補丁的 runtime 與新版寫下的 `config.json`，見下節。
 
 ## 回滾到 0.1.4-rc.9

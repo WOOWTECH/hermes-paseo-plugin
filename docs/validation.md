@@ -1,5 +1,29 @@
 # Hermes Paseo 驗收紀錄
 
+## 0.1.5-rc.1：連線標的（Paseo、Woowtech Smart、Apporo Smart）
+
+本版讓 Dashboard 選擇 daemon 使用的 relay 與網頁 App，預設仍是 Paseo。**不更動 daemon（仍是 Paseo 0.11.2），也不更動 runtime 鎖定檔**：`runtime/`、`host/`、`bin/` 與 0.1.4-rc.9 位元組相同，`plugin.yaml` 只改 `version` 行（`git diff 1101a5d HEAD --stat` 可重現）。
+
+自動測試（2026-11-25，本機 Node 22.23.3、Python 3.12 與 3.11）：Node 162 項、Python 112 項全數通過；`node --check dashboard/dist/index.js` 通過。React／Chromium 瀏覽器測試（本機 Playwright 1.62.0 與 Chromium 1255，不是 CI 鎖定的 1.64.1）全部情境通過，新增「儲存標的後等待套用、停止再恢復、產生並開啟 Woowtech Smart 配對連結（opener 與 referrer 為空）」「未儲存的選擇在頁面輪詢後仍保留」「舊後端沒有標的欄位時維持僅 Paseo」；API 與官方網頁皆為本機模擬。三份標的表（Node、Python 橋接、Dashboard）有一致性測試，並以改動任一欄位證明測試會失敗。
+
+Hermes 原生安全掃描：以 Hermes v0.22.5 的 plugin-guard v11（含 `.mjs` 鏡像）模擬更新器的 `scan_signature` 比對（候選版減基準版）：rc.9 與本版都是 23 項，新增 0 項；`public_pair` 沿用 rc.9 被標記的那一行原文。這是比對方式的模擬，不是 PaaS 更新器本身的執行結果。
+
+**真實 daemon 煙霧測試**（隔離的 HOME／Hermes 目錄／TMPDIR，假的 `claude`／`codex`／`pi`／`hermes` 指令一律失敗，沒有模型流量；`npm ci` 與各 relay 主機為真實連線）共 155 項檢查全部通過，三個情境：
+
+1. **全新安裝**（69 項）。新程式碼首次啟動即在 daemon 出現前補丁 runtime（`npm ci` 一次）；每個標的（Paseo、Woowtech Smart、Apporo Smart，依序切換並切回）都確認：`config.json` 的 app、relay（endpoint、publicEndpoint、`useTls`、`publicUseTls` 明確為 true）與 CORS 正確、`webUi.enabled` 為 true；寫出的設定通過**該 runtime 真實的 0.11.2 嚴格設定檔檢查**，且把 `requireProtectedSecurity` 加進去會被它拒絕（所以不寫是對的）；執行中的 daemon 回報該標的的 relay；daemon 環境帶 `HERMES_PASEO_CONNECTION_TARGET`、沒有 `PASEO_` 的 relay／App 設定；以 0.11.2 的官方用戶端讀回的 `server_info` 握手帶有 `brand: {id, name}`（paseo／woowtech／apporo 各自正確）；配對連結是該標的的網頁 App、路徑 `/`，Python 橋接同樣只放行這一個；磁碟上沒有配對邀請；對各標的自己的 relay 做端到端 relay 檢查（DNS 解析紀錄只出現該標的的 relay 主機）通過；待套用期間 `pair` 與 `relay` 回報 `CONFIGURATION_PENDING`；server ID 與金鑰的雜湊在所有切換中不變。
+2. **從 rc.9 升級**（71 項）。rc.9 自己安裝並啟動 daemon（`npm ci` 一次、握手沒有品牌）後，新程式碼：讀到執行中的舊 daemon（running、reachable、視為 Paseo、沒有待套用），舊 daemon 照常配對；再按「啟動」時同一個 supervisor、沒有重啟、沒有 `npm ci`、安裝紀錄與 `websocket-server.js` 都沒動，也沒有替它寫入不能即時重載的 relay 設定；選 Woowtech Smart 後待套用、舊 daemon 的握手仍沒有品牌、`pair`／`relay` 被拒、再按「啟動」只回報 `restart_required`；rc.9 留下的 `pairing.private.json`（含邀請）在新版啟用時被刪除。停止 → 啟動後：**同一個 release 目錄就地補丁、`npm ci` 仍只有那一次**、設定套用、握手帶 `woowtech`、server ID 與金鑰不變、relay 檢查通過；Apporo Smart 與 Paseo 各再走一遍。
+3. **回滾**（15 項）。rc.9 套在已補丁的 runtime 上：判定就緒、不重新安裝、能啟動，握手品牌是預設的 `paseo`，配對 Paseo 正常；新程式碼套用 Apporo Smart 後 rc.9 能啟動但**拒絕該 Smart 配對連結**（`PAIRING_ORIGIN_INVALID`），與文件所述一致；切回 Paseo 後 rc.9 又能配對；server ID 與金鑰全程不變。
+
+結束時沒有任何程序或暫存目錄指向測試用的 HOME，暫存目錄已刪除。
+
+**沒有驗證的項目**
+
+- **沒有做真實 Hermes 0.22.5 的對話回歸**（`chat`／`continue` 經插件到真實 `hermes acp`）。那需要從 PyPI 安裝 Hermes，而這次的網路只准用於 npm 與各 relay 主機。補丁只在握手多加一個欄位，daemon 其餘檔案、ACP 供應者設定與對話程式碼都與 rc.9 相同，但這是推論，不是對話測試。
+- 沒有從真實瀏覽器用 Woowtech／Apporo Smart 的網頁 App 完成配對與對話；已驗證的是 daemon 握手帶品牌、配對連結的形狀，以及經各標的真實 relay 的端到端連線（官方 CLI 用戶端）。
+- 沒有執行 PaaS 更新器本身、HA add-on 映像或正式 Dashboard 的原生更新。
+- `npm audit --omit=dev --prefix runtime` 目前回報 2 項 moderate（`hono`、`@hono/node-server` 的上游新公告）；對 rc.9 的檔案樹得到相同結果，鎖定檔位元組相同。更新器要求 CI 的 `Locked dependency audit` 為綠燈，這項檢查的結果與本版無關，詳見[維運文件](operations.zh-TW.md#paas-自動更新器與本版)。
+- 只在 Linux 測試。
+
 ## 0.1.4-rc.6：官方 relay 迴路自我驗證
 
 `relayVerified` 在 rc.5 以前是保留欄位：程式只讀取、從不寫入，所以永遠是 `false`，與 relay 是否可用無關。rc.6 補上實際驗證：`control.mjs relay`（Dashboard API `POST /relay`；Dashboard 的啟動流程在 daemon 就緒後會自動檢查，從未驗證或上次成功已超過 24 小時才再做）用剛產生的配對邀請，從本機以官方 Paseo 用戶端經 `relay.paseo.sh` 連回同一個 daemon，完成端對端加密握手並讀取 daemon 狀態。成功寫入 `relayVerified: true` 與 `relayVerifiedAt`；失敗寫入 `false` 並回傳 `RELAY_UNVERIFIED`。
