@@ -230,7 +230,8 @@ export async function activate(options = {}) {
               reload.restartRequiredPaths.length || reload.overrideControlledPaths.some(p => p === 'agents.providers' || p.startsWith('agents.providers.')) ||
               (needsApply && !reload.appliedPaths.includes('agents.providers'))) throw new RuntimeError('RESTART_REQUIRED');
         } catch { throw new RuntimeError('RESTART_REQUIRED'); }
-        updateState({ phase: 'running', providerReloadPending: null, daemonPid: existing.pid, daemonStartedAt: existing.startedAt, daemonContainerIdentity: linuxContainerIdentity() });
+        // The daemon serves the saved target (checked above), so a pending flag left by a save that raced a start is stale.
+        updateState({ phase: 'running', providerReloadPending: null, daemonPid: existing.pid, daemonStartedAt: existing.startedAt, daemonContainerIdentity: linuxContainerIdentity(), configurationPending: false });
       } else {
         // The selected target is applied here and only here: its relay, app and CORS settings go into config.json,
         // its brand into the daemon's environment, and the runtime is patched while no daemon runs from it.

@@ -194,6 +194,18 @@ test('choosing the running target again before the restart leaves nothing pendin
   assert.deepEqual([after.activeTarget, after.configurationPending], ['paseo', false]);
 });
 
+test('a pending flag left behind by a save that raced a start does not outlive the next activation of a daemon that serves the saved target', async t => {
+  const p = profile(t);
+  await activate();
+  updateState({ configurationPending: true });
+  assert.equal((await status()).configurationPending, false, 'a running daemon decides by itself');
+  const result = await activate();
+  assert.equal(result.phase, 'running');
+  assert.equal(readState().configurationPending, false);
+  await deactivate();
+  assert.equal((await status()).configurationPending, false, 'so a later stop does not announce a change that is not there');
+});
+
 test('a daemon started before this version counts as Paseo, and pairs as Paseo until another target is saved', async t => {
   const p = profile(t);
   await activate(); await deactivate();

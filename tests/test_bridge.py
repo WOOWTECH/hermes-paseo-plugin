@@ -399,6 +399,9 @@ class BridgeTests(unittest.TestCase):
     def test_status_always_names_a_known_target_and_a_boolean_pending_flag(self):
         decorated = self.bridge._decorate({'selectedTarget': 'evil', 'activeTarget': 'other', 'configurationPending': 'yes'})
         self.assertEqual((decorated['selectedTarget'], decorated['activeTarget'], decorated['configurationPending']), ('paseo', None, False))
+        for hostile in (['paseo'], {'id': 'paseo'}, 7, None, 'yes'):
+            decorated = self.bridge._decorate({'selectedTarget': hostile, 'activeTarget': hostile, 'configurationPending': hostile})
+            self.assertEqual((decorated['selectedTarget'], decorated['activeTarget'], decorated['configurationPending']), ('paseo', None, False))
         decorated = self.bridge._decorate({'selectedTarget': 'apporo', 'activeTarget': 'paseo', 'configurationPending': True})
         self.assertEqual((decorated['selectedTarget'], decorated['activeTarget'], decorated['configurationPending']), ('apporo', 'paseo', True))
         self.assertEqual(set(b.redact({'selectedTarget': 'apporo', 'activeTarget': 'paseo', 'configurationPending': True, 'appUrl': 'x'})),

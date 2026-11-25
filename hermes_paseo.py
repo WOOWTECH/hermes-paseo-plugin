@@ -661,9 +661,10 @@ class Bridge:
         for key, default in {'running': False, 'reachable': False, 'relayEnabled': False,
                              'relayVerified': False, 'relayVerifiedAt': None}.items():
             result['daemon'].setdefault(key, default)
-        if result.get('selectedTarget') not in TARGET_ORIGINS:
+        known = lambda value: isinstance(value, str) and value in TARGET_ORIGINS
+        if not known(result.get('selectedTarget')):
             result['selectedTarget'] = self._shown_target()
-        if result.get('activeTarget') not in TARGET_ORIGINS:
+        if not known(result.get('activeTarget')):
             result['activeTarget'] = None
         result['configurationPending'] = result.get('configurationPending') is True
         result['providers'] = [row for row in result.get('providers', [])
