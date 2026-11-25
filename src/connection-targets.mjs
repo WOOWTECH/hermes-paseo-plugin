@@ -67,17 +67,25 @@ export function targetEnvironment(target, inheritedCorsOrigins = '') {
   };
 }
 
-/** Daemon config for one target. Unrelated CORS origins and relay keys are kept as they are. */
+/**
+ * Daemon config for one target. Unrelated CORS origins and relay keys are kept as they are.
+ * The Smart apps (a fork of Paseo's 0.10.1 app) speak only the older relay encryption, so for
+ * them `daemon.relay.requireProtectedSecurity` is removed: absent means off in 0.17.4, it is
+ * live-reloadable and settable from the official app, and a 0.1.4 rollback (whose 0.11.2
+ * schema has no such key) can still start the daemon. Paseo's own setting is left alone.
+ */
 export function targetConfiguration(config, target) {
   const profile = connectionTarget(target);
   const origins = config.daemon?.cors?.allowedOrigins || [];
   if (!Array.isArray(origins) || origins.some(origin => typeof origin !== 'string')) throw new RuntimeError('CONFIG_INVALID');
+  const relay = { ...config.daemon?.relay, enabled: true, endpoint: profile.relayEndpoint, publicEndpoint: profile.relayEndpoint, useTls: true, publicUseTls: true };
+  if (profile.id !== DEFAULT_TARGET) delete relay.requireProtectedSecurity;
   return {
     ...config,
     app: { ...config.app, baseUrl: profile.appUrl },
     daemon: {
       ...config.daemon,
-      relay: { ...config.daemon?.relay, enabled: true, endpoint: profile.relayEndpoint, publicEndpoint: profile.relayEndpoint, useTls: true, publicUseTls: true },
+      relay,
       cors: { ...config.daemon?.cors, allowedOrigins: [...new Set([...origins.filter(origin => !managed(origin)), profile.appUrl])] },
     },
   };
