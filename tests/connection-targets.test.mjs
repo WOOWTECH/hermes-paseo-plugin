@@ -3,10 +3,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { CONNECTION_TARGETS, DEFAULT_TARGET, connectionTarget, selectedTarget, saveSelectedTarget } from '../src/connection-targets.mjs';
-import { locations } from '../src/state.mjs';
+import { locations, readState, updateState } from '../src/state.mjs';
+import { runtimeDirectory } from '../src/runtime-layout.mjs';
+import { saveConnectionSettings } from '../src/runtime.mjs';
+import { control, validateInput } from '../src/control.mjs';
 import { fixture } from './runtime-fixtures.mjs';
 
 const connectionFile = () => path.join(locations().stateDir, 'connection.json');
+const pairingFile = () => path.join(locations().stateDir, 'pairing.private.json');
 
 test('the three targets bind each web app to its own TLS relay, and Paseo stays the default', () => {
   assert.deepEqual(CONNECTION_TARGETS.map(row => [row.id, row.label, row.appUrl, row.relayEndpoint]), [
@@ -83,4 +87,121 @@ test('a link in place of the record, or in front of it, is refused', t => {
   fs.renameSync(loc.stateDir, moved);
   fs.symlinkSync(moved, loc.stateDir);
   assert.throws(() => selectedTarget(loc), { code: 'UNSAFE_SYMLINK' });
+});
+
+test('the config action takes exactly one known target and nothing else', () => {
+  for (const row of CONNECTION_TARGETS) assert.deepEqual(validateInput('config', { target: row.id }), { target: row.id });
+  for (const input of [{}, { target: 'custom' }, { target: null }, { target: ['paseo'] }, { target: 'Paseo' }, { target: '' }]) {
+    assert.throws(() => validateInput('config', input), { code: 'INVALID_TARGET' }, JSON.stringify(input));
+  }
+  for (const input of [{ target: 'paseo', url: 'https://evil.example' }, { target: 'paseo', relayEndpoint: 'evil.example:443' }, { target: 'paseo', name: 'x' }, { name: 'x' }]) {
+    assert.throws(() => validateInput('config', input), { code: 'INVALID_REQUEST' }, JSON.stringify(input));
+  }
+  for (const input of [null, [], 'paseo', 7]) assert.throws(() => validateInput('config', input), { code: 'INVALID_REQUEST' });
+});
+
+test('a target change records the choice, withdraws stale evidence and keeps the daemon identity', async t => {
+  const f = fixture(); t.after(() => f.close());
+  const loc = locations();
+  fs.mkdirSync(loc.stateDir, { recursive: true });
+  fs.mkdirSync(loc.paseoHome, { recursive: true });
+  fs.writeFileSync(path.join(loc.stateDir, 'preferences.json'), '{"futurePreference":42}');
+  // An older release left its pairing offer here: a bearer credential that nothing reads.
+  fs.writeFileSync(pairingFile(), '{"url":"private old offer"}');
+  const identity = { 'server-id': 'srv_keep_this_one', 'daemon-keypair.json': '{"keep":"this key pair"}' };
+  for (const [name, content] of Object.entries(identity)) fs.writeFileSync(path.join(loc.paseoHome, name), content);
+  updateState({ relayVerification: { verified: true, checkedAt: 'old' }, pairingCreatedAt: 'old', installationId: 'keep-me', phase: 'running', port: 6790 });
+  const saved = await saveConnectionSettings({ target: 'woowtech' });
+  assert.deepEqual(saved, { saved: true, target: 'woowtech', configurationPending: true });
+  assert.deepEqual(JSON.parse(fs.readFileSync(connectionFile(), 'utf8')), { version: 1, target: 'woowtech' });
+  assert.equal(fs.statSync(connectionFile()).mode & 0o777, 0o600);
+  assert.equal(fs.existsSync(pairingFile()), false);
+  const state = readState();
+  assert.equal(state.configurationPending, true);
+  assert.equal(state.relayVerification, null);
+  assert.equal(state.pairingCreatedAt, null);
+  assert.deepEqual([state.installationId, state.phase, state.port], ['keep-me', 'running', 6790]);
+  assert.equal(fs.readFileSync(path.join(loc.stateDir, 'preferences.json'), 'utf8'), '{"futurePreference":42}', 'preferences.json is never written');
+  for (const [name, content] of Object.entries(identity)) assert.equal(fs.readFileSync(path.join(loc.paseoHome, name), 'utf8'), content, name);
+  // Saving the same target again changes nothing.
+  fs.writeFileSync(pairingFile(), '{"url":"new offer"}');
+  const stamp = readState().updatedAt;
+  assert.deepEqual(await saveConnectionSettings({ target: 'woowtech' }), { saved: true, target: 'woowtech', configurationPending: true });
+  assert.equal(fs.existsSync(pairingFile()), true);
+  assert.equal(readState().updatedAt, stamp, 'no state write for an unchanged choice');
+  // Every target can be chosen, and each change is a change.
+  for (const row of ['apporo', 'paseo', 'woowtech']) {
+    assert.equal((await saveConnectionSettings({ target: row })).target, row);
+    assert.equal(selectedTarget(loc), row);
+  }
+});
+
+test('the config action goes through control and answers with the saved target only', async t => {
+  const f = fixture(); t.after(() => f.close());
+  assert.deepEqual(await control('config', { target: 'apporo' }), { saved: true, target: 'apporo', configurationPending: true });
+  await assert.rejects(control('config', { target: 'nowhere' }), { code: 'INVALID_TARGET' });
+  assert.equal(selectedTarget(locations()), 'apporo');
+});
+
+test('a link named like the old pairing file is neither followed nor removed', async t => {
+  const f = fixture(); t.after(() => f.close());
+  const loc = locations();
+  fs.mkdirSync(loc.stateDir, { recursive: true });
+  const elsewhere = path.join(f.dir, 'elsewhere.json');
+  fs.writeFileSync(elsewhere, 'precious');
+  fs.symlinkSync(elsewhere, pairingFile());
+  assert.equal((await saveConnectionSettings({ target: 'apporo' })).target, 'apporo');
+  assert.equal(fs.readFileSync(elsewhere, 'utf8'), 'precious');
+  assert.equal(fs.lstatSync(pairingFile()).isSymbolicLink(), true, 'left alone');
+});
+
+test('invalid input or extra fields never write anything or clear a pairing', async t => {
+  const f = fixture(); t.after(() => f.close());
+  const loc = locations();
+  fs.mkdirSync(loc.stateDir, { recursive: true });
+  saveSelectedTarget(loc, 'apporo');
+  fs.writeFileSync(pairingFile(), '{"url":"keep-private"}');
+  updateState({ relayVerification: { verified: true, checkedAt: 'x', target: 'apporo' } });
+  const before = [fs.readFileSync(connectionFile(), 'utf8'), fs.readFileSync(path.join(loc.stateDir, 'state.json'), 'utf8')];
+  for (const input of [{ target: 'custom' }, { target: null }, {}, { target: 'paseo', name: 'x' }, { target: ['paseo'] }, null, [], 'paseo', undefined]) {
+    await assert.rejects(saveConnectionSettings(input), { code: 'INVALID_TARGET' }, JSON.stringify(input));
+  }
+  assert.deepEqual([fs.readFileSync(connectionFile(), 'utf8'), fs.readFileSync(path.join(loc.stateDir, 'state.json'), 'utf8')], before);
+  assert.equal(fs.existsSync(pairingFile()), true);
+});
+
+test('a damaged choice is replaced by the next save, which counts as a change', async t => {
+  const f = fixture(); t.after(() => f.close());
+  fs.mkdirSync(locations().stateDir, { recursive: true });
+  fs.writeFileSync(connectionFile(), '{broken');
+  assert.deepEqual(await saveConnectionSettings({ target: 'paseo' }), { saved: true, target: 'paseo', configurationPending: true });
+  assert.equal(selectedTarget(locations()), 'paseo');
+});
+
+test('saving asks the daemon nothing: the client is never loaded, and no runtime has to exist', async t => {
+  const f = fixture(); t.after(() => f.close());
+  const loc = locations();
+  assert.equal((await saveConnectionSettings({ target: 'woowtech' })).saved, true, 'works with nothing installed');
+  const trace = path.join(f.dir, 'client-trace.log');
+  const client = path.join(runtimeDirectory(loc), 'node_modules/@getpaseo/cli/dist/utils/client.js');
+  fs.mkdirSync(path.dirname(client), { recursive: true });
+  fs.writeFileSync(path.join(runtimeDirectory(loc), 'node_modules/@getpaseo/cli/package.json'), JSON.stringify({ version: '0.11.2', type: 'module' }));
+  fs.writeFileSync(client, `import fs from 'node:fs';fs.appendFileSync(${JSON.stringify(trace)},'loaded\\n');export async function connectToDaemon(){fs.appendFileSync(${JSON.stringify(trace)},'connected\\n');throw new Error('no daemon here');}`);
+  updateState({ phase: 'running', desiredEnabled: true, daemonPid: process.pid });
+  assert.equal((await saveConnectionSettings({ target: 'apporo' })).target, 'apporo');
+  assert.equal(fs.existsSync(trace), false, 'the daemon client was neither imported nor called');
+});
+
+test('saving is not held up by the runtime lock an activation holds', async t => {
+  const f = fixture(); t.after(() => f.close());
+  const { withRuntimeLock } = await import('../src/state.mjs');
+  let release; const blocked = new Promise(resolve => { release = resolve; });
+  let entered; const held = new Promise(resolve => { entered = resolve; });
+  const operation = withRuntimeLock(async () => { entered(); await blocked; });
+  await held;
+  const started = Date.now();
+  assert.equal((await saveConnectionSettings({ target: 'apporo' })).target, 'apporo');
+  assert.ok(Date.now() - started < 2000, 'an activation can hold the lock for minutes while npm runs; the choice is only recorded');
+  assert.equal(selectedTarget(locations()), 'apporo');
+  release(); await operation;
 });

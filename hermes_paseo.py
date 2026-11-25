@@ -57,11 +57,20 @@ HOST_CREDENTIALS = (
     'API_SERVER_KEY',
 )
 TIMEOUTS = {'status': 20, 'start': 480, 'stop': 60, 'models': 165,
-            'pair': 40, 'relay': 75, 'acceptance': 480, 'chat': 240, 'continue': 240}
+            'pair': 40, 'relay': 75, 'config': 30, 'acceptance': 480, 'chat': 240, 'continue': 240}
 FIELDS = {'status': (), 'start': (), 'stop': (), 'models': ('provider',),
-          'pair': (), 'relay': (), 'acceptance': ('providers',),
+          'pair': (), 'relay': (), 'config': ('target',), 'acceptance': ('providers',),
           'chat': ('provider', 'model', 'mode', 'thinking', 'message'),
           'continue': ('agentId', 'message')}
+# The connection targets, mirrored from src/connection-targets.mjs (the Dashboard carries the same rows).
+# A pairing link is only released for the selected target's exact app, and no request supplies an origin
+# or an endpoint. tests/target-parity.test.mjs fails when any of the three copies drifts.
+TARGETS = (
+    {'id': 'paseo', 'label': 'Paseo', 'appUrl': 'https://app.paseo.sh', 'relayEndpoint': 'relay.paseo.sh:443'},
+    {'id': 'woowtech', 'label': 'Woowtech Smart', 'appUrl': 'https://smart.woowtech.io', 'relayEndpoint': 'relay.woowtech.io:443'},
+    {'id': 'apporo', 'label': 'Apporo Smart', 'appUrl': 'https://smart.apporo.ai', 'relayEndpoint': 'relay.apporo.ai:443'},
+)
+TARGET_ORIGINS = {row['id']: row['appUrl'] for row in TARGETS}
 CODES = frozenset('''INVALID_REQUEST INVALID_PROVIDER INVALID_MESSAGE INVALID_AGENT_ID
 INVALID_MODEL INVALID_PAIR_URL INVALID_COMMAND_OUTPUT REQUEST_TOO_LARGE OUTPUT_LIMIT
 PROCESS_TIMEOUT PROCESS_FAILED NODE_UNAVAILABLE HERMES_UNAVAILABLE RUNTIME_UNAVAILABLE
@@ -76,11 +85,13 @@ PROVIDER_LOGIN_REQUIRED PROVIDER_ERROR START_FAILED STOP_FAILED ACCEPTANCE_CLEAN
 WORKSPACE_CREATE_FAILED PERMISSION_REQUIRED PROVIDER_TIMEOUT PROVIDER_TURN_FAILED MODEL_SELECTION_UNAVAILABLE
 EMPTY_OR_UNEXPECTED_REPLY'''.split())
 CODES = CODES | {'ACCEPTANCE_INTERRUPTED', 'PROVIDER_QUOTA_EXHAUSTED'}
+CODES = CODES | {'INVALID_TARGET', 'CONFIGURATION_PENDING', 'CONNECTION_STATE_CORRUPT', 'CONFIG_INVALID', 'CONFIG_CORRUPT'}
 PUBLIC_KEYS = frozenset('''ok code installed version enabled phase diagnosticCode daemon running
 reachable relayEnabled relayVerified relayVerifiedAt providers provider label status modes id
 isDefault defaultModeId models defaultThinkingOptionId thinkingOptions chatVerified chatVerifiedAt
 checkedAt passed firstReply followup model modeId thinking agentId message reply errorCode
-available authentication loginHint chatErrorCode cleanup archived workspaceArchived'''.split())
+available authentication loginHint chatErrorCode cleanup archived workspaceArchived
+saved target configurationPending'''.split())
 # Free text hides any official app link and the pairing offer of any other URL (the `#offer=` or
 # `#connect=` fragment onward). Every alternative starts at a fixed token, so no scan runs forward
 # from each character: an earlier form began with an unbounded run before the `#` and took
@@ -111,6 +122,8 @@ def validate_input(action, value=None):
         raise BridgeError('INVALID_REQUEST')
     if action in ('models', 'chat') and (not isinstance(value.get('provider'), str) or value['provider'] not in PROVIDERS):
         raise BridgeError('INVALID_PROVIDER')
+    if action == 'config' and (not isinstance(value.get('target'), str) or value['target'] not in TARGET_ORIGINS):
+        raise BridgeError('INVALID_TARGET')
     if 'providers' in value:
         providers = value['providers']
         if not isinstance(providers, list) or not 1 <= len(providers) <= 4 or any(not isinstance(p, str) or p not in PROVIDERS for p in providers) or len(set(providers)) != len(providers):

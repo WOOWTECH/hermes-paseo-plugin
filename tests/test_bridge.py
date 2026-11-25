@@ -318,6 +318,53 @@ class BridgeTests(unittest.TestCase):
                 self.assertLess(elapsed, 1.0, f'{name} took {elapsed:.2f}s')
                 self.assertNotIn('SECRET', result)
 
+    def test_config_accepts_exactly_one_known_target(self):
+        for target in b.TARGET_ORIGINS:
+            self.assertEqual(b.validate_input('config', {'target': target}), {'target': target})
+        for body, code in [({}, 'INVALID_TARGET'), ({'target': 'Paseo'}, 'INVALID_TARGET'), ({'target': 'custom'}, 'INVALID_TARGET'),
+                           ({'target': ['paseo']}, 'INVALID_TARGET'), ({'target': None}, 'INVALID_TARGET'), ({'target': ''}, 'INVALID_TARGET'),
+                           ({'target': 'paseo', 'url': 'https://evil.example'}, 'INVALID_REQUEST'),
+                           ({'target': 'paseo', 'relayEndpoint': 'evil.example:443'}, 'INVALID_REQUEST')]:
+            with self.subTest(body=body), self.assertRaises(b.BridgeError) as caught:
+                b.validate_input('config', body)
+            self.assertEqual(caught.exception.code, code)
+        for body in (None, [], 'paseo'):
+            with self.subTest(body=body), self.assertRaises(b.BridgeError):
+                b.validate_input('config', body)
+
+    def test_config_saves_through_the_runtime_and_invalidates_cached_status(self):
+        calls = []
+        def run(argv, payload, env, timeout, *_):
+            calls.append((argv[-1], json.loads(payload)))
+            if argv[-1] == 'config':
+                return {'saved': True, 'target': 'woowtech', 'configurationPending': True, 'url': 'https://smart.woowtech.io/#offer=x'}
+            return {'enabled': True, 'phase': 'running', 'daemon': {'reachable': True}}
+        with patch.object(b, 'run_process', side_effect=run), patch.object(b, 'resolve_executable', return_value=sys.executable):
+            self.bridge.status()
+            result = self.bridge.call('config', {'target': 'woowtech'})
+            self.bridge.status()
+        self.assertEqual(result, {'saved': True, 'target': 'woowtech', 'configurationPending': True}, 'only public fields, never a link')
+        self.assertEqual([action for action, _ in calls], ['status', 'config', 'status'], 'the cached status is not reused after a save')
+        self.assertEqual(calls[1], ('config', {'target': 'woowtech'}))
+
+    def test_config_reaches_node_with_the_target_only_and_its_own_time_budget(self):
+        answer = {'saved': True, 'target': 'apporo', 'configurationPending': True}
+        with patch.object(b, 'run_process', return_value=answer) as run, patch.object(b, 'resolve_executable', return_value=sys.executable):
+            self.assertEqual(self.bridge.call('config', {'target': 'apporo'}), answer)
+        argv, payload, _, timeout = run.call_args.args
+        self.assertEqual(argv[1:], [str(self.bridge.root / 'bin' / 'control.mjs'), 'config'])
+        self.assertEqual(json.loads(payload), {'target': 'apporo'})
+        self.assertEqual(timeout, b.TIMEOUTS['config'])
+        self.assertLess(b.TIMEOUTS['config'], b.TIMEOUTS['start'], 'saving only records the choice; it never waits for an install')
+
+    def test_config_answers_only_with_public_fields(self):
+        shown = b.redact({'saved': True, 'target': 'apporo', 'configurationPending': True, 'appUrl': 'x', 'relayEndpoint': 'y', 'password': 'z'})
+        self.assertEqual(shown, {'saved': True, 'target': 'apporo', 'configurationPending': True})
+        for code in ('INVALID_TARGET', 'CONFIGURATION_PENDING', 'CONNECTION_STATE_CORRUPT', 'CONFIG_INVALID'):
+            with self.subTest(code=code):
+                self.assertEqual(b.BridgeError(code).code, code)
+                self.assertEqual(b.redact({'diagnosticCode': code})['diagnosticCode'], code)
+
 
 class ProcessTests(unittest.TestCase):
     def run_python(self, code, timeout=2, limit=b.MAX_OUTPUT):
@@ -384,6 +431,7 @@ class RegistrationTests(unittest.TestCase):
             native.register(Context())
         self.assertEqual(set(tools), {'paseo_status', 'paseo_start', 'paseo_stop', 'paseo_models', 'paseo_chat', 'paseo_continue'})
         self.assertNotIn('paseo_pair', tools)
+        self.assertNotIn('paseo_config', tools, 'choosing a connection target is a Dashboard action, not a model tool')
         self.assertIn('/paseo', commands['paseo'](''))
         self.assertIn('on_session_start', hooks)
         for tool in tools.values():
@@ -457,6 +505,47 @@ class RouteTests(unittest.TestCase):
             response = self.client.post(self.prefix + '/relay', json={}, headers=self.origin)
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json(), {'ok': False, 'code': 'RELAY_UNVERIFIED'})
+
+    def test_config_route_is_protected_and_saves_only_a_known_target(self):
+        with patch.object(self.runtime, 'call', side_effect=AssertionError('untrusted invocation')):
+            for headers in [{'Origin': 'https://evil.test'}, {'Origin': 'null'}, {'Origin': 'http://testserver', 'Sec-Fetch-Site': 'same-site'},
+                            {'Origin': 'http://testserver', 'Sec-Fetch-Site': 'cross-site'}, {}, {'Origin': 'http://testserver.evil'},
+                            {'Origin': 'http://testserver', 'Sec-Fetch-Mode': 'no-cors'}, {'Origin': 'http://testserver', 'Sec-Fetch-Mode': 'navigate'}]:
+                with self.subTest(headers=headers):
+                    response = self.client.post(self.prefix + '/config', json={'target': 'woowtech'}, headers=headers)
+                    self.assertEqual(response.status_code, 403)
+                    self.privacy(response)
+            self.assertEqual(self.client.get(self.prefix + '/config', headers=self.origin).status_code, 404)
+        answer = {'saved': True, 'target': 'woowtech', 'configurationPending': True}
+        with patch.object(self.runtime, '_invoke', return_value=answer) as invoke:
+            response = self.client.post(self.prefix + '/config', json={'target': 'woowtech'}, headers=self.origin)
+        self.assertEqual((response.status_code, response.json()), (200, answer))
+        invoke.assert_called_once_with('config', {'target': 'woowtech'})
+        self.privacy(response)
+        with patch.object(self.runtime, '_invoke', side_effect=AssertionError('invalid input reached the runtime')):
+            for body, code in [({}, 'INVALID_TARGET'), ({'target': 'custom'}, 'INVALID_TARGET'), ({'target': None}, 'INVALID_TARGET'),
+                               ({'target': 'paseo', 'url': 'https://evil.example'}, 'INVALID_REQUEST'),
+                               ({'target': 'paseo', 'appUrl': 'https://evil.example'}, 'INVALID_REQUEST')]:
+                with self.subTest(body=body):
+                    response = self.client.post(self.prefix + '/config', json=body, headers=self.origin)
+                    self.assertEqual((response.status_code, response.json()), (400, {'ok': False, 'code': code}))
+                    self.privacy(response)
+
+    def test_config_route_is_json_only_bounded_and_strict(self):
+        headers = {**self.origin, 'Content-Type': 'application/json'}
+        with patch.object(self.runtime, '_invoke', side_effect=AssertionError('rejected input reached the runtime')):
+            for content, status, code in [('{"target":"paseo","target":"apporo"}', 400, 'INVALID_JSON'), ('[]', 400, 'INVALID_REQUEST'),
+                                          ('{"target":NaN}', 400, 'INVALID_JSON'), ('x' * (b.MAX_INPUT + 1), 413, 'REQUEST_TOO_LARGE')]:
+                with self.subTest(content=content[:40]):
+                    response = self.client.post(self.prefix + '/config', content=content, headers=headers)
+                    self.assertEqual((response.status_code, response.json()['code']), (status, code))
+            response = self.client.post(self.prefix + '/config', content='{"target":"paseo"}', headers={**self.origin, 'Content-Type': 'text/plain'})
+            self.assertEqual((response.status_code, response.json()['code']), (415, 'JSON_REQUIRED'))
+            response = self.client.post(self.prefix + '/config', content='{"target":"paseo"}', headers={**headers, 'Content-Encoding': 'gzip'})
+            self.assertEqual((response.status_code, response.json()['code']), (415, 'UNSUPPORTED_ENCODING'))
+            for query in ('?profile=other', '?target=apporo'):
+                response = self.client.post(self.prefix + '/config' + query, json={'target': 'paseo'}, headers=self.origin)
+                self.assertEqual(response.status_code, 400)
 
     def test_get_security_applies_to_status_and_models(self):
         with patch.object(self.runtime, '_invoke', side_effect=AssertionError('untrusted invocation')):

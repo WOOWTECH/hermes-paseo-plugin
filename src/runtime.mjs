@@ -15,6 +15,7 @@ import {usingAcceptanceAgent,usingAcceptanceWorkspace} from './acceptance-agent.
 import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,RUNTIME_REVISION} from './runtime-layout.mjs';
 import {demonstrablyReusedPid,linuxContainerIdentity,instanceFromPreviousContainer} from './daemon-identity.mjs';
 import {managedFeatures} from './daemon-config.mjs';
+import {connectionTarget,selectedTarget,saveSelectedTarget} from './connection-targets.mjs';
 export { locations, readState, updateState } from './state.mjs';
 export const PASEO_VERSION = '0.11.2';
 const PROVIDERS = ['hermes', 'claude', 'codex', 'pi'];
@@ -285,6 +286,32 @@ export async function pair() {
   atomicJson(path.join(locations().stateDir, 'pairing.private.json'), pairing);
   updateState({ pairingCreatedAt: pairing.createdAt });
   return pairing;
+}
+// Earlier releases kept the pairing offer here. It is a bearer credential that nothing ever read back, so
+// it is removed instead of kept: a regular file only, and never through a link.
+function removePairingFile(loc) {
+  const file = path.join(loc.stateDir, 'pairing.private.json');
+  try { if (assertSafePath(file)?.isFile()) fs.unlinkSync(file); } catch { /* absent, a link, or not ours to remove */ }
+}
+/**
+ * Records the connection target and nothing else: no daemon is asked anything, and the choice reaches the
+ * daemon at its next stop and start. A change marks the configuration pending, withdraws the relay evidence
+ * of the previous target and the pairing offer an older release left behind, and keeps the daemon's key pair
+ * and server id, so devices paired to the same target keep working. Saving the target again changes nothing.
+ */
+export async function saveConnectionSettings(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => key !== 'target') || typeof input.target !== 'string') throw new RuntimeError('INVALID_TARGET');
+  const target = connectionTarget(input.target).id, loc = locations();
+  let previous = null;
+  try { previous = selectedTarget(loc); } catch (error) { if (error.code !== 'CONNECTION_STATE_CORRUPT') throw error; }
+  if (previous !== target) {
+    // Pending is published before the new choice, so a partial write never offers the new app while the old
+    // daemon still owns the connection.
+    updateState({ configurationPending: true, relayVerification: null, pairingCreatedAt: null });
+    removePairingFile(loc);
+    saveSelectedTarget(loc, target);
+  }
+  return { saved: true, target, configurationPending: readState().configurationPending === true };
 }
 async function connectViaOffer(url, work, timeoutMs = 30000) {
   const { connectToDaemon } = await import(pathToFileURL(path.join(packageRoot(), 'dist/utils/client.js')).href);
