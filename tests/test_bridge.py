@@ -271,11 +271,50 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn('password', result['providers'][0])
 
     def test_pair_origin_validation(self):
-        self.assertEqual(b.public_pair({'url': 'https://app.paseo.sh/?offer=test', 'token': 'secret'}), {'url': 'https://app.paseo.sh/?offer=test'})
+        self.assertEqual(b.public_pair({'url': 'https://app.paseo.sh/#offer=test', 'token': 'secret'}),
+                         {'url': 'https://app.paseo.sh/#offer=test', 'target': 'paseo'})
         for url in ['http://app.paseo.sh/a', 'https://app.paseo.sh.evil/a', 'https://user@app.paseo.sh/a',
-                    'https://app.paseo.sh:444/a', 'https://app.paseo.sh/\nsecret', 'javascript:test']:
+                    'https://app.paseo.sh:444/a', 'https://app.paseo.sh/\nsecret', 'javascript:test',
+                    'https://app.paseo.sh/?offer=test', 'https://app.paseo.sh/pair#offer=test',
+                    'https://app.paseo.sh:443/#offer=test', 'https://app.paseo.sh/?#offer=test',
+                    'https://app.paseo.sh/#offer=', 'https://app.paseo.sh/#offer=a.b', 'https://app.paseo.sh/#token=x',
+                    'https://app.paseo.sh/#offer=a#b', 'https://APP.paseo.sh/#offer=a', 'https://app.paseo.sh//#offer=a']:
             with self.subTest(url=url), self.assertRaises(b.BridgeError):
                 b.public_pair({'url': url})
+
+    def test_pair_links_are_released_only_for_the_selected_targets_exact_app(self):
+        for target, origin in b.TARGET_ORIGINS.items():
+            url = origin + '/#offer=PRIVATE_offer-1'
+            with self.subTest(target=target):
+                self.assertEqual(b.public_pair({'url': url, 'target': target}, target), {'url': url, 'target': target})
+                for other in set(b.TARGET_ORIGINS) - {target}:
+                    with self.assertRaises(b.BridgeError):
+                        b.public_pair({'url': url}, other)
+                with self.assertRaises(b.BridgeError):
+                    b.public_pair({'url': url, 'target': 'paseo' if target != 'paseo' else 'apporo'}, target)
+        for target in ('custom', '', None, ['paseo'], {'id': 'paseo'}, 7):
+            with self.subTest(target=target), self.assertRaises(b.BridgeError):
+                b.public_pair({'url': 'https://smart.woowtech.io/#offer=x'}, target)
+
+    def test_pair_uses_the_target_saved_on_disk_not_the_runtime_output(self):
+        b._private_dir(self.bridge.state_dir)
+        b._write_json(self.bridge.state_dir / 'connection.json', {'version': 1, 'target': 'apporo'})
+        (self.bridge.state_dir / 'connection.json').chmod(0o600)
+        good = {'url': 'https://smart.apporo.ai/#offer=abc', 'target': 'apporo', 'createdAt': 'now'}
+        with patch.object(b, 'run_process', return_value=good), patch.object(b, 'resolve_executable', return_value=sys.executable):
+            self.assertEqual(self.bridge._invoke('pair'), {'url': good['url'], 'target': 'apporo'})
+        for wrong in ({'url': 'https://app.paseo.sh/#offer=abc', 'target': 'paseo'}, {'url': 'https://app.paseo.sh/#offer=abc'},
+                      {'url': 'https://smart.woowtech.io/#offer=abc', 'target': 'woowtech'}, {'url': good['url'], 'target': 'woowtech'}):
+            with patch.object(b, 'run_process', return_value=wrong), patch.object(b, 'resolve_executable', return_value=sys.executable), \
+                    self.subTest(wrong=wrong), self.assertRaises(b.BridgeError) as caught:
+                self.bridge._invoke('pair')
+            self.assertEqual(caught.exception.code, 'INVALID_PAIR_URL')
+        # A damaged or unreadable choice releases nothing, whatever the runtime answers.
+        b._write_json(self.bridge.state_dir / 'connection.json', {'version': 1, 'target': 'custom'})
+        with patch.object(b, 'run_process', return_value=good), patch.object(b, 'resolve_executable', return_value=sys.executable), \
+                self.assertRaises(b.BridgeError) as caught:
+            self.bridge._invoke('pair')
+        self.assertEqual(caught.exception.code, 'CONNECTION_STATE_CORRUPT')
 
     def test_offers_for_every_official_app_are_hidden_in_free_text(self):
         for text in ['open https://smart.woowtech.io/#offer=PRIVATE now', 'https://smart.apporo.ai/#offer=PRIVATE',
@@ -690,9 +729,15 @@ class RouteTests(unittest.TestCase):
             self.runtime._worker.join(2)
 
     def test_pair_only_returns_valid_https_url(self):
-        with patch.object(self.runtime, '_invoke', return_value={'url': 'https://app.paseo.sh/?offer=test'}):
+        with patch.object(b, 'run_process', return_value={'url': 'https://app.paseo.sh/#offer=test', 'target': 'paseo', 'createdAt': 'now'}), \
+                patch.object(b, 'resolve_executable', return_value=sys.executable):
             response = self.client.post(self.prefix + '/pair', json={}, headers=self.origin)
-        self.assertEqual(response.json(), {'url': 'https://app.paseo.sh/?offer=test'})
+        self.assertEqual(response.json(), {'url': 'https://app.paseo.sh/#offer=test', 'target': 'paseo'})
+        self.privacy(response)
+        with patch.object(b, 'run_process', return_value={'url': 'https://app.paseo.sh/?offer=test', 'target': 'paseo'}), \
+                patch.object(b, 'resolve_executable', return_value=sys.executable):
+            response = self.client.post(self.prefix + '/pair', json={}, headers=self.origin)
+        self.assertEqual((response.status_code, response.json()), (400, {'ok': False, 'code': 'INVALID_PAIR_URL'}))
         self.privacy(response)
 
     def test_backend_error_redaction_and_privacy(self):

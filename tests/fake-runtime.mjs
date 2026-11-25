@@ -37,8 +37,11 @@ if (words[0] === 'daemon' && words[1] === 'start') {
 } else if (words[0] === 'daemon' && words[1] === 'pair') {
   // What a real daemon offers: the app and relay its own configuration names.
   const config = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
+  // The defaults of Paseo 0.11.2's generateLocalPairingOffer (pairing-offer.js) for whatever the config leaves out.
   const relay = config.daemon?.relay ?? {};
-  const offer = { v: 2, serverId: 'srv_fake_daemon', daemonPublicKeyB64: 'fake-public-key', relay: { endpoint: relay.publicEndpoint, useTls: relay.publicUseTls } };
+  const endpoint = relay.endpoint ?? 'relay.paseo.sh:443', publicEndpoint = relay.publicEndpoint ?? endpoint;
+  const useTls = relay.useTls ?? endpoint === 'relay.paseo.sh:443', publicUseTls = relay.publicUseTls ?? useTls;
+  const offer = { v: 2, serverId: 'srv_fake_daemon', daemonPublicKeyB64: 'fake-public-key', relay: { endpoint: publicEndpoint, useTls: publicUseTls }, ...JSON.parse(process.env.FAKE_PASEO_OFFER_EXTRA ?? '{}') };
   process.stdout.write(JSON.stringify({ url: (config.app?.baseUrl ?? 'https://app.paseo.sh') + '/#offer=' + Buffer.from(JSON.stringify(offer)).toString('base64url'), relayEnabled: relay.enabled === true }) + '\\n');
 } else { process.stdout.write('{}\\n'); }
 `;

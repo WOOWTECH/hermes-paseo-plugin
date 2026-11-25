@@ -210,3 +210,117 @@ test('a daemon started before this version counts as Paseo, and pairs as Paseo u
   assert.deepEqual(await saveConnectionSettings({ target: 'paseo' }), { saved: true, target: 'paseo', configurationPending: false });
   assert.equal(starts(p).length, 2, 'the legacy daemon was never restarted by any of this');
 });
+
+test('relay evidence belongs to the target it was taken on, and the check dials the relay the offer names', async t => {
+  const p = profile(t);
+  await activate();
+  const dials = () => readTrace(p.trace).filter(row => row.dial);
+  assert.equal((await verifyRelay()).target, 'paseo');
+  assert.deepEqual(readState().relayVerification.target, 'paseo');
+  assert.deepEqual(dials().map(row => [row.dial, row.relay, row.useTls]), [['https://app.paseo.sh', 'relay.paseo.sh:443', true]]);
+  assert.equal((await status()).daemon.relayVerified, true);
+  // A record from before targets existed was Paseo's; it is never another target's evidence.
+  updateState({ relayVerification: { verified: true, checkedAt: 'rc9' } });
+  assert.equal((await status()).daemon.relayVerified, true);
+  for (const row of CONNECTION_TARGETS.filter(row => row.id !== 'paseo')) {
+    await saveConnectionSettings({ target: row.id });
+    await deactivate();
+    updateState({ relayVerification: { verified: true, checkedAt: 'rc9' } });
+    assert.equal((await status()).daemon.relayVerified, false, 'rc.9 evidence is not evidence for ' + row.id);
+    await activate();
+    const result = await verifyRelay();
+    assert.equal(result.target, row.id);
+    assert.deepEqual(readState().relayVerification, { verified: true, checkedAt: result.checkedAt, target: row.id });
+    assert.deepEqual(dials().at(-1), { dial: row.appUrl, relay: row.relayEndpoint, useTls: true }, `the check for ${row.id} dials ${row.relayEndpoint}`);
+    assert.equal((await status()).daemon.relayVerified, true);
+    await saveConnectionSettings({ target: 'paseo' });
+    assert.equal((await status()).daemon.relayVerified, false, 'switching withdraws it');
+  }
+});
+
+// ---- pairing (item 5) ----
+const everyFile = dir => fs.existsSync(dir) ? fs.readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? everyFile(path.join(dir, entry.name)) : [path.join(dir, entry.name)]) : [];
+const fragmentOf = url => new URL(url).hash.slice(7);
+const offerOf = url => JSON.parse(Buffer.from(fragmentOf(url), 'base64url').toString('utf8'));
+
+for (const target of CONNECTION_TARGETS) {
+  test(`pairing on ${target.id} returns that app's link for this daemon and keeps the offer nowhere`, async t => {
+    const p = profile(t);
+    await activate(); await deactivate();
+    await saveConnectionSettings({ target: target.id });
+    await activate();
+    const pairing = await pair();
+    assert.deepEqual(Object.keys(pairing).sort(), ['createdAt', 'target', 'url']);
+    assert.equal(pairing.target, target.id);
+    const url = new URL(pairing.url);
+    assert.deepEqual([url.origin, url.pathname, url.search, url.hash.startsWith('#offer=')], [target.appUrl, '/', '', true]);
+    assert.deepEqual(offerOf(pairing.url), { v: 2, serverId: 'srv_fake_daemon', daemonPublicKeyB64: 'fake-public-key', relay: { endpoint: target.relayEndpoint, useTls: true } });
+    assert.equal(pairCalls(p).length, 1);
+    // The offer is a bearer credential: it goes to the caller and is written nowhere.
+    assert.equal(fs.existsSync(path.join(p.loc.stateDir, 'pairing.private.json')), false);
+    for (const file of everyFile(p.f.dir)) {
+      if (file.includes(`${path.sep}bin${path.sep}`) || file.endsWith('.js') || file.endsWith('.mjs') || file.endsWith('paseo')) continue;
+      assert.equal(fs.readFileSync(file, 'utf8').includes(fragmentOf(pairing.url)), false, `${path.relative(p.f.dir, file)} must not hold the offer`);
+    }
+    const s = await status();
+    assert.equal(s.pairingAvailable, true);
+    assert.equal(s.state.pairingCreatedAt, pairing.createdAt);
+    assert.equal(JSON.stringify(publicStatus(s)).includes(fragmentOf(pairing.url)), false);
+    await deactivate();
+  });
+}
+
+test('a daemon that offers another app, another relay or a demanding security mode is never paired through', async t => {
+  const p = profile(t);
+  await activate();
+  const relayEdit = edit => { const config = configOf(p); edit(config); fs.writeFileSync(p.config, JSON.stringify(config)); };
+  // The fake daemon reads its config for each offer, so editing it is a daemon that offers something else.
+  relayEdit(config => { config.daemon.relay.publicEndpoint = 'relay.woowtech.io:443'; });
+  await assert.rejects(pair(), { code: 'PAIRING_TARGET_MISMATCH' });
+  relayEdit(config => { config.daemon.relay.publicEndpoint = 'relay.paseo.sh:443'; config.daemon.relay.publicUseTls = false; });
+  await assert.rejects(pair(), { code: 'PAIRING_TARGET_MISMATCH' });
+  relayEdit(config => { config.daemon.relay.publicUseTls = true; config.app.baseUrl = 'https://smart.woowtech.io'; });
+  await assert.rejects(pair(), { code: 'PAIRING_ORIGIN_INVALID' });
+  relayEdit(config => { config.app.baseUrl = 'https://app.paseo.sh'; });
+  assert.equal((await pair()).target, 'paseo');
+  assert.equal(readState().pairingCreatedAt !== null, true);
+  const before = readState().pairingCreatedAt;
+  await saveConnectionSettings({ target: 'apporo' }); await deactivate(); await activate();
+  process.env.FAKE_PASEO_OFFER_EXTRA = '{"minimumSecurityMode":"protected"}';
+  await assert.rejects(pair(), { code: 'PAIRING_SECURITY_UNSUPPORTED' });
+  delete process.env.FAKE_PASEO_OFFER_EXTRA;
+  assert.equal((await pair()).target, 'apporo');
+  assert.notEqual(readState().pairingCreatedAt, before);
+});
+
+test('pairing never takes the runtime lock an activation holds for minutes', async t => {
+  const p = profile(t);
+  await activate();
+  const { withRuntimeLock } = await import('../src/state.mjs');
+  let release; const blocked = new Promise(resolve => { release = resolve; });
+  let entered; const held = new Promise(resolve => { entered = resolve; });
+  const operation = withRuntimeLock(async () => { entered(); await blocked; });
+  await held;
+  const started = Date.now();
+  assert.equal((await pair()).target, 'paseo');
+  assert.ok(Date.now() - started < 5000, 'rc.9 paired without the lock; so does this');
+  release(); await operation;
+});
+
+test('an offer left in pairing.private.json by an older release is removed at the next start, and only a regular file', async t => {
+  const p = profile(t);
+  fs.mkdirSync(p.loc.stateDir, { recursive: true });
+  const leftover = path.join(p.loc.stateDir, 'pairing.private.json');
+  fs.writeFileSync(leftover, '{"url":"https://app.paseo.sh/#offer=OLD-BEARER-CREDENTIAL","createdAt":"x"}');
+  await activate();
+  assert.equal(fs.existsSync(leftover), false);
+  await deactivate();
+  // A link of that name is not ours to follow or remove.
+  const elsewhere = path.join(p.f.dir, 'elsewhere.json');
+  fs.writeFileSync(elsewhere, 'precious');
+  fs.symlinkSync(elsewhere, leftover);
+  await activate();
+  assert.equal(fs.readFileSync(elsewhere, 'utf8'), 'precious');
+  assert.equal(fs.lstatSync(leftover).isSymbolicLink(), true);
+  await deactivate();
+});

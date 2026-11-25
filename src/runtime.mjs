@@ -15,7 +15,7 @@ import {usingAcceptanceAgent,usingAcceptanceWorkspace} from './acceptance-agent.
 import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,patchInstalledRuntime,RUNTIME_REVISION} from './runtime-layout.mjs';
 import {demonstrablyReusedPid,linuxContainerIdentity,instanceFromPreviousContainer} from './daemon-identity.mjs';
 import {managedFeatures} from './daemon-config.mjs';
-import {CONNECTION_TARGETS,DEFAULT_TARGET,connectionTarget,selectedTarget,saveSelectedTarget,targetConfiguration} from './connection-targets.mjs';
+import {CONNECTION_TARGETS,DEFAULT_TARGET,connectionTarget,selectedTarget,saveSelectedTarget,targetConfiguration,targetPairUrl} from './connection-targets.mjs';
 export { locations, readState, updateState } from './state.mjs';
 export const PASEO_VERSION = '0.11.2';
 const PROVIDERS = ['hermes', 'claude', 'codex', 'pi'];
@@ -202,6 +202,7 @@ export async function activate(options = {}) {
       if (Number(process.versions.node.split('.')[0]) < 22) throw new RuntimeError('NODE_VERSION_UNSUPPORTED');
       // A damaged choice stops here, before minutes of npm; the target is read again where it is applied.
       selectedTarget(locations());
+      removePairingFile(locations());
       await installRuntime();
       let existing = await currentInstance(); const launchers = await detectLaunchers({ installMissing: false });
       if (existing) {
@@ -299,7 +300,7 @@ async function readStatus() {
   // unattended recovery accepts only 'not_installed' / 'stopped'.
   const stalled = ['running', 'installing', 'starting'].includes(state.phase);
   const phase = stalled && !daemon.running ? 'stopped' : state.phase || 'not_installed';
-  return { installed, version: installed ? PASEO_VERSION : null, enabled: state.desiredEnabled === true, phase, daemon, providers, chatVerified: state.acceptance?.passed === true, pairingAvailable: fs.existsSync(path.join(locations().stateDir, 'pairing.private.json')), diagnosticCode,
+  return { installed, version: installed ? PASEO_VERSION : null, enabled: state.desiredEnabled === true, phase, daemon, providers, chatVerified: state.acceptance?.passed === true, pairingAvailable: typeof state.pairingCreatedAt === 'string', diagnosticCode,
     selectedTarget: target, activeTarget: daemon.running ? activeTarget : null, configurationPending: configurationPending(state, daemon.running ? activeTarget : undefined, target), state };
 }
 export async function diagnose() {
@@ -330,20 +331,23 @@ async function readModels(provider) {
     return { ...safeProvider(entry || { provider, status: 'unknown' }), models: (result.models || []).map(model => ({ id: model.id, label: model.label || model.id, isDefault: model.isDefault === true, defaultThinkingOptionId: model.defaultThinkingOptionId || null, thinkingOptions: (model.thinkingOptions || []).map(option => ({ id: option.id, label: option.label || option.id, isDefault: option.isDefault === true })) })) };
   }, 150000);
 }
-async function relayOffer() {
+/** A pairing offer from the running daemon for `target` only. Throws unless it is that target's app, relay and TLS. */
+async function relayOffer(target = selectedTarget(locations())) {
   const offer = await cli(['daemon', 'pair', '--relay'], { timeoutMs: 15000 });
   if (!offer.url || !offer.relayEnabled) throw new RuntimeError('PAIRING_UNAVAILABLE');
-  const url = new URL(offer.url); if (url.protocol !== 'https:' || url.hostname !== 'app.paseo.sh') throw new RuntimeError('PAIRING_ORIGIN_INVALID');
-  return offer;
+  return { relayEnabled: true, url: targetPairUrl(offer.url, target), target };
 }
+/**
+ * The selected target's pairing link, lock-free (the daemon is only asked for it) and never stored: the offer
+ * is a bearer credential, so it goes to the caller and nowhere else. Only that it was made is recorded.
+ */
 export async function pair() {
   const target = selectedTarget(locations());
   const result = await status(); if (!result.daemon.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
   // A saved target is not offered until the daemon has been stopped and started with it.
   if (result.configurationPending || result.activeTarget !== target) throw new RuntimeError('CONFIGURATION_PENDING');
-  const offer = await relayOffer();
-  const pairing = { url: offer.url, createdAt: new Date().toISOString() };
-  atomicJson(path.join(locations().stateDir, 'pairing.private.json'), pairing);
+  const offer = await relayOffer(target);
+  const pairing = { url: offer.url, target, createdAt: new Date().toISOString() };
   updateState({ pairingCreatedAt: pairing.createdAt });
   return pairing;
 }

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CONNECTION_TARGETS, DEFAULT_TARGET, connectionTarget, selectedTarget, saveSelectedTarget, targetConfiguration } from '../src/connection-targets.mjs';
+import { CONNECTION_TARGETS, DEFAULT_TARGET, connectionTarget, selectedTarget, saveSelectedTarget, targetConfiguration, targetPairUrl } from '../src/connection-targets.mjs';
 import { locations, readState, updateState } from '../src/state.mjs';
 import { runtimeDirectory } from '../src/runtime-layout.mjs';
 import { saveConnectionSettings } from '../src/runtime.mjs';
@@ -247,5 +247,49 @@ test('switching from one target to another overwrites a custom relay and app URL
     const config = targetConfiguration(custom, target.id);
     assert.equal(config.app.baseUrl, target.appUrl);
     assert.deepEqual([config.daemon.relay.endpoint, config.daemon.relay.useTls], [target.relayEndpoint, true]);
+  }
+});
+
+const offerFor = (target, patch = {}) => ({ v: 2, serverId: 'srv_test12345678', daemonPublicKeyB64: 'test-public-key', relay: { endpoint: target.relayEndpoint, useTls: true }, ...patch });
+const fragmentFor = offer => '#offer=' + Buffer.from(JSON.stringify(offer)).toString('base64url');
+
+test('pairing links keep the offer exactly and name only the target\'s app, relay and TLS', () => {
+  for (const target of CONNECTION_TARGETS) {
+    const hash = fragmentFor(offerFor(target));
+    assert.equal(targetPairUrl(target.appUrl + '/' + hash, target.id), target.appUrl + '/' + hash);
+    assert.equal(targetPairUrl(target.appUrl + ':443/' + hash, target.id), target.appUrl + '/' + hash, 'the default port is the same origin');
+    for (const url of [target.appUrl + '.evil/' + hash, target.appUrl + '/welcome' + hash, target.appUrl + '/?redirect=evil' + hash,
+      target.appUrl.replace('https:', 'http:') + '/' + hash, target.appUrl + '/#opaque', 'https://user@' + target.appUrl.slice(8) + '/' + hash,
+      target.appUrl + ':444/' + hash, target.appUrl + '/' + hash + ' ', target.appUrl + '/' + hash + '\n', 'javascript:alert(1)', 'not a url', '', 42, null, undefined,
+      target.appUrl + '/#offer=' + 'A'.repeat(20000)]) {
+      assert.throws(() => targetPairUrl(url, target.id), { code: 'PAIRING_ORIGIN_INVALID' }, String(url).slice(0, 80));
+    }
+    for (const other of CONNECTION_TARGETS.filter(row => row.id !== target.id)) {
+      assert.throws(() => targetPairUrl(target.appUrl + '/' + hash, other.id), { code: 'PAIRING_ORIGIN_INVALID' }, `${target.id} link for ${other.id}`);
+    }
+    assert.throws(() => targetPairUrl(target.appUrl + '/' + hash, 'custom'), { code: 'INVALID_TARGET' });
+  }
+});
+
+test('an offer must be a version 2 offer for this daemon, on the target\'s relay with TLS', () => {
+  for (const target of CONNECTION_TARGETS) {
+    const link = patch => target.appUrl + '/' + fragmentFor(offerFor(target, patch));
+    for (const relay of [{ endpoint: 'other.example:443', useTls: true }, { endpoint: target.relayEndpoint, useTls: false }, { endpoint: target.relayEndpoint },
+      { endpoint: target.relayEndpoint, useTls: 'true' }, { useTls: true }, null, 'relay', ...CONNECTION_TARGETS.filter(row => row.id !== target.id).map(row => ({ endpoint: row.relayEndpoint, useTls: true }))]) {
+      assert.throws(() => targetPairUrl(link({ relay }), target.id), { code: 'PAIRING_TARGET_MISMATCH' }, JSON.stringify(relay));
+    }
+    for (const patch of [{ v: 1 }, { v: '2' }, { v: undefined }, { serverId: '' }, { serverId: 7 }, { serverId: undefined }, { daemonPublicKeyB64: '' }, { daemonPublicKeyB64: null }, { daemonPublicKeyB64: undefined }]) {
+      assert.throws(() => targetPairUrl(link(patch), target.id), { code: 'PAIRING_TARGET_MISMATCH' }, JSON.stringify(patch));
+    }
+    for (const hash of ['#offer=e30', '#offer=bnVsbA', '#offer=NQ', '#offer=W10']) assert.throws(() => targetPairUrl(target.appUrl + '/' + hash, target.id), { code: 'PAIRING_TARGET_MISMATCH' }, hash);
+    for (const hash of ['#offer=bm90LWpzb24', '#offer=_-_-']) assert.throws(() => targetPairUrl(target.appUrl + '/' + hash, target.id), { code: 'PAIRING_OFFER_INVALID' }, hash);
+  }
+});
+
+test('an offer that demands a minimum security mode is refused for the Smart apps and passes for Paseo', () => {
+  for (const target of CONNECTION_TARGETS) {
+    const demanding = target.appUrl + '/' + fragmentFor(offerFor(target, { minimumSecurityMode: 'protected' }));
+    if (target.id === 'paseo') assert.equal(targetPairUrl(demanding, 'paseo'), demanding);
+    else assert.throws(() => targetPairUrl(demanding, target.id), { code: 'PAIRING_SECURITY_UNSUPPORTED' }, target.id);
   }
 });
