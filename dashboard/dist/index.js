@@ -11,6 +11,18 @@
   const PAUSED = new Set(["disabled", "paused", "stopped", "stopping"]);
   const COMPANIONS = new Set(["claude", "codex", "pi"]);
   const AVAILABLE = new Set(["ready", "available", "installed", "authenticated", "auth_required", "login_required"]);
+  // The connection targets: fixed official web apps, mirrored from src/connection-targets.mjs and hermes_paseo.py
+  // (tests/target-parity.test.mjs fails when the three copies drift). A pairing link is shown only for the saved
+  // target's exact origin, and no link is built from anything the backend sends. The page lists them in this order.
+  const TARGETS = [
+    { id: "woowtech", label: "Woowtech Smart", origin: "https://smart.woowtech.io" },
+    { id: "apporo", label: "Apporo Smart", origin: "https://smart.apporo.ai" },
+    { id: "paseo", label: "Paseo", origin: "https://app.paseo.sh" }
+  ];
+  const DEFAULT_TARGET = "paseo";
+  function knownTarget(id) { return TARGETS.some(row => row.id === id); }
+  // An unknown id is the default, named; it is never another row by position.
+  function targetOf(id) { return TARGETS.find(row => row.id === id) || TARGETS.find(row => row.id === DEFAULT_TARGET); }
   let markers = { started: [], guided: [], paused: false };
   try {
     const saved = JSON.parse(window.sessionStorage.getItem(STORAGE));
@@ -52,11 +64,11 @@
     })[error && error.code] || "無法完成操作，請稍後重試。";
   }
   // authedFetch keeps host authentication without logging response bodies (pairing secrets).
-  async function request(path, method, signal) {
+  async function request(path, method, signal, body) {
     const init = { method: method || "GET", credentials: "same-origin", cache: "no-store", signal };
     if (method === "POST") {
       init.headers = { "Content-Type": "application/json" };
-      init.body = "{}";
+      init.body = body ? JSON.stringify(body) : "{}";
     }
     try {
       if (typeof SDK.authedFetch === "function") {
@@ -107,6 +119,11 @@
       acceptanceJob: Object.prototype.hasOwnProperty.call(value, "acceptanceJob") ? normalizeJob(value.acceptanceJob) : undefined,
       diagnosticCode: typeof value.diagnosticCode === "string" ? value.diagnosticCode : null,
       daemon: { running: value.daemon.running, reachable: value.daemon.reachable },
+      // An older backend still loaded after a plugin update reports no target: the page then stays Paseo-only.
+      targetSupported: typeof value.selectedTarget === "string",
+      selectedTarget: knownTarget(value.selectedTarget) ? value.selectedTarget : DEFAULT_TARGET,
+      activeTarget: knownTarget(value.activeTarget) ? value.activeTarget : null,
+      configurationPending: value.configurationPending === true,
       providers: value.providers.filter(row => row && typeof row.provider === "string").map(row => ({
         provider: row.provider, label: text(row.label, row.provider), status: row.status,
         available: row.available, installed: row.installed
@@ -117,7 +134,7 @@
   }
   const subscribers = new Set();
   const modelReads = new Set();
-  let state = { status: null, reading: false, busy: null, stopping: false, error: null, readError: null, pairUrl: null, acceptance: null, acceptanceJob: null, acceptanceUncertain: false };
+  let state = { status: null, reading: false, busy: null, stopping: false, error: null, readError: null, pairUrl: null, targetDraft: null, acceptance: null, acceptanceJob: null, acceptanceUncertain: false };
   let pollTimer = null;
   let statusFlight = null;
   let revision = 0;
@@ -210,8 +227,12 @@
         // but a status read during submission may still describe the previous job.
         const acceptance = result.acceptanceJob !== undefined && (state.busy !== "acceptance" || markers.paused)
           ? jobPatch(result.acceptanceJob) : {};
+        // A link belongs to the target it was made for, and only while that target is applied. An unsaved choice
+        // (the draft) is the user's and survives every poll; it ends when the saved target becomes the same.
+        const sameTarget = !state.status || state.status.selectedTarget === result.selectedTarget;
         publish(Object.assign(acceptance, { status: result, readError: null,
-          pairUrl: result.enabled && !pausedStatus(result) ? state.pairUrl : null }));
+          targetDraft: state.targetDraft === result.selectedTarget ? null : state.targetDraft,
+          pairUrl: result.enabled && !pausedStatus(result) && sameTarget && !result.configurationPending ? state.pairUrl : null }));
         maybeGuide(result);
         maybeStart(result);
       } catch (error) {
@@ -252,7 +273,7 @@
         startAttempted = false;
         resuming = false;
         recoveryAttempted = false;
-        publish({ status: null, readError: null, error: null, pairUrl: null, acceptance: null, acceptanceJob: null,
+        publish({ status: null, readError: null, error: null, pairUrl: null, targetDraft: null, acceptance: null, acceptanceJob: null,
           acceptanceUncertain: state.acceptanceUncertain || jobPending(state.acceptanceJob) || state.busy === "acceptance" });
       } else schedule();
     };
@@ -262,18 +283,28 @@
     useEffect(() => subscribe(kind, setSnapshot), [kind]);
     return snapshot;
   }
-  function validPairUrl(value) {
-    if (!value || typeof value.url !== "string") throw fault("PAIR");
+  function validPairUrl(value, target) {
+    if (!value || typeof value.url !== "string" || value.url.length > 16384 || /[\s\\]/.test(value.url) ||
+        (value.target !== undefined && value.target !== target)) throw fault("PAIR");
     let url;
     try { url = new URL(value.url); } catch (_) { throw fault("PAIR"); }
-    if (url.origin !== "https://app.paseo.sh" || url.username || url.password) throw fault("PAIR");
+    if (url.origin !== targetOf(target).origin || url.username || url.password || url.pathname !== "/" || url.search ||
+        !/^#offer=[A-Za-z0-9_-]+$/.test(url.hash)) throw fault("PAIR");
     return url.href;
+  }
+  function chooseTarget(value) {
+    if (!knownTarget(value) || !state.status) return;
+    publish({ targetDraft: value === state.status.selectedTarget ? null : value, pairUrl: null });
   }
   async function action(name) {
     const status = state.status;
     if (!activated(status) || (name === "stop" ? state.stopping : state.busy || state.stopping)) return;
     if (name === "acceptance" && (jobPending(state.acceptanceJob) || state.acceptanceUncertain || state.readError || dashboardReloading)) return;
     if (["pair", "acceptance"].includes(name) && (!status.daemon.reachable || markers.paused || PAUSED.has(status.phase))) return;
+    // A saved target applies only after the daemon was stopped and started with it; an unsaved one never pairs.
+    if (name === "pair" && (status.configurationPending || state.targetDraft)) return;
+    const target = name === "config" ? state.targetDraft : null;
+    if (name === "config" && (!target || target === status.selectedTarget)) return;
     if (name === "start" || name === "stop") {
       markers.paused = name === "stop";
       resuming = name === "start";
@@ -288,11 +319,17 @@
       { busy: name, error: null, acceptance: name === "acceptance" ? null : state.acceptance,
         acceptanceJob: name === "acceptance" ? null : state.acceptanceJob,
         // Until a receipt arrives, a lost response must never unlock a duplicate paid submission.
-        acceptanceUncertain: name === "acceptance" || state.acceptanceUncertain, pairUrl: name === "pair" || name === "start" ? null : state.pairUrl });
+        acceptanceUncertain: name === "acceptance" || state.acceptanceUncertain,
+        pairUrl: ["pair", "start", "config"].includes(name) ? null : state.pairUrl });
     try {
-      const result = await request("/" + name, "POST");
+      const result = await request("/" + name, "POST", undefined, target ? { target } : undefined);
       if (actionRevision !== revision) return;
-      if (name === "pair" && pageMounted() && visible()) publish({ pairUrl: validPairUrl(result) });
+      if (name === "pair" && pageMounted() && visible()) publish({ pairUrl: validPairUrl(result, status.selectedTarget) });
+      if (name === "config") {
+        // Show the saved choice at once instead of the old one until the next read; that read has the last word.
+        const saved = result && result.saved === true && result.target === target;
+        publish({ targetDraft: null, status: saved && state.status ? Object.assign({}, state.status, { selectedTarget: target, configurationPending: result.configurationPending === true }) : state.status });
+      }
       if (name === "acceptance") {
         if (result && Object.prototype.hasOwnProperty.call(result, "phase")) publish(jobPatch(normalizeJob(result)));
         else publish({ acceptance: normalizeAcceptance(result), acceptanceJob: null, acceptanceUncertain: false });
@@ -534,6 +571,12 @@
       completed: !job.result ? "驗收已結束，但未取得有效結果，尚未確認通過。請重新檢查狀態。" : null
     })[job.phase];
     const errors = Array.from(new Set([snapshot.readError, snapshot.error].filter(Boolean)));
+    const saved = targetOf(status && status.selectedTarget);
+    const draft = snapshot.targetDraft && knownTarget(snapshot.targetDraft) ? snapshot.targetDraft : saved.id;
+    const targetDirty = draft !== saved.id;
+    const pending = !!(status && status.configurationPending);
+    // A saved target waits for a stop and start, and an unsaved one has not been saved: neither pairs.
+    const pairBlocked = pending || targetDirty;
     return h("div", { className: "hermes-paseo hp-page", lang: "zh-Hant" },
       h("header", { className: "hp-title" }, h("div", null, h("p", { className: "hp-eyebrow" }, "HERMES × PASEO"),
         h("h1", null, "把 Hermes 帶到 Paseo"), h("p", { className: "hp-muted" }, "完成服務啟動與官方配對，再從其他裝置繼續對話。")),
@@ -551,7 +594,7 @@
           h("li", { "data-done": !!(status && (status.daemon.running || ["starting", "running", "ready", "restart_required"].includes(status.phase))) }, "安裝執行環境"),
           h("li", { "data-done": !!(status && status.daemon.running) }, "啟動服務"),
           h("li", { "data-done": reachable }, "確認連線")),
-        status && status.phase === "restart_required" && h("p", { className: "hp-error" }, "Paseo 執行環境需要重啟。請先停止，再恢復服務。"),
+        status && status.phase === "restart_required" && !pending && h("p", { className: "hp-error" }, "Paseo 執行環境需要重啟。請先停止，再恢復服務。"),
         h("div", { className: "hp-actions" },
           button(snapshot.stopping ? "正在停止…" : "停止服務", () => void action("stop"), !enabled || snapshot.stopping || dashboardReloading || (paused && !status.daemon.running), true),
           button(snapshot.busy === "start" ? "正在啟動…" : paused ? "恢復服務" : "重新啟動／重試", () => void action("start"),
@@ -560,12 +603,26 @@
         h("p", { className: "hp-muted hp-small" }, "頁面約每 2 秒檢查一次，頁首約每 5 秒檢查。分頁隱藏時暫停讀取；已送出的操作仍由服務處理。")),
       h("section", { className: "hp-card hp-pair", "aria-label": "配對精靈" },
         h("h2", null, "2. 配對精靈"),
-        h("p", null, "啟用後配對精靈會自動顯示。服務就緒後產生連結，再親自點擊開啟 Paseo 官方網站並綁定這台主機。"),
+        h("p", null, "啟用後配對精靈會自動顯示。選擇連線標的並儲存，服務就緒後產生連結，再親自點擊開啟該標的的官方網站並綁定這台主機。"),
+        status && status.targetSupported && h("div", { className: "hp-target" },
+          h("label", { className: "hp-field" }, h("span", null, "連線標的"),
+            h("select", { value: draft, onChange: event => chooseTarget(event.target.value), disabled: !enabled || busy },
+              TARGETS.map(row => h("option", { key: row.id, value: row.id }, row.label)))),
+          h("div", { className: "hp-actions" },
+            button(snapshot.busy === "config" ? "正在儲存…" : "儲存連線標的", () => void action("config"), !enabled || busy || !targetDirty, true),
+            h("a", { className: "hp-button hp-secondary", href: saved.origin + "/", target: "_blank",
+              rel: "noopener noreferrer", referrerPolicy: "no-referrer" }, "開啟 " + saved.label))),
+        targetDirty && h("p", { className: "hp-muted", role: "status" }, "連線標的尚未儲存；儲存後才能產生 " + targetOf(draft).label + " 的配對連結。"),
+        pending && h("div", { className: "hp-notice", role: "status" },
+          h("p", null, "標的已儲存，停止再啟動服務後生效。"),
+          h("p", { className: "hp-small" }, status.daemon.running
+            ? "目前的服務仍是舊標的：請先結束使用中的對話，按「停止服務」，待停止完成再按「恢復服務」，之後重新產生「" + saved.label + "」的配對連結。已配對的裝置不會被撤銷，切回原標的後仍可使用。"
+            : "新的連線標的「" + saved.label + "」會在下次啟動服務時套用。")),
         !reachable && h("p", { className: "hp-muted" }, paused ? "確認停止完成並恢復服務後，即可配對。" : "正在等待服務就緒，無須允許自動彈出視窗。"),
-        button(snapshot.busy === "pair" ? "正在產生連結…" : snapshot.pairUrl ? "重新產生配對連結" : "產生配對連結", () => void action("pair"), !reachable || busy || !!snapshot.readError),
+        button(snapshot.busy === "pair" ? "正在產生連結…" : snapshot.pairUrl ? "重新產生配對連結" : "產生配對連結", () => void action("pair"), !reachable || busy || !!snapshot.readError || pairBlocked),
         snapshot.pairUrl && h("a", { className: "hp-button hp-link", href: snapshot.pairUrl, target: "_blank",
-          rel: "noopener noreferrer", referrerPolicy: "no-referrer" }, "開啟 Paseo 官方網站並綁定"),
-        h("p", { className: "hp-muted hp-small" }, "連結僅顯示在本頁，離開或隱藏分頁後會清除。配對連結可能授予存取權，請勿分享。")),
+          rel: "noopener noreferrer", referrerPolicy: "no-referrer" }, "使用配對連結開啟 " + saved.label),
+        h("p", { className: "hp-muted hp-small" }, "配對連結只適用於 " + saved.label + "，僅顯示在本頁，離開或隱藏分頁後會清除。配對連結可能授予存取權，請勿分享。")),
       status && h(ModelSelectors, { status, blocked: paused || busy || !!snapshot.readError }),
       h("section", { className: "hp-card", "aria-label": "真實對話驗收" },
         h("h2", null, "4. 真實對話驗收"),

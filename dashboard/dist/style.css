@@ -31,6 +31,9 @@
 .hermes-paseo .hp-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .hermes-paseo .hp-field { display: flex; flex-direction: column; gap: 6px; font-size: 14px; min-width: 0; }
 .hermes-paseo select { width: 100%; min-width: 0; min-height: 44px; font: inherit; padding: 8px 10px; color: var(--hp-fg); background: var(--hp-bg); border: 1px solid var(--hp-border); border-radius: 8px; text-overflow: ellipsis; }
+.hermes-paseo .hp-target { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px 16px; margin: 0 0 14px; }
+.hermes-paseo .hp-notice { border-inline-start: 3px solid var(--hp-accent); padding-inline-start: 12px; margin: 0 0 14px; }
+.hermes-paseo .hp-notice p { margin: 0 0 6px; }
 .hermes-paseo .hp-progress { display: flex; flex-wrap: wrap; gap: 12px 30px; padding-inline-start: 24px; margin: 0 0 20px; color: var(--hp-muted); font-size: 14px; }
 .hermes-paseo .hp-progress li[data-done="true"] { color: var(--hp-accent); font-weight: 650; }
 .hermes-paseo .hp-error { border: 1px solid var(--color-destructive, #b34c4c); color: var(--hp-fg); border-radius: 8px; padding: 14px; margin: 0 0 16px; overflow-wrap: anywhere; }
@@ -45,6 +48,7 @@
 @media (max-width: 640px) {
   .hermes-paseo .hp-title { flex-direction: column; }
   .hermes-paseo .hp-fields { grid-template-columns: minmax(0, 1fr); }
+  .hermes-paseo .hp-target { grid-template-columns: minmax(0, 1fr); }
   .hermes-paseo .hp-link { margin-inline-start: 0; display: flex; }
   .hermes-paseo .hp-actions .hp-button { flex: 1 1 110px; }
   .hermes-paseo .hp-header-status { display: none; }
