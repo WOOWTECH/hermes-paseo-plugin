@@ -45,7 +45,7 @@ node "$HERMES_HOME/plugins/hermes-paseo/bin/control.mjs" relay <<< '{}'
 
 ## 發佈新版與 PaaS 自動更新
 
-啟用 Hermes chart 的 `paseoAutoUpdate`（0.4.3 起含回滾）的 PaaS 服務，每天在排程時間檢查本 repo **最新已發布的 release**，符合以下全部條件才安裝；任何一項不符就拒絕（Job 顯示失敗，外掛不動）：
+啟用 Hermes chart 的 `paseoAutoUpdate`（0.4.3 起含回滾）的 PaaS 服務，每天在排程時間檢查本 repo **版本號最高的已發布 release**（`latest_release()`：只排除草稿，預發布也算；見下方的[艦隊凍結警告](#艦隊凍結警告不要為-020-rc1-建立-github-release)），符合以下全部條件才安裝；任何一項不符就拒絕（Job 顯示失敗，外掛不動）：
 
 - release 的 commit 在 `main` 上，且 `Unit tests`、`Browser`（各兩組）與 `Locked dependency audit` 五項檢查**每項最新一輪**都成功。
 - `host/` 的四個主機轉接檔逐位元組不變；`plugin.yaml` 除 `version` 行外不變，且 `version` 等於 tag；`package.json` 沒有相依套件。
@@ -54,9 +54,36 @@ node "$HERMES_HOME/plugins/hermes-paseo/bin/control.mjs" relay <<< '{}'
 發 release 時請注意：
 
 1. **tag 一推就會再跑一輪 CI**（約 1–2 分鐘；Chromium 安裝偶爾卡住，要重跑）。這段時間排程剛好執行，會因為檢查還沒全綠而拒絕，不計入失敗次數，隔天再試。要立刻更新時，先等這一輪綠燈。
-2. 變更 `host/`、`plugin.yaml` 能力、新增相依套件，或變更 `runtime/package.json`／lockfile 的版本不會被自動安裝（後者回報 `dependency_manifest_changed`），需要另外發 chart／HA 映像或由管理者協調。0.2.0-rc.1 把 Paseo 升到 0.17.4，屬於最後一種，見下節。
+2. 變更 `host/`、`plugin.yaml` 能力、新增相依套件，或變更 `runtime/package.json`／lockfile 的版本不會被自動安裝（後者回報 `dependency_manifest_changed`），需要另外發 chart／HA 映像或由管理者協調。0.2.0-rc.1 把 Paseo 升到 0.17.4，屬於最後一種。**這類閘門失敗不計入失敗次數**，後果見下節。
 3. 更新後若重載的 Dashboard、daemon 或 Plugin Doctor 不健康，更新器會自動裝回上一版、重啟 daemon 並再重載一次，Job 仍標示失敗以便察覺；失敗的版本只重試一次，之後要等更新的 release。
 4. 多台服務各自排程、互不把關。要先在專用服務驗證時：暫停其他服務的 CronJob（`spec.suspend: true`），在專用服務以 `kubectl create job --from=cronjob/<名稱>` 手動執行並驗證，通過後再逐台執行並恢復排程。rc.6 就是這樣發佈的。
+
+### 艦隊凍結警告：不要為 0.2.0-rc.1 建立 GitHub Release
+
+PaaS 更新器（chart 0.4.9 的 `charts/hermes-agent/files/paseo-auto-update.py`）每天取**版本號最高的已發布 GitHub Release**：`latest_release()` 列出本 repo 的 releases，排除草稿（draft）與沒有發布時間的項目，只認 `vMAJOR.MINOR.PATCH` 或 `vMAJOR.MINOR.PATCH-rc.N` 形式的標籤，**預發布（pre-release）一樣算**，再取版本號最大者。它不會「挑通過閘門的最新版」，也不會往下找較舊的版本。後果：
+
+- 本版改了 `runtime/package-lock.json`，在 `validate_candidate` 以 `dependency_manifest_changed` 失敗（`runtime/package.json` 與 lockfile 必須與已安裝版本逐位元組相同）。
+- 閘門失敗發生在安裝之前，**不計入失敗次數**：失敗次數（`failed_attempts`，達 2 次就跳過該版本）只在安裝或健康檢查失敗時累加。所以每個啟用 `paseoAutoUpdate` 的服務，CronJob 每天都對同一個版本失敗，不會「重試一次後放棄」。
+- 因為永遠取最高版本，之後的 0.1.x 熱修（例如 `v0.1.5`）的版本號比 `v0.2.0-rc.1` 低，**永遠不會被評估或採用**。整個艦隊被凍結在 rc.9：Job 每天失敗，連安全修補也進不去。
+
+在 chart／更新器接受新 runtime 之前（放行 `runtime/` 變更，並依下節給 `prepare`、`stop` 足夠的時間）：
+
+- **只推 git tag，不建立 GitHub Release**。沒有 Release 的 tag 不在 releases 清單中，更新器看不見（草稿同樣看不見）。也可以先不打 tag，以 commit SHA 做 canary。
+- 若已經誤發：把該 Release 改回草稿或刪除它（不必刪 tag）；更新器下一次執行就回到原本的最高版本，不需要其他處理。
+- 要在專用服務驗證時，手動安裝指定的 commit（更新器自己也是用這個指令安裝已驗證的 commit）：
+
+  ```bash
+  hermes plugins install WOOWTECH/hermes-paseo-plugin --ref <commit SHA> --force --enable
+  ```
+
+  `--force` 覆蓋的是插件目錄 `plugins/hermes-paseo`；狀態與 daemon 資料在 `plugin-data/hermes-paseo`，不在其中。裝完重載 Dashboard：舊 daemon 繼續服務，背景自動準備新版；確認狀態的 `installed` 與 `configCheck.ok` 後，結束使用中的對話，再按「停止服務」與「恢復服務」。更新器的帳本記錄了已安裝的 commit，手動換成別的 commit 之後，它會回報 `installed_revision_drift`（Job 失敗，但不改動外掛）；所以請在**沒有啟用更新器**的服務做 canary，或先暫停該服務的 CronJob（`spec.suspend: true`），做完再裝回原本的 commit。
+
+### 更新器的時間限制
+
+更新器的 `control()` 對每個動作（`status`、`start`、`stop`，日後也包括 `prepare`）整體只給 **45 秒**，逾時就殺掉該次 `node bin/control.mjs`。這對 0.17.4 有兩個影響：
+
+- **停止**：0.17.4 停止時最多等 worker 約 10 秒、每個終端機約 5＋3 秒，再加上等待 supervisor 結束（插件上限 45 秒）；整個 `control stop` 的總時間可能超過 45 秒而被更新器砍掉。被砍時 Job 失敗、`pending` 留在帳本；下次執行的 `reconcile` 若發現 daemon 沒在執行會重新啟動它，但更新沒有套用。
+- **準備與啟動**：首次下載約 400 MB，`prepare`（上限 480 秒）與 `start` 都放不進 45 秒。更新器要先改成給 `prepare` 至少 480 秒、給 `stop` 至少 60 秒（建議與橋接層一致的 120 秒），才適合放行本版。
 
 ## 0.2.0-rc.1 升級、退回與 Paseo 0.17.4
 

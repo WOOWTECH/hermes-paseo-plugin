@@ -44,7 +44,7 @@ Gitea 原始碼鏡像：<https://git-prod.woowtech.io/mirror/hermes-paseo-plugin
 
 - **退回 rc.9**：rc.9 可停止 0.17.4 daemon 並以 0.11.2 重新啟動（已實測）。但 0.17.4 會把代理紀錄的 `config.featureValues` 改寫成 `controls`，退回後這些代理選項（例如思考等級）會遺失、需重新選擇；選了 Smart 標的時要先切回 Paseo。
 - **0.17.4 新預設，插件維持原樣不覆寫**：`agents.idleRuntimeCleanup` 會在代理閒置 60 分鐘後關閉其執行環境，下次訊息再啟動接續；`daemon.usage.enabled` 讓內建 Claude／Codex 用量來源讀取 `~/.claude/.credentials.json`、`~/.codex/auth.json` 並呼叫 Anthropic／ChatGPT 用量 API（0.11.2 已內含、只是沒有開關）。不寫入的原因：0.11.2 的嚴格設定不認得這兩個鍵，寫入後就無法退回 rc.9。
-- **停止**：0.17.4 停止時最多等 worker 約 10 秒、每個終端機約 5＋3 秒，並以 procps `ps` 清理終端機程序；插件的停止上限為 45 秒（bridge 120 秒）。PaaS 的自動更新器（chart 0.4.7–0.4.9）只接受 `runtime/` 位元組不變的版本，會以 `dependency_manifest_changed` 拒絕本版，需另外協調；`host/` 主機轉接檔沒有變更，HA 不需要新的附加元件版本。退回、0.17.4 的新預設與停止時間等細節見 [維運](docs/operations.zh-TW.md#020-rc1-升級退回與-paseo-0174)。
+- **停止**：0.17.4 停止時最多等 worker 約 10 秒、每個終端機約 5＋3 秒，並以 procps `ps` 清理終端機程序；插件的停止上限為 45 秒（bridge 120 秒）。PaaS 的自動更新器（chart 0.4.9）取版本號最高的已發布 Release，且只接受 `runtime/` 位元組不變的版本：本版會以 `dependency_manifest_changed` 失敗，這個失敗不計入重試次數，所以**不要為本版建立 GitHub Release（含預發布）**，否則每台啟用更新的服務每天都失敗，之後的 0.1.x 熱修也永遠不會被採用；chart 放行之前只推 tag，做法與手動安裝指定 commit 的 canary 見[維運](docs/operations.zh-TW.md#艦隊凍結警告不要為-020-rc1-建立-github-release)。更新器對每個 `control` 動作（含 `stop`）整體只給 45 秒，見[維運](docs/operations.zh-TW.md#更新器的時間限制)。`host/` 主機轉接檔沒有變更，HA 不需要新的附加元件版本。退回、0.17.4 的新預設與停止時間等細節見 [維運](docs/operations.zh-TW.md#020-rc1-升級退回與-paseo-0174)。
 
 目前為公開預覽版本。部署到正式環境前，請在自己的主機完成 Web 安裝／啟用、官方配對及首輪／續聊驗收；各版本的支援範圍與驗收方式見 [實測紀錄](docs/validation.md)。
 
