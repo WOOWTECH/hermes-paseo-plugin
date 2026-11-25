@@ -9,7 +9,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { runtimeDirectory, markRuntimeReady, RUNTIME_REVISION } from '../src/runtime-layout.mjs';
-import { BRAND_SERVER_PATH, BRAND_HELPER_NAME } from '../src/brand-identity-patch.mjs';
+import { BRAND_SERVER_PATH, applyBrandIdentityPatch } from '../src/brand-identity-patch.mjs';
 import { runProcess } from '../src/process.mjs';
 import { updateState } from '../src/state.mjs';
 import { websocketServerSource } from './runtime-fixtures.mjs';
@@ -56,7 +56,7 @@ const server = process.env.FAKE_PASEO_SERVER_FILE;
 const configFile = path.join(home, 'config.json');
 fs.writeFileSync(path.join(home, 'startup-config.json'), fs.existsSync(configFile) ? fs.readFileSync(configFile) : '{}');
 if (process.env.FAKE_PASEO_TRACE) fs.appendFileSync(process.env.FAKE_PASEO_TRACE, JSON.stringify({ supervisor: process.pid, target: process.env.HERMES_PASEO_CONNECTION_TARGET ?? null,
-  serverSha256: server && fs.existsSync(server) ? createHash('sha256').update(fs.readFileSync(server)).digest('hex') : null }) + '\\n');
+  serverSha256: (() => { try { return createHash('sha256').update(fs.readFileSync(server)).digest('hex'); } catch { return null; } })() }) + '\\n');
 fs.writeFileSync(path.join(home, 'paseo.pid'), JSON.stringify({ pid: process.pid, uid: process.getuid(), startedAt: new Date().toISOString(), heartbeat: true, listen: '127.0.0.1:0' }));
 const stop = () => { try { fs.unlinkSync(path.join(home, 'paseo.pid')); } catch {} process.exit(0); };
 process.on('SIGTERM', stop); process.on('SIGINT', stop);
@@ -126,13 +126,9 @@ export async function connectToDaemon({ target }) {
 
 const write = (file, content) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, content); };
 
-/**
- * Installs the stand-in runtime where the plugin expects release `RUNTIME_REVISION`, ready (receipt written).
- * `patched` applies the brand patch as a fresh install does; without it the runtime is what rc.9 left behind.
- * Returns its root. Environment variables the stand-in reads are set on process.env and restored by `restore`.
- */
-export function seedFakeRuntime(loc, { patched = false, trace } = {}) {
-  const root = runtimeDirectory(loc), pkg = name => path.join(root, 'node_modules/@getpaseo', name);
+/** Writes the stand-in runtime's files into `root`, the way `npm ci` would install them (no receipt: the plugin writes that). */
+export function writeFakeRuntimeFiles(root, { editedServer = false } = {}) {
+  const pkg = name => path.join(root, 'node_modules/@getpaseo', name);
   write(path.join(root, 'package.json'), JSON.stringify({ name: 'hermes-paseo-managed-runtime', version: 'fake' }));
   write(path.join(pkg('cli'), 'package.json'), JSON.stringify({ name: '@getpaseo/cli', version: '0.11.2', type: 'module' }));
   write(path.join(pkg('cli'), 'bin/paseo'), cli);
@@ -142,12 +138,38 @@ export function seedFakeRuntime(loc, { patched = false, trace } = {}) {
   write(path.join(pkg('server'), 'dist/server/web-ui/index.html'), '<!doctype html>');
   write(path.join(pkg('server'), 'dist/server/server/daemon-instance.js'), instanceModule);
   write(path.join(pkg('server'), 'dist/server/server/config.js'), configModule);
-  const server = path.join(root, BRAND_SERVER_PATH);
-  write(server, websocketServerSource());
-  process.env.FAKE_PASEO_SERVER_FILE = server;
+  // `editedServer`: bytes the brand patch does not know, as an installer that produced a different build would leave.
+  write(path.join(root, BRAND_SERVER_PATH), websocketServerSource() + (editedServer ? '\n// edited after it was published\n' : ''));
+}
+
+/**
+ * Installs the stand-in runtime where the plugin expects release `RUNTIME_REVISION`, ready (receipt written), the way
+ * rc.9 left a runtime behind: the server is as published. `patched` additionally applies the brand patch, as a start for a
+ * Smart target does. Returns its root. The stand-in reads FAKE_PASEO_* variables, which the fixture restores.
+ */
+export function seedFakeRuntime(loc, { patched = false, trace } = {}) {
+  const root = runtimeDirectory(loc);
+  writeFakeRuntimeFiles(root);
+  process.env.FAKE_PASEO_SERVER_FILE = path.join(root, BRAND_SERVER_PATH);
   if (trace) process.env.FAKE_PASEO_TRACE = trace;
-  markRuntimeReady(loc, { patch: patched });
+  markRuntimeReady(loc);
+  if (patched) applyBrandIdentityPatch(root);
   return root;
+}
+
+/**
+ * Like trapNpm, but `npm ci` works: it records the call and installs the stand-in runtime into the --prefix directory, so
+ * the plugin's own fresh-install path (prepare, npm ci, version check, receipt) runs. The environment variables the
+ * stand-in needs are set here, as seedFakeRuntime does.
+ */
+export function installingNpm(dir, trace) {
+  const marker = trapNpm(dir), bin = path.join(dir, 'bin');
+  const installer = path.join(dir, 'fake-npm-install.mjs');
+  write(installer, `import { writeFakeRuntimeFiles } from ${JSON.stringify(new URL('./fake-runtime.mjs', import.meta.url).href)};\nwriteFakeRuntimeFiles(process.argv[2], { editedServer: process.env.FAKE_NPM_EDITED_SERVER === '1' });\n`);
+  write(path.join(bin, 'npm'), `#!/bin/sh\necho "$@" >> ${JSON.stringify(marker)}\nprefix=""\nwhile [ $# -gt 0 ]; do if [ "$1" = "--prefix" ]; then prefix="$2"; fi; shift; done\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(installer)} "$prefix"\n`);
+  fs.chmodSync(path.join(bin, 'npm'), 0o755);
+  if (trace) process.env.FAKE_PASEO_TRACE = trace;
+  return marker;
 }
 
 /** A PATH where npm is a trap (it records that it ran and fails) and no provider CLI exists. Returns the trap's marker file. */
@@ -174,25 +196,32 @@ export function stopFakeDaemons(loc) {
 }
 
 /**
- * Starts a daemon the way rc.9 did: from a config.json without any target setting and without a target in its
- * environment, recorded in state.json. The profile must have been activated once (and stopped), so the owner
- * marker and a complete config.json exist; what only the new code writes is taken away here: the settings of
- * a target, and the brand patch of the runtime (rc.9 installed it as published).
+ * Starts a daemon the way rc.9 did: through the CLI, without a target in its environment, from the config.json that
+ * legacy mode writes, and recorded in state.json. The profile must have been activated once (and stopped), so the
+ * owner marker and a complete config.json exist.
  */
 export async function startLegacyDaemon(loc) {
-  const server = path.join(runtimeDirectory(loc), BRAND_SERVER_PATH);
-  fs.writeFileSync(server, websocketServerSource());
-  fs.rmSync(path.join(path.dirname(server), BRAND_HELPER_NAME), { force: true });
-  const file = path.join(loc.paseoHome, 'config.json'), config = JSON.parse(fs.readFileSync(file, 'utf8'));
-  delete config.app; delete config.daemon.cors;
-  config.daemon.relay = { enabled: true };
-  fs.writeFileSync(file, JSON.stringify(config, null, 2) + '\n');
   updateState({ desiredEnabled: true });
   const env = { ...process.env, HOME: loc.home, HERMES_HOME: loc.agentDir, PASEO_HOME: loc.paseoHome, NO_COLOR: '1', HERMES_PASEO_RUNTIME_REVISION: RUNTIME_REVISION };
   delete env.HERMES_PASEO_CONNECTION_TARGET;
   const cli = path.join(runtimeDirectory(loc), 'node_modules/@getpaseo/cli/bin/paseo');
   await runProcess(process.execPath, [cli, '--home', loc.paseoHome, '--json', 'daemon', 'start', '--timeout', '90'], { env });
   const instance = JSON.parse(fs.readFileSync(path.join(loc.paseoHome, 'paseo.pid'), 'utf8'));
-  updateState({ phase: 'running', daemonPid: instance.pid, daemonStartedAt: instance.startedAt, activeTarget: undefined, configurationPending: undefined });
+  updateState({ phase: 'running', daemonPid: instance.pid, daemonStartedAt: instance.startedAt });
   return instance;
+}
+
+/** Every file under `dir` as `relative path -> mode and SHA-256` (symbolic links by their target text): a runtime's bytes, no timestamps. */
+export function treeDigest(dir) {
+  const out = {};
+  const walk = current => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = path.join(current, entry.name), relative = path.relative(dir, full);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isSymbolicLink()) out[relative] = 'link:' + fs.readlinkSync(full);
+      else out[relative] = (fs.statSync(full).mode & 0o777).toString(8) + ':' + sha256(fs.readFileSync(full));
+    }
+  };
+  walk(dir);
+  return out;
 }

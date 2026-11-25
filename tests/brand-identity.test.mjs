@@ -175,7 +175,7 @@ test('readiness stays the lock and the CLI version: an unpatched install is read
   fs.mkdirSync(path.dirname(cli), { recursive: true });
   fs.writeFileSync(cli, JSON.stringify({ version: '0.11.2' }));
   // What rc.9 left behind: installed, ready, not patched. It must never be installed again for lack of a patch.
-  markRuntimeReady(loc, { patch: false });
+  markRuntimeReady(loc);
   assert.equal(runtimeReady(loc), true);
   assert.equal(brandIdentityPatchReady(root), false);
   assert.equal(sha(fs.readFileSync(server)), ORIGINAL_BRAND_SERVER_SHA256);
@@ -194,21 +194,62 @@ test('readiness stays the lock and the CLI version: an unpatched install is read
   assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(root, '.hermes-paseo-runtime.json'), 'utf8'))).sort(), ['lockSha256', 'revision'], 'the receipt keeps its two fields');
 });
 
-test('a fresh install is patched before it is declared ready; marking an installed one patches nothing', t => {
+test('marking a runtime ready never touches the server, so no patch problem can keep a runtime from being ready', t => {
   const { root, server, loc } = release(t);
   const cli = path.join(root, 'node_modules/@getpaseo/cli/package.json');
   fs.mkdirSync(path.dirname(cli), { recursive: true });
   fs.writeFileSync(cli, JSON.stringify({ version: '0.11.2' }));
   assert.equal(runtimeReady(loc), false, 'no receipt yet');
-  markRuntimeReady(loc, { patch: false });
-  assert.equal(sha(fs.readFileSync(server)), ORIGINAL_BRAND_SERVER_SHA256, 'an installed runtime is left alone by the receipt rewrite');
-  fs.rmSync(path.join(root, '.hermes-paseo-runtime.json'));
-  markRuntimeReady(loc);
-  assert.equal(brandIdentityPatchReady(root), true);
+  // The same receipt rc.9 wrote, and nothing else: the patch belongs to a start for a Smart target (patchInstalledRuntime).
+  for (const bytes of [source, source + '\n// edited by someone\n']) {
+    fs.writeFileSync(server, bytes);
+    fs.rmSync(path.join(root, '.hermes-paseo-runtime.json'), { force: true });
+    markRuntimeReady(loc);
+    assert.equal(runtimeReady(loc), true);
+    assert.ok(fs.readFileSync(server).equals(Buffer.from(bytes)), 'the server is exactly as it was');
+    assert.equal(fs.existsSync(path.join(path.dirname(server), BRAND_HELPER_NAME)), false);
+  }
+  // The patch step is separate and refuses what it does not recognise, which leaves the runtime ready all the same.
+  assert.throws(() => patchInstalledRuntime(loc), { code: 'BRAND_IDENTITY_SOURCE_MISMATCH' });
   assert.equal(runtimeReady(loc), true);
-  // A source npm did not install: no receipt, so it is never declared ready.
-  fs.appendFileSync(server, '\n');
-  fs.rmSync(path.join(root, '.hermes-paseo-runtime.json'));
-  assert.throws(() => markRuntimeReady(loc), { code: 'BRAND_IDENTITY_SOURCE_MISMATCH' });
-  assert.equal(runtimeReady(loc), false);
+});
+
+// A FIFO put where the patch reads would block a plain open() for ever, inside the runtime lock. The patch runs in a child
+// so that a regression fails this test instead of hanging the whole suite.
+test('a FIFO at the server or helper path is refused at once instead of hanging the start', t => {
+  for (const place of ['server', 'helper']) {
+    const { root, server, helper } = release(t);
+    const spot = place === 'server' ? server : helper;
+    fs.rmSync(spot, { force: true });
+    const made = spawnSync('mkfifo', [spot]);
+    assert.equal(made.status, 0, 'mkfifo is needed for this test');
+    const started = Date.now();
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e',
+      `import { applyBrandIdentityPatch } from ${JSON.stringify(new URL('../src/brand-identity-patch.mjs', import.meta.url).href)};
+       try { applyBrandIdentityPatch(process.argv[1]); console.log('patched'); } catch (error) { console.log(error.code ?? error.message); }`, root],
+    { encoding: 'utf8', timeout: 15000 });
+    assert.equal(result.error, undefined, `${place}: the patch hung (${result.error?.code})`);
+    assert.ok(Date.now() - started < 10000);
+    assert.equal(result.stdout.trim(), 'BRAND_IDENTITY_SOURCE_MISMATCH', place);
+    assert.equal(fs.lstatSync(spot).isFIFO(), true, `${place}: the FIFO was left alone`);
+    assert.equal(brandIdentityPatchReady(root), false);
+  }
+});
+
+// Permission and read-only errors have their own codes, so the page and the guide can say what to fix.
+test('a runtime directory the plugin may not read or write gives RUNTIME_NOT_READABLE or RUNTIME_NOT_WRITABLE, not a raw errno', t => {
+  if (process.getuid?.() === 0) { t.skip('root is not stopped by file modes'); return; }
+  const { root, server, helper } = release(t);
+  const dir = path.dirname(server);
+  try {
+    fs.chmodSync(dir, 0o555);
+    assert.throws(() => applyBrandIdentityPatch(root), { code: 'RUNTIME_NOT_WRITABLE' });
+    assert.equal(fs.existsSync(helper), false);
+    assert.ok(fs.readFileSync(server).equals(Buffer.from(source)), 'nothing changed');
+    assert.deepEqual(fs.readdirSync(dir).filter(name => name.endsWith('.tmp')), []);
+    fs.chmodSync(dir, 0o755);
+    fs.chmodSync(server, 0o000);
+    assert.throws(() => applyBrandIdentityPatch(root), { code: 'RUNTIME_NOT_READABLE' });
+    assert.equal(brandIdentityPatchReady(root), false, 'readiness never throws');
+  } finally { fs.chmodSync(dir, 0o755); fs.chmodSync(server, 0o644); }
 });

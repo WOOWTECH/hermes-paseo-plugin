@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CONNECTION_TARGETS, DEFAULT_TARGET, connectionTarget, selectedTarget, saveSelectedTarget, targetConfiguration, targetPairUrl } from '../src/connection-targets.mjs';
+import { CONNECTION_TARGETS, DEFAULT_TARGET, connectionTarget, savedConnection, selectedTarget, saveSelectedTarget, requiresBrand, targetConfiguration, targetPairUrl } from '../src/connection-targets.mjs';
 import { locations, readState, updateState } from '../src/state.mjs';
 import { runtimeDirectory } from '../src/runtime-layout.mjs';
 import { saveConnectionSettings } from '../src/runtime.mjs';
@@ -35,6 +35,27 @@ test('nothing stored means Paseo, without creating anything', t => {
   const f = fixture(); t.after(() => f.close());
   assert.equal(selectedTarget(locations()), 'paseo');
   assert.equal(fs.existsSync(locations().stateDir), false, 'reading is not writing');
+});
+
+test('nothing saved is legacy mode, and saving Paseo is a choice of its own', t => {
+  const f = fixture(); t.after(() => f.close());
+  const loc = locations();
+  assert.deepEqual(savedConnection(loc), { saved: false, target: 'paseo' });
+  assert.equal(fs.existsSync(loc.stateDir), false, 'reading is not writing');
+  fs.mkdirSync(loc.stateDir, { recursive: true });
+  for (const row of CONNECTION_TARGETS) {
+    saveSelectedTarget(loc, row.id);
+    assert.deepEqual(savedConnection(loc), { saved: true, target: row.id });
+  }
+  fs.writeFileSync(connectionFile(), '{broken');
+  assert.throws(() => savedConnection(loc), { code: 'CONNECTION_STATE_CORRUPT' }, 'a record that cannot be read is neither legacy nor Paseo');
+  fs.rmSync(connectionFile());
+  assert.deepEqual(savedConnection(loc), { saved: false, target: 'paseo' });
+});
+
+test('only the Smart apps need the brand, so only they cause the runtime patch', () => {
+  assert.deepEqual(CONNECTION_TARGETS.map(row => [row.id, requiresBrand(row.id)]), [['paseo', false], ['woowtech', true], ['apporo', true]]);
+  for (const bad of ['custom', 'Apporo', '', undefined, null, ['apporo']]) assert.throws(() => requiresBrand(bad), { code: 'INVALID_TARGET' }, String(bad));
 });
 
 test('the choice is saved in its own private file and read back; preferences.json is never touched', t => {
@@ -227,6 +248,29 @@ test('daemon config for a target: its app, relay and origin, TLS stated, everyth
   assert.deepEqual(base, before, 'the caller config is not mutated');
 });
 
+test('an app origin is recognised however it is written, so a Smart app is never listed twice; an origin that only resembles one stays', () => {
+  const written = ['HTTPS://smart.apporo.ai', 'https://SMART.APPORO.AI/', 'https://smart.apporo.ai:443', ' https://smart.apporo.ai// ', 'https://Smart.Apporo.Ai',
+    'https://app.paseo.sh/', 'HTTPS://APP.PASEO.SH', 'https://smart.woowtech.io:443/', 'https://smart.woowtech.io'];
+  for (const target of CONNECTION_TARGETS) {
+    const config = targetConfiguration({ daemon: { cors: { allowedOrigins: ['https://keep.example', ...written] } } }, target.id);
+    assert.deepEqual(config.daemon.cors.allowedOrigins, ['https://keep.example', target.appUrl], target.id);
+  }
+  const resembling = ['https://smart.apporo.ai/path', 'https://smart.apporo.ai?x=1', 'https://smart.apporo.ai/#frag', 'https://user@smart.apporo.ai', 'https://smart.apporo.ai.evil.example',
+    'http://smart.apporo.ai', 'https://smart.apporo.ai:444', 'https://evil.example/https://smart.apporo.ai', '*', 'null', ''];
+  assert.deepEqual(targetConfiguration({ daemon: { cors: { allowedOrigins: resembling } } }, 'woowtech').daemon.cors.allowedOrigins, [...resembling, 'https://smart.woowtech.io']);
+});
+
+test('matching an origin entry takes time linear in its length', () => {
+  // The first version stripped trailing slashes with /\/+$/, which retries from every slash of a long run: tens of seconds for this input.
+  const n = 100000;
+  const hostile = ['https://smart.apporo.ai' + '/'.repeat(n) + 'x', ' '.repeat(n) + 'https://smart.apporo.ai', '/'.repeat(n), 'https://smart.apporo.ai' + '/'.repeat(n), 'a'.repeat(n)];
+  const started = process.hrtime.bigint();
+  const config = targetConfiguration({ daemon: { cors: { allowedOrigins: hostile } } }, 'apporo');
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(elapsedMs < 1000, `took ${elapsedMs} ms`);
+  assert.deepEqual(config.daemon.cors.allowedOrigins, [hostile[0], hostile[2], hostile[4], 'https://smart.apporo.ai'], 'only the two spellings of the app itself went');
+});
+
 test('daemon config for a target also works from nothing, and refuses origins it cannot read', () => {
   for (const target of CONNECTION_TARGETS) {
     const config = targetConfiguration({}, target.id);
@@ -283,6 +327,23 @@ test('an offer must be a version 2 offer for this daemon, on the target\'s relay
     }
     for (const hash of ['#offer=e30', '#offer=bnVsbA', '#offer=NQ', '#offer=W10']) assert.throws(() => targetPairUrl(target.appUrl + '/' + hash, target.id), { code: 'PAIRING_TARGET_MISMATCH' }, hash);
     for (const hash of ['#offer=bm90LWpzb24', '#offer=_-_-']) assert.throws(() => targetPairUrl(target.appUrl + '/' + hash, target.id), { code: 'PAIRING_OFFER_INVALID' }, hash);
+  }
+});
+
+test('legacy pairing (nothing saved) checks the app and the offer but not the relay, as rc.9 did', () => {
+  for (const target of CONNECTION_TARGETS) {
+    const own = target.appUrl + '/' + fragmentFor(offerFor(target, { relay: { endpoint: 'relay.tenant.example:443', useTls: false } }));
+    assert.throws(() => targetPairUrl(own, target.id), { code: 'PAIRING_TARGET_MISMATCH' }, 'a saved target means its own relay');
+    assert.equal(targetPairUrl(own, target.id, { legacy: true }), own, 'a tenant\'s own relay is not second-guessed');
+    for (const patch of [{ v: 1 }, { serverId: '' }, { daemonPublicKeyB64: '' }]) {
+      assert.throws(() => targetPairUrl(target.appUrl + '/' + fragmentFor(offerFor(target, patch)), target.id, { legacy: true }), { code: 'PAIRING_TARGET_MISMATCH' }, JSON.stringify(patch));
+    }
+    for (const url of [target.appUrl + '.evil/' + fragmentFor(offerFor(target)), target.appUrl + '/welcome' + fragmentFor(offerFor(target)), target.appUrl + '/#opaque']) {
+      assert.throws(() => targetPairUrl(url, target.id, { legacy: true }), { code: 'PAIRING_ORIGIN_INVALID' }, url.slice(0, 60));
+    }
+    for (const other of CONNECTION_TARGETS.filter(row => row.id !== target.id)) {
+      assert.throws(() => targetPairUrl(own, other.id, { legacy: true }), { code: 'PAIRING_ORIGIN_INVALID' }, `${target.id} link for ${other.id}`);
+    }
   }
 });
 

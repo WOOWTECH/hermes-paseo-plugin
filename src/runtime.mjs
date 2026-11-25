@@ -15,7 +15,8 @@ import {usingAcceptanceAgent,usingAcceptanceWorkspace} from './acceptance-agent.
 import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,patchInstalledRuntime,RUNTIME_REVISION} from './runtime-layout.mjs';
 import {demonstrablyReusedPid,linuxContainerIdentity,instanceFromPreviousContainer} from './daemon-identity.mjs';
 import {managedFeatures} from './daemon-config.mjs';
-import {CONNECTION_TARGETS,DEFAULT_TARGET,connectionTarget,selectedTarget,saveSelectedTarget,targetConfiguration,targetPairUrl} from './connection-targets.mjs';
+import {CONNECTION_TARGETS,DEFAULT_TARGET,connectionTarget,savedConnection,saveSelectedTarget,requiresBrand,targetConfiguration,targetPairUrl} from './connection-targets.mjs';
+import {backupDaemonConfig} from './config-backup.mjs';
 export { locations, readState, updateState } from './state.mjs';
 export const PASEO_VERSION = '0.11.2';
 const PROVIDERS = ['hermes', 'claude', 'codex', 'pi'];
@@ -100,6 +101,8 @@ async function runningTarget() {
 // What waits to be applied. A running daemon decides by itself: it serves the saved target or it does not. With none
 // running, a saved change is pending until the next start applies it (activate clears the flag).
 const configurationPending = (state, running, target) => running === undefined ? state.configurationPending === true : running !== target;
+// A start leaves nothing pending. The flag is cleared only where it exists, so a profile that never saved a target keeps the state file it had.
+const settledPending = () => readState().configurationPending === undefined ? {} : { configurationPending: false };
 async function verifyInstanceOwnership(instance) {
   if (!ownsHome() || !instance || !processIdentity(instance.pid)) throw new RuntimeError('DAEMON_NOT_OWNED');
   if (instance.uid !== (process.getuid?.() ?? instance.uid)) throw new RuntimeError('DAEMON_NOT_OWNED');
@@ -134,8 +137,7 @@ async function releaseReusedPid(instance) {
 }
 async function installRuntime() {
   privateDirectory(locations().runtimeDir);
-  const fresh = !runtimeReady(locations());
-  if (fresh) {
+  if (!runtimeReady(locations())) {
     const npm = findExecutable('npm'); if (!npm) throw new RuntimeError('NPM_UNAVAILABLE');
     const root=prepareRuntimeManifest(locations());
     await runProcess(npm, ['ci', '--prefix', root, '--omit=dev', '--no-audit', '--no-fund'], { timeoutMs: 300000, env: inheritedEnv() });
@@ -143,7 +145,7 @@ async function installRuntime() {
   const version = await runProcess(process.execPath, [cliPath(), '--version'], { env: inheritedEnv() });
   if (version.trim() !== PASEO_VERSION || runtimeVersion() !== PASEO_VERSION) throw new RuntimeError('VERSION_MISMATCH');
   if (!fs.existsSync(path.join(packageRoot('server'), 'dist/server/web-ui/index.html'))) throw new RuntimeError('WEB_UI_MISSING');
-  markRuntimeReady(locations(), { patch: fresh });
+  markRuntimeReady(locations());
   updateState({ installedVersion: PASEO_VERSION,installedRuntimeRevision:RUNTIME_REVISION });
 }
 async function choosePort(preferred) {
@@ -156,8 +158,9 @@ async function choosePort(preferred) {
 async function detectLaunchers({ installMissing = false } = {}) {
   return resolveProviderLaunchers(locations(), { installMissing, env: inheritedEnv() });
 }
-// `target` is given only when no daemon is running: it is applied at a start. A running daemon keeps the relay,
-// app and CORS settings it started with (they are not live-reloadable), so they are left as they are.
+// `target` is given only for a start in managed mode (a target was saved): it is applied at that start. A running
+// daemon keeps the relay, app and CORS settings it started with (they are not live-reloadable), and before anything was
+// saved the operator's settings are never touched; in both cases no target is given and the file is written as in rc.9.
 async function writeConfig(port, launchers, target) {
   const loc = locations(); const file = path.join(loc.paseoHome, 'config.json');
   let config = {};
@@ -177,7 +180,11 @@ async function writeConfig(port, launchers, target) {
     features: managedFeatures(config.features),
     log: { ...config.log, console: { level: 'warn' }, file: { level: 'warn', path: 'daemon.log', rotate: { maxSize: '5m', maxFiles: 2 } } },
   };
-  if (target !== undefined) config = targetConfiguration(config, target);
+  if (target !== undefined) {
+    config = targetConfiguration(config, target);
+    // The first rewrite for a saved target keeps the operator's file once. Nothing is written if that cannot be done.
+    if (!readState().configBackup) updateState({ configBackup: { at: new Date().toISOString(), copied: backupDaemonConfig(loc.paseoHome) } });
+  }
   const { savePersistedConfig } = await serverModule('dist/server/server/config.js');
   try { savePersistedConfig(loc.paseoHome, config); fs.chmodSync(file, 0o600); } catch { throw new RuntimeError('CONFIG_INVALID'); }
   updateState({ port, providerLaunchers: launchers });
@@ -200,9 +207,10 @@ export async function activate(options = {}) {
     ensureOwnedHome(); updateState({ desiredEnabled: true, phase: 'installing', lastError: null });
     try {
       if (Number(process.versions.node.split('.')[0]) < 22) throw new RuntimeError('NODE_VERSION_UNSUPPORTED');
-      // A damaged choice stops here, before minutes of npm; the target is read again where it is applied.
-      selectedTarget(locations());
-      removePairingFile(locations());
+      // A damaged choice stops here, before minutes of npm; the choice is read again where it is applied. Until a target
+      // is saved (legacy mode) a start does what rc.9's did and nothing else: no relay, app or CORS settings, no runtime
+      // patch, nothing deleted that it did not touch before.
+      if (savedConnection(locations()).saved) removePairingFile(locations());
       await installRuntime();
       let existing = await currentInstance(); const launchers = await detectLaunchers({ installMissing: false });
       if (existing) {
@@ -215,9 +223,10 @@ export async function activate(options = {}) {
           updateState({phase:'restart_required',lastError:{code:'RESTART_REQUIRED',at:new Date().toISOString()}});
           return status();
         }
-        // The daemon serves another target than the saved one: nothing is written for it or asked of it. Its next stop
+        // The daemon serves another target than the selected one: nothing is written for it or asked of it. Its next stop
         // and start applies the saved target.
-        if (daemonTarget(existing) !== selectedTarget(locations())) {
+        const choice = savedConnection(locations());
+        if (daemonTarget(existing) !== choice.target) {
           updateState({ phase: 'restart_required', lastError: { code: 'CONFIGURATION_PENDING', at: new Date().toISOString() } });
           return status();
         }
@@ -230,18 +239,20 @@ export async function activate(options = {}) {
               reload.restartRequiredPaths.length || reload.overrideControlledPaths.some(p => p === 'agents.providers' || p.startsWith('agents.providers.')) ||
               (needsApply && !reload.appliedPaths.includes('agents.providers'))) throw new RuntimeError('RESTART_REQUIRED');
         } catch { throw new RuntimeError('RESTART_REQUIRED'); }
-        // The daemon serves the saved target (checked above), so a pending flag left by a save that raced a start is stale.
-        updateState({ phase: 'running', providerReloadPending: null, daemonPid: existing.pid, daemonStartedAt: existing.startedAt, daemonContainerIdentity: linuxContainerIdentity(), configurationPending: false });
+        // The daemon serves the selected target (checked above), so a pending flag left by a save that raced a start is
+        // stale. Where none was ever set (legacy mode) nothing is written.
+        updateState({ phase: 'running', providerReloadPending: null, daemonPid: existing.pid, daemonStartedAt: existing.startedAt, daemonContainerIdentity: linuxContainerIdentity(), ...settledPending() });
       } else {
-        // The selected target is applied here and only here: its relay, app and CORS settings go into config.json,
-        // its brand into the daemon's environment, and the runtime is patched while no daemon runs from it.
-        const target = selectedTarget(locations());
+        // Managed mode (a target was saved) applies it here and only here: its relay, app and CORS settings go into
+        // config.json, its brand into the daemon's environment, and for a Smart target the runtime is patched while no
+        // daemon runs from it. Legacy mode starts exactly as rc.9 did.
+        const choice = savedConnection(locations()), target = choice.saved ? choice.target : undefined;
         const port = await choosePort(locations().port); await writeConfig(port, launchers, target);
         updateState({ phase: 'starting' });
-        patchInstalledRuntime(locations());
-        await cli(['daemon', 'start', '--timeout', '90'], { timeoutMs: 105000, env: inheritedEnv(target) });
+        if (target !== undefined && requiresBrand(target)) patchInstalledRuntime(locations());
+        await cli(['daemon', 'start', '--timeout', '90'], target === undefined ? { timeoutMs: 105000 } : { timeoutMs: 105000, env: inheritedEnv(target) });
         const instance = await currentInstance(); await verifyInstanceOwnership(instance);
-        updateState({ phase: 'running', providerReloadPending: null, daemonPid: instance.pid, daemonStartedAt: instance.startedAt, daemonContainerIdentity: linuxContainerIdentity(), activeTarget: target, configurationPending: false });
+        updateState({ phase: 'running', providerReloadPending: null, daemonPid: instance.pid, daemonStartedAt: instance.startedAt, daemonContainerIdentity: linuxContainerIdentity(), ...(target === undefined ? {} : { activeTarget: target }), ...settledPending() });
       }
       const result = await status();
       if (!result.daemon.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
@@ -275,8 +286,10 @@ export async function status() {
 async function readStatus() {
   const state = readState(); const installed = runtimeReady(locations()); const owned = ownsHome();
   let providers = [], diagnosticCode = state.lastError?.code === 'RESTART_REQUIRED' ? 'RESTART_REQUIRED' : null;
-  let target = DEFAULT_TARGET, activeTarget = null;
-  try { target = selectedTarget(locations()); } catch (error) { diagnosticCode = safeCode(error); }
+  let target = DEFAULT_TARGET, activeTarget = null, targetSaved = false, connectionCode = null;
+  // A record that exists but cannot be read is named (connectionCode) and shown as Paseo; saving a target replaces it.
+  try { ({ target, saved: targetSaved } = savedConnection(locations())); }
+  catch (error) { connectionCode = diagnosticCode = safeCode(error); targetSaved = true; }
   // Relay evidence counts only for the target it was taken on; a record from before targets existed was Paseo's.
   const verified = state.relayVerification?.verified === true && (state.relayVerification.target ?? DEFAULT_TARGET) === target;
   const daemon = { running: false, reachable: false, owned, pid: null, listen: null, relayEnabled: false, relayConnected: null, relayVerified: verified, relayVerifiedAt: verified ? state.relayVerification.checkedAt || null : null };
@@ -302,7 +315,7 @@ async function readStatus() {
   const stalled = ['running', 'installing', 'starting'].includes(state.phase);
   const phase = stalled && !daemon.running ? 'stopped' : state.phase || 'not_installed';
   return { installed, version: installed ? PASEO_VERSION : null, enabled: state.desiredEnabled === true, phase, daemon, providers, chatVerified: state.acceptance?.passed === true, pairingAvailable: typeof state.pairingCreatedAt === 'string', diagnosticCode,
-    selectedTarget: target, activeTarget: daemon.running ? activeTarget : null, configurationPending: configurationPending(state, daemon.running ? activeTarget : undefined, target), state };
+    selectedTarget: target, targetSaved, connectionCode, activeTarget: daemon.running ? activeTarget : null, configurationPending: configurationPending(state, daemon.running ? activeTarget : undefined, target), state };
 }
 export async function diagnose() {
   const snapshot = await status(); const launchers = await detectLaunchers();
@@ -332,22 +345,25 @@ async function readModels(provider) {
     return { ...safeProvider(entry || { provider, status: 'unknown' }), models: (result.models || []).map(model => ({ id: model.id, label: model.label || model.id, isDefault: model.isDefault === true, defaultThinkingOptionId: model.defaultThinkingOptionId || null, thinkingOptions: (model.thinkingOptions || []).map(option => ({ id: option.id, label: option.label || option.id, isDefault: option.isDefault === true })) })) };
   }, 150000);
 }
-/** A pairing offer from the running daemon for `target` only. Throws unless it is that target's app, relay and TLS. */
-async function relayOffer(target = selectedTarget(locations())) {
+/**
+ * A pairing offer from the running daemon for `target` only. Throws unless it is that target's app, and, once a target is
+ * saved, its relay and TLS as well. Before that (legacy) the relay is whatever the daemon is configured with, as in rc.9.
+ */
+async function relayOffer(target, { legacy = false } = {}) {
   const offer = await cli(['daemon', 'pair', '--relay'], { timeoutMs: 15000 });
   if (!offer.url || !offer.relayEnabled) throw new RuntimeError('PAIRING_UNAVAILABLE');
-  return { relayEnabled: true, url: targetPairUrl(offer.url, target), target };
+  return { relayEnabled: true, url: targetPairUrl(offer.url, target, { legacy }), target };
 }
 /**
  * The selected target's pairing link, lock-free (the daemon is only asked for it) and never stored: the offer
  * is a bearer credential, so it goes to the caller and nowhere else. Only that it was made is recorded.
  */
 export async function pair() {
-  const target = selectedTarget(locations());
+  const { saved, target } = savedConnection(locations());
   const result = await status(); if (!result.daemon.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
   // A saved target is not offered until the daemon has been stopped and started with it.
   if (result.configurationPending || result.activeTarget !== target) throw new RuntimeError('CONFIGURATION_PENDING');
-  const offer = await relayOffer(target);
+  const offer = await relayOffer(target, { legacy: !saved });
   const pairing = { url: offer.url, target, createdAt: new Date().toISOString() };
   updateState({ pairingCreatedAt: pairing.createdAt });
   return pairing;
@@ -367,12 +383,16 @@ function removePairingFile(loc) {
 export async function saveConnectionSettings(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => key !== 'target') || typeof input.target !== 'string') throw new RuntimeError('INVALID_TARGET');
   const target = connectionTarget(input.target).id, loc = locations();
-  let previous = null;
-  try { previous = selectedTarget(loc); } catch (error) { if (error.code !== 'CONNECTION_STATE_CORRUPT') throw error; }
-  if (previous !== target) {
-    // Pending is published before the new choice, so a partial write never offers the new app while the old
-    // daemon still owns the connection.
-    updateState({ configurationPending: true, relayVerification: null, pairingCreatedAt: null });
+  let previous = null, recorded = false;
+  try { ({ target: previous, saved: recorded } = savedConnection(loc)); } catch (error) { if (error.code !== 'CONNECTION_STATE_CORRUPT') throw error; }
+  // The first explicit save, Paseo included, is what ends legacy mode: from the next start the plugin writes the target's
+  // settings. It is not a change of target, so it withdraws nothing and leaves nothing pending.
+  if (!recorded || previous !== target) {
+    if (previous !== target) {
+      // Pending is published before the new choice, so a partial write never offers the new app while the old
+      // daemon still owns the connection.
+      updateState({ configurationPending: true, relayVerification: null, pairingCreatedAt: null });
+    }
     removePairingFile(loc);
     saveSelectedTarget(loc, target);
   }
@@ -408,10 +428,10 @@ async function readRelay({ daemon = async () => { const result = await status();
   if (!current.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
   // A daemon still serving the previous target says nothing about the saved one.
   if (current.configurationPending === true) throw new RuntimeError('CONFIGURATION_PENDING');
-  const target = selectedTarget(locations());
+  const { saved, target } = savedConnection(locations());
   const checkedAt = new Date().toISOString();
   try {
-    const { url } = await offer(target);
+    const { url } = await offer(target, { legacy: !saved });
     await connect(url, client => client.getDaemonStatus({ timeout: 10000 }));
   } catch {
     updateState({ relayVerification: { verified: false, checkedAt, code: 'RELAY_UNVERIFIED', target } });

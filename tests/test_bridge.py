@@ -396,32 +396,47 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(timeout, b.TIMEOUTS['config'])
         self.assertLess(b.TIMEOUTS['config'], b.TIMEOUTS['start'], 'saving only records the choice; it never waits for an install')
 
-    def test_status_always_names_a_known_target_and_a_boolean_pending_flag(self):
-        decorated = self.bridge._decorate({'selectedTarget': 'evil', 'activeTarget': 'other', 'configurationPending': 'yes'})
-        self.assertEqual((decorated['selectedTarget'], decorated['activeTarget'], decorated['configurationPending']), ('paseo', None, False))
+    def test_status_always_names_a_known_target_a_boolean_saved_flag_and_a_boolean_pending_flag(self):
+        shown = lambda d: (d['selectedTarget'], d['targetSaved'], d['activeTarget'], d['configurationPending'], d['connectionCode'])
+        # Nothing on disk: the legacy default, whatever the runtime claimed.
+        self.assertEqual(shown(self.bridge._decorate({'selectedTarget': 'evil', 'activeTarget': 'other', 'configurationPending': 'yes'})),
+                         ('paseo', False, None, False, None))
         for hostile in (['paseo'], {'id': 'paseo'}, 7, None, 'yes'):
-            decorated = self.bridge._decorate({'selectedTarget': hostile, 'activeTarget': hostile, 'configurationPending': hostile})
-            self.assertEqual((decorated['selectedTarget'], decorated['activeTarget'], decorated['configurationPending']), ('paseo', None, False))
-        decorated = self.bridge._decorate({'selectedTarget': 'apporo', 'activeTarget': 'paseo', 'configurationPending': True})
-        self.assertEqual((decorated['selectedTarget'], decorated['activeTarget'], decorated['configurationPending']), ('apporo', 'paseo', True))
-        self.assertEqual(set(b.redact({'selectedTarget': 'apporo', 'activeTarget': 'paseo', 'configurationPending': True, 'appUrl': 'x'})),
-                         {'selectedTarget', 'activeTarget', 'configurationPending'})
+            decorated = self.bridge._decorate({'selectedTarget': hostile, 'targetSaved': hostile, 'activeTarget': hostile,
+                                               'configurationPending': hostile, 'connectionCode': hostile})
+            with self.subTest(hostile=hostile):
+                self.assertEqual(shown(decorated), ('paseo', False, None, False, None))
+        decorated = self.bridge._decorate({'selectedTarget': 'apporo', 'targetSaved': True, 'activeTarget': 'paseo', 'configurationPending': True})
+        self.assertEqual(shown(decorated), ('apporo', True, 'paseo', True, None))
+        # The code of a record that cannot be read is passed on only when it is one the page may name.
+        self.assertEqual(self.bridge._decorate({'selectedTarget': 'paseo', 'targetSaved': True, 'connectionCode': 'CONNECTION_STATE_CORRUPT'})['connectionCode'], 'CONNECTION_STATE_CORRUPT')
+        self.assertIsNone(self.bridge._decorate({'selectedTarget': 'paseo', 'targetSaved': True, 'connectionCode': 'not a code'})['connectionCode'])
+        self.assertEqual(set(b.redact({'selectedTarget': 'apporo', 'targetSaved': True, 'activeTarget': 'paseo', 'configurationPending': True,
+                                       'connectionCode': 'CONNECTION_STATE_CORRUPT', 'appUrl': 'x'})),
+                         {'selectedTarget', 'targetSaved', 'activeTarget', 'configurationPending', 'connectionCode'})
+        self.assertEqual(b.redact({'connectionCode': 'a free text reason'})['connectionCode'], 'OPERATION_FAILED', 'a code, never prose')
 
     def test_a_runtime_that_cannot_answer_still_shows_the_saved_target(self):
         b._private_dir(self.bridge.state_dir)
         b._write_json(self.bridge.state_dir / 'connection.json', {'version': 1, 'target': 'woowtech'})
         with patch.object(self.bridge, '_invoke', side_effect=b.BridgeError('NODE_UNAVAILABLE')):
             shown = self.bridge.status(fresh=True)
-        self.assertEqual((shown['selectedTarget'], shown['activeTarget'], shown['configurationPending']), ('woowtech', None, False))
+        self.assertEqual((shown['selectedTarget'], shown['targetSaved'], shown['activeTarget'], shown['configurationPending']), ('woowtech', True, None, False))
         self.assertEqual(shown['diagnosticCode'], 'NODE_UNAVAILABLE')
+        (self.bridge.state_dir / 'connection.json').unlink()
+        with patch.object(self.bridge, '_invoke', side_effect=b.BridgeError('NODE_UNAVAILABLE')):
+            shown = self.bridge.status(fresh=True)
+        self.assertEqual((shown['selectedTarget'], shown['targetSaved']), ('paseo', False), 'nothing was ever saved')
 
     def test_the_saved_target_is_read_from_its_own_private_file_and_a_bad_file_fails_closed(self):
         self.assertEqual(self.bridge.connection_target(), 'paseo', 'nothing saved')
+        self.assertEqual(self.bridge.connection_choice(), (False, 'paseo'), 'nothing saved: the legacy default')
         b._private_dir(self.bridge.state_dir)
         file = self.bridge.state_dir / 'connection.json'
         for target in b.TARGET_ORIGINS:
             b._write_json(file, {'version': 1, 'target': target})
             self.assertEqual(self.bridge.connection_target(), target)
+            self.assertEqual(self.bridge.connection_choice(), (True, target), 'saving Paseo is a choice too')
         for corrupt in ({'version': 1, 'target': 'custom'}, {'target': 'paseo'}, {'version': 1, 'target': 'paseo', 'extra': 1},
                         {'version': 2, 'target': 'paseo'}, {'version': True, 'target': 'paseo'}, {'version': 1.0, 'target': 'paseo'},
                         {'version': 1, 'target': ['paseo']}, {'version': 1, 'target': {'id': 'paseo'}}, {'version': 1, 'target': None}):
@@ -429,7 +444,7 @@ class BridgeTests(unittest.TestCase):
             with self.subTest(corrupt=corrupt), self.assertRaises(b.BridgeError) as caught:
                 self.bridge.connection_target()
             self.assertEqual(caught.exception.code, 'CONNECTION_STATE_CORRUPT')
-            self.assertEqual(self.bridge._shown_target(), 'paseo', 'the page may show the default; nothing is released on it')
+            self.assertEqual(self.bridge._shown_choice(), (True, 'paseo'), 'the page shows Paseo as saved, so saving it replaces the record; nothing is released on it')
         b._write_json(file, {'version': 1, 'target': 'apporo'})
         file.chmod(0o606)
         with self.assertRaises(b.BridgeError) as caught:
@@ -445,7 +460,8 @@ class BridgeTests(unittest.TestCase):
         shown = b.redact({'saved': True, 'target': 'apporo', 'configurationPending': True, 'appUrl': 'x', 'relayEndpoint': 'y', 'password': 'z'})
         self.assertEqual(shown, {'saved': True, 'target': 'apporo', 'configurationPending': True})
         for code in ('INVALID_TARGET', 'CONFIGURATION_PENDING', 'CONNECTION_STATE_CORRUPT', 'CONFIG_INVALID', 'CONFIG_CORRUPT',
-                     'BRAND_IDENTITY_SOURCE_MISMATCH', 'BRAND_IDENTITY_PATCH_MISMATCH', 'UNSAFE_SYMLINK'):
+                     'BRAND_IDENTITY_SOURCE_MISMATCH', 'BRAND_IDENTITY_PATCH_MISMATCH', 'UNSAFE_SYMLINK',
+                     'RUNTIME_NOT_READABLE', 'RUNTIME_NOT_WRITABLE', 'CONFIG_BACKUP_FAILED'):
             with self.subTest(code=code):
                 self.assertEqual(b.BridgeError(code).code, code)
                 self.assertEqual(b.redact({'diagnosticCode': code})['diagnosticCode'], code)

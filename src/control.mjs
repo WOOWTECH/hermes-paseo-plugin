@@ -18,7 +18,7 @@ export function validateInput(action,input) {
  return input;
 }
 export function publicStatus(s) {
- return {installed:s.installed,version:s.version,enabled:s.enabled,phase:s.phase,diagnosticCode:s.diagnosticCode||null,daemon:{running:s.daemon.running,reachable:s.daemon.reachable,relayEnabled:s.daemon.relayEnabled,relayVerified:s.daemon.relayVerified,relayVerifiedAt:s.daemon.relayVerifiedAt},providers:s.providers.filter(p=>providers.has(p.provider)),chatVerified:s.chatVerified,chatVerifiedAt:s.state?.acceptance?.checkedAt||null,selectedTarget:s.selectedTarget,activeTarget:s.activeTarget,configurationPending:s.configurationPending};
+ return {installed:s.installed,version:s.version,enabled:s.enabled,phase:s.phase,diagnosticCode:s.diagnosticCode||null,daemon:{running:s.daemon.running,reachable:s.daemon.reachable,relayEnabled:s.daemon.relayEnabled,relayVerified:s.daemon.relayVerified,relayVerifiedAt:s.daemon.relayVerifiedAt},providers:s.providers.filter(p=>providers.has(p.provider)),chatVerified:s.chatVerified,chatVerifiedAt:s.state?.acceptance?.checkedAt||null,selectedTarget:s.selectedTarget,targetSaved:s.targetSaved,connectionCode:s.connectionCode,activeTarget:s.activeTarget,configurationPending:s.configurationPending};
 }
 export async function control(action,input={}) {
  validateInput(action,input);

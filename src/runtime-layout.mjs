@@ -26,14 +26,11 @@ export function prepareRuntimeManifest(loc) {
  }
  return root;
 }
-// Readiness stays "the lock matches and the CLI is 0.11.2": the brand patch is applied to the files in place and
-// never decides whether a release is installed, so a runtime without it is never installed again.
-// A fresh install is patched before it is declared ready; one that is already installed is patched right
-// before a daemon starts from it (patchInstalledRuntime).
-export function markRuntimeReady(loc,{patch=true}={}) {
- const root=runtimeDirectory(loc);
- if(patch)applyBrandIdentityPatch(root);
- atomicJson(path.join(root,'.hermes-paseo-runtime.json'),{lockSha256,revision:RUNTIME_REVISION});
-}
-/** Caller holds the runtime lock and has found no daemon running from this release. Idempotent. */
+// Readiness is exactly what rc.9 made it: the lock matches and the CLI is 0.11.2. Nothing about a patch is written
+// here, so installing a runtime can never fail, or be repeated, because of one.
+export function markRuntimeReady(loc) {atomicJson(path.join(runtimeDirectory(loc),'.hermes-paseo-runtime.json'),{lockSha256,revision:RUNTIME_REVISION});}
+/**
+ * Patches the installed runtime for a Smart target, in place. Called only right before a daemon starts for a saved Smart
+ * target: the caller holds the runtime lock and has found no daemon running from this release. Idempotent.
+ */
 export function patchInstalledRuntime(loc) {applyBrandIdentityPatch(runtimeDirectory(loc));}

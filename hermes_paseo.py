@@ -86,14 +86,14 @@ WORKSPACE_CREATE_FAILED PERMISSION_REQUIRED PROVIDER_TIMEOUT PROVIDER_TURN_FAILE
 EMPTY_OR_UNEXPECTED_REPLY'''.split())
 CODES = CODES | {'ACCEPTANCE_INTERRUPTED', 'PROVIDER_QUOTA_EXHAUSTED'}
 CODES = CODES | {'INVALID_TARGET', 'CONFIGURATION_PENDING', 'CONNECTION_STATE_CORRUPT', 'CONFIG_INVALID', 'CONFIG_CORRUPT',
-                 'BRAND_IDENTITY_SOURCE_MISMATCH', 'BRAND_IDENTITY_PATCH_MISMATCH',
-                 'PAIRING_TARGET_MISMATCH', 'PAIRING_OFFER_INVALID', 'PAIRING_SECURITY_UNSUPPORTED'}
+                 'BRAND_IDENTITY_SOURCE_MISMATCH', 'BRAND_IDENTITY_PATCH_MISMATCH', 'RUNTIME_NOT_READABLE', 'RUNTIME_NOT_WRITABLE',
+                 'CONFIG_BACKUP_FAILED', 'PAIRING_TARGET_MISMATCH', 'PAIRING_OFFER_INVALID', 'PAIRING_SECURITY_UNSUPPORTED'}
 PUBLIC_KEYS = frozenset('''ok code installed version enabled phase diagnosticCode daemon running
 reachable relayEnabled relayVerified relayVerifiedAt providers provider label status modes id
 isDefault defaultModeId models defaultThinkingOptionId thinkingOptions chatVerified chatVerifiedAt
 checkedAt passed firstReply followup model modeId thinking agentId message reply errorCode
 available authentication loginHint chatErrorCode cleanup archived workspaceArchived
-saved target selectedTarget activeTarget configurationPending'''.split())
+saved target selectedTarget targetSaved connectionCode activeTarget configurationPending'''.split())
 # Free text hides any official app link and the pairing offer of any other URL (the `#offer=` or
 # `#connect=` fragment onward). Every alternative starts at a fixed token, so no scan runs forward
 # from each character: an earlier form began with an unbounded run before the `#` and took
@@ -153,7 +153,7 @@ def redact(value, depth=0):
     if depth > 12:
         return None
     if isinstance(value, dict):
-        return {k: (v if isinstance(v, str) and v in CODES else 'OPERATION_FAILED') if k in ('code', 'diagnosticCode', 'errorCode', 'chatErrorCode') and v is not None else redact(v, depth + 1)
+        return {k: (v if isinstance(v, str) and v in CODES else 'OPERATION_FAILED') if k in ('code', 'diagnosticCode', 'errorCode', 'chatErrorCode', 'connectionCode') and v is not None else redact(v, depth + 1)
                 for k, v in value.items() if k in PUBLIC_KEYS}
     if isinstance(value, list):
         return [redact(v, depth + 1) for v in value[:1024]]
@@ -451,24 +451,29 @@ class Bridge:
             return error.code
         return 'ORIGIN_ADOPTED'
 
-    def connection_target(self):
-        """The connection target saved by the runtime (connection.json); Paseo when nothing was ever saved."""
+    def connection_choice(self):
+        """(saved, target) as the runtime reads connection.json: nothing saved is (False, 'paseo'), the plugin's legacy mode."""
         record = _read_json(self.state_dir / 'connection.json', private=True)
         if record is None:
-            return 'paseo'
+            return False, 'paseo'
         # Exactly what the runtime writes: JSON `true` is not version 1, and a list is not a target.
         if (set(record) != {'version', 'target'} or type(record['version']) is not int or record['version'] != 1
                 or not isinstance(record['target'], str) or record['target'] not in TARGET_ORIGINS):
             raise BridgeError('CONNECTION_STATE_CORRUPT')
-        return record['target']
+        return True, record['target']
 
-    def _shown_target(self):
+    def connection_target(self):
+        """The connection target saved by the runtime (connection.json); Paseo when nothing was ever saved."""
+        return self.connection_choice()[1]
+
+    def _shown_choice(self):
         # What the page shows when the runtime did not say (it is broken or too old): the saved choice if it can be
-        # read. Never used to release a pairing link; that asks connection_target() and fails closed.
+        # read, and a record that cannot be read counts as saved Paseo, which saving again replaces. Never used to
+        # release a pairing link; that asks connection_target() and fails closed.
         try:
-            return self.connection_target()
+            return self.connection_choice()
         except BridgeError:
-            return 'paseo'
+            return True, 'paseo'
 
     def dashboard_origins(self, fallback):
         """At most two operator origins; never persist Ingress over the primary."""
@@ -662,11 +667,13 @@ class Bridge:
                              'relayVerified': False, 'relayVerifiedAt': None}.items():
             result['daemon'].setdefault(key, default)
         known = lambda value: isinstance(value, str) and value in TARGET_ORIGINS
-        if not known(result.get('selectedTarget')):
-            result['selectedTarget'] = self._shown_target()
+        if not known(result.get('selectedTarget')) or not isinstance(result.get('targetSaved'), bool):
+            result['targetSaved'], result['selectedTarget'] = self._shown_choice()
         if not known(result.get('activeTarget')):
             result['activeTarget'] = None
         result['configurationPending'] = result.get('configurationPending') is True
+        code = result.get('connectionCode')
+        result['connectionCode'] = code if isinstance(code, str) and code in CODES else None
         result['providers'] = [row for row in result.get('providers', [])
                                if isinstance(row, dict) and row.get('provider') in PROVIDERS]
         result['onboarding'] = self.onboarding()

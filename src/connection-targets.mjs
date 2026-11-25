@@ -25,8 +25,13 @@ export function connectionTarget(id) {
 const connectionFile = loc => path.join(loc.stateDir, 'connection.json');
 const MAX_RECORD_BYTES = 4096;
 
-/** The saved target; Paseo when nothing was ever saved. A damaged record fails closed instead of reading as Paseo. */
-export function selectedTarget(loc) {
+/**
+ * What the saved record says. `saved: false` means nobody ever saved a target: the plugin is in legacy mode,
+ * behaves exactly as 0.1.4-rc.9 did and shows Paseo. `saved: true` is the managed mode that an explicit save
+ * (Paseo included) switches on. A record that exists but cannot be read fails closed (CONNECTION_STATE_CORRUPT,
+ * UNSAFE_SYMLINK): it is neither the legacy default nor Paseo.
+ */
+export function savedConnection(loc) {
   const file = connectionFile(loc);
   let record;
   try {
@@ -35,14 +40,22 @@ export function selectedTarget(loc) {
     if (bytes.length > MAX_RECORD_BYTES) throw new RuntimeError('CONNECTION_STATE_CORRUPT');
     record = JSON.parse(bytes.toString('utf8'));
   } catch (error) {
-    if (error.code === 'ENOENT') return DEFAULT_TARGET;
+    if (error.code === 'ENOENT') return { saved: false, target: DEFAULT_TARGET };
     throw new RuntimeError(error.code === 'UNSAFE_SYMLINK' ? 'UNSAFE_SYMLINK' : 'CONNECTION_STATE_CORRUPT');
   }
   if (!record || typeof record !== 'object' || Array.isArray(record) || record.version !== 1 ||
       Object.keys(record).some(key => !['version', 'target'].includes(key)) ||
       !CONNECTION_TARGETS.some(row => row.id === record.target)) throw new RuntimeError('CONNECTION_STATE_CORRUPT');
-  return record.target;
+  return { saved: true, target: record.target };
 }
+
+/** The selected target; Paseo when nothing was ever saved. */
+export function selectedTarget(loc) { return savedConnection(loc).target; }
+
+// The Smart apps refuse a daemon whose hello carries no brand, so only they need the runtime patch. The official Paseo
+// app ignores the extra field, and Paseo needs nothing: a patched runtime is simply left alone for it.
+const BRANDED_TARGETS = Object.freeze(['woowtech', 'apporo']);
+export const requiresBrand = target => BRANDED_TARGETS.includes(connectionTarget(target).id);
 
 /** Records the choice (private file, atomic replace). It is the only thing written: nothing about the daemon changes here. */
 export function saveSelectedTarget(loc, target) {
@@ -50,7 +63,19 @@ export function saveSelectedTarget(loc, target) {
 }
 
 const managedOrigins = new Set(CONNECTION_TARGETS.map(row => row.appUrl));
-const managed = origin => managedOrigins.has(origin.trim().replace(/\/+$/, ''));
+/**
+ * Is this CORS entry one of the three apps' own origin? Compared the way a browser would (scheme and host ignore case, the
+ * default port and trailing slashes do not matter), but only for a bare origin: an entry with a path, query or user
+ * information is somebody else's setting and stays. Linear in the length: trailing slashes are counted, never re-scanned.
+ */
+function managed(entry) {
+  const text = entry.trim();
+  let end = text.length;
+  while (end > 0 && text[end - 1] === '/') end--;
+  let url;
+  try { url = new URL(text.slice(0, end)); } catch { return false; }
+  return url.href === url.origin + '/' && managedOrigins.has(url.origin);
+}
 
 /**
  * The daemon configuration for one target: its web app, its relay (the endpoint and the public endpoint
@@ -79,11 +104,11 @@ export function targetConfiguration(config, target) {
  * The daemon's own pairing link for `target`, unchanged. Only the exact web app of the target, path `/` and a
  * `#offer=` fragment are accepted, and the offer it carries must be a version 2 offer for this daemon (server
  * id and public key present) naming this target's relay endpoint with TLS: a link for another relay, or one
- * without TLS, would pair a device with something else. Offers that demand a minimum security mode cannot be
+ * without TLS, would pair a device with something else (that relay check is what `legacy` relaxes, see below). Offers that demand a minimum security mode cannot be
  * answered by the Smart apps (they speak the relay encryption of Paseo 0.10); 0.11.2 sends none, so this is
  * defensive only.
  */
-export function targetPairUrl(official, target) {
+export function targetPairUrl(official, target, { legacy = false } = {}) {
   const profile = connectionTarget(target);
   if (typeof official !== 'string' || official.length > 16384 || /[\s\\]/.test(official)) throw new RuntimeError('PAIRING_ORIGIN_INVALID');
   let url;
@@ -92,8 +117,10 @@ export function targetPairUrl(official, target) {
   let offer;
   try { offer = JSON.parse(Buffer.from(url.hash.slice(7), 'base64url').toString('utf8')); }
   catch { throw new RuntimeError('PAIRING_OFFER_INVALID'); }
-  if (offer?.v !== 2 || typeof offer.serverId !== 'string' || !offer.serverId || typeof offer.daemonPublicKeyB64 !== 'string' || !offer.daemonPublicKeyB64 ||
-      offer.relay?.endpoint !== profile.relayEndpoint || offer.relay?.useTls !== true) throw new RuntimeError('PAIRING_TARGET_MISMATCH');
+  if (offer?.v !== 2 || typeof offer.serverId !== 'string' || !offer.serverId || typeof offer.daemonPublicKeyB64 !== 'string' || !offer.daemonPublicKeyB64) throw new RuntimeError('PAIRING_TARGET_MISMATCH');
+  // Legacy mode (no target ever saved) pairs as 0.1.4-rc.9 did: the app is checked, the relay is whatever the daemon is
+  // configured with (a tenant may run its own). Once a target is saved, its relay and TLS must match exactly.
+  if (!legacy && (offer.relay?.endpoint !== profile.relayEndpoint || offer.relay?.useTls !== true)) throw new RuntimeError('PAIRING_TARGET_MISMATCH');
   if (profile.id !== DEFAULT_TARGET && offer.minimumSecurityMode !== undefined) throw new RuntimeError('PAIRING_SECURITY_UNSUPPORTED');
   return `${profile.appUrl}/${url.hash}`;
 }

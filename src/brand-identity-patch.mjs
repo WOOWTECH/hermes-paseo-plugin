@@ -30,16 +30,22 @@ const files = root => {
   const server = path.join(root, BRAND_SERVER_PATH);
   return { server, helper: path.join(path.dirname(server), BRAND_HELPER_NAME) };
 };
-// Reads a regular file without following a link at its last component.
+// Permission and read-only errors have a stable code of their own: the bridge would otherwise report the raw errno
+// as OPERATION_FAILED and nothing could explain it to the person who has to fix the directory.
+const DENIED = new Set(['EACCES', 'EPERM', 'EROFS']);
+// Reads a regular file without following a link at its last component. Opened non-blocking and judged by fstat, so a FIFO
+// or device put at the path is refused instead of hanging the start while it holds the runtime lock.
 function readRegular(file) {
   let fd;
   try {
-    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    if (!fs.fstatSync(fd).isFile()) throw new RuntimeError('BRAND_IDENTITY_PATCH_MISMATCH');
-    return { bytes: fs.readFileSync(fd), mode: fs.fstatSync(fd).mode & 0o777 };
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new RuntimeError('BRAND_IDENTITY_SOURCE_MISMATCH');
+    return { bytes: fs.readFileSync(fd), mode: stat.mode & 0o777 };
   } catch (error) {
     if (error instanceof RuntimeError) throw error;
     if (error.code === 'ELOOP') throw new RuntimeError('UNSAFE_SYMLINK');
+    if (DENIED.has(error.code)) throw new RuntimeError('RUNTIME_NOT_READABLE');
     throw error;
   } finally { if (fd !== undefined) fs.closeSync(fd); }
 }
@@ -52,6 +58,9 @@ function replaceAtomically(file, bytes, mode) {
     const fd = fs.openSync(temp, 'wx', mode);
     try { fs.writeFileSync(fd, bytes); fs.fchmodSync(fd, mode); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.renameSync(temp, file);
+  } catch (error) {
+    if (DENIED.has(error?.code)) throw new RuntimeError('RUNTIME_NOT_WRITABLE');
+    throw error;
   } finally { try { fs.unlinkSync(temp); } catch { /* renamed away, or never created */ } }
 }
 
@@ -63,7 +72,7 @@ function replaceAtomically(file, bytes, mode) {
 export function applyBrandIdentityPatch(root) {
   const { server, helper: target } = files(root);
   assertSafePath(server); assertSafePath(target);
-  const before = readRegular(server);
+  const before = (() => { try { return readRegular(server); } catch (error) { if (error.code === 'ENOENT') throw new RuntimeError('BRAND_IDENTITY_SOURCE_MISMATCH'); throw error; } })();
   const current = sha(before.bytes);
   if (current !== ORIGINAL_BRAND_SERVER_SHA256 && current !== PATCHED_BRAND_SERVER_SHA256) throw new RuntimeError('BRAND_IDENTITY_SOURCE_MISMATCH');
   const installed = (() => { try { return readRegular(target).bytes; } catch (error) { if (error.code === 'ENOENT') return null; throw error; } })();
