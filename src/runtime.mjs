@@ -23,9 +23,10 @@ const PROVIDERS = ['hermes', 'claude', 'codex', 'pi'];
 const CONNECTION_PROFILE_VERSION = '1';
 const REVISION_ENTRY = 'HERMES_PASEO_RUNTIME_REVISION=';
 const TARGET_ENTRY = 'HERMES_PASEO_CONNECTION_TARGET=';
-// 0.17.4 waits for its worker (about 10 s) before exiting; terminal cleanup follows the release
-// of its lock. The bridge allows 90 s for the whole stop.
-const DAEMON_STOP_TIMEOUT_MS = 30000;
+// 0.17.4 waits up to about 10 s for its worker, and closes each terminal worker in up to about
+// 5 + 3 s, before and after its supervisor exits (procps `ps` reads the process table). 45 s
+// covers the worker and four terminals; the bridge allows 120 s for the whole stop.
+const DAEMON_STOP_TIMEOUT_MS = 45000;
 const safeCode = error => /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code || '') ? error.code : 'RUNTIME_FAILED';
 const packageRoot = (pkg, root) => path.join(root, 'node_modules/@getpaseo', pkg);
 const cliPath = root => path.join(packageRoot('cli', root), 'bin/paseo');

@@ -80,10 +80,28 @@ export function seedCurrentRelease(loc, { persistedConfig = false, modules = {} 
     if (result.status !== 0) throw new Error('fixture extraction failed');
   } else write(root, `${SERVER}/package.json`, JSON.stringify({ name: '@getpaseo/server', type: 'module', version: PASEO_VERSION }));
   write(root, `${SERVER}/dist/server/server/websocket-server.js`, websocketServerSource());
+  write(root, `${SERVER}/dist/server/web-ui/index.html`, '<!doctype html>');
   write(root, `${CLI}/package.json`, JSON.stringify({ name: '@getpaseo/cli', type: 'module', version: PASEO_VERSION }));
+  // Answers --version; any other command is recorded in PASEO_HOME and fails, so a test sees
+  // every daemon start or pairing request this release's CLI was asked to make.
+  write(root, `${CLI}/bin/paseo`, `import fs from "node:fs";
+if (process.argv.includes("--version")) { process.stdout.write(${JSON.stringify(PASEO_VERSION + '\n')}); process.exit(0); }
+fs.appendFileSync(process.env.PASEO_HOME + "/cli-calls", process.argv.slice(2).join(" ") + "\\n");
+process.exit(3);
+`);
   for (const [relative, source] of Object.entries(modules)) write(root, relative, source);
   markRuntimeReady(loc);
   return root;
+}
+
+/** PATH with failing stand-ins for every provider CLI, so detection never runs a real one. */
+export function providerlessPath(f) {
+  const bin = path.join(f.dir, 'bin');
+  fs.mkdirSync(bin, { recursive: true });
+  for (const name of ['claude', 'codex', 'hermes', 'pi']) {
+    fs.writeFileSync(path.join(bin, name), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  }
+  return [bin, '/usr/bin', '/bin'].join(path.delimiter);
 }
 
 /** An earlier 0.11.2 release as 0.1.2-0.1.4 installed it, with its receipt. */

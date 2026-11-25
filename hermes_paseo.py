@@ -56,7 +56,7 @@ HOST_CREDENTIALS = (
     'HERMES_DASHBOARD_BASIC_AUTH_SECRET',
     'API_SERVER_KEY',
 )
-TIMEOUTS = {'status': 20, 'start': 480, 'stop': 60, 'models': 165,
+TIMEOUTS = {'status': 20, 'start': 480, 'stop': 120, 'models': 165,
             'pair': 40, 'relay': 75, 'config': 45, 'acceptance': 480, 'chat': 240, 'continue': 240}
 FIELDS = {'status': (), 'start': (), 'stop': (), 'models': ('provider',),
           'pair': (), 'relay': (), 'config': ('target',), 'acceptance': ('providers',),
