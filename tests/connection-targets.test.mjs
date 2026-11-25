@@ -6,7 +6,7 @@ import { CONNECTION_TARGETS, connectionTarget, selectedTarget, targetConfigurati
 import { locations, readState, updateState, withRuntimeLock } from '../src/state.mjs';
 import { pair, saveConnectionSettings, status, verifyRelay } from '../src/runtime.mjs';
 import { validateInput, publicStatus } from '../src/control.mjs';
-import { fixture } from './helpers/release.mjs';
+import { fixture } from './release-fixtures.mjs';
 
 const offerFor = (target, patch = {}) => ({ v: 2, serverId: 'srv_test12345678', daemonPublicKeyB64: 'test-public-key', relay: { endpoint: target.relayEndpoint, useTls: true }, ...patch });
 const fragmentFor = offer => '#offer=' + Buffer.from(JSON.stringify(offer)).toString('base64url');
@@ -36,7 +36,7 @@ test('the three targets bind each official app to its own TLS relay, and Paseo s
 });
 
 test('daemon config for a target keeps unrelated settings and only the selected official origin', () => {
-  const base = { daemon: { listen: '127.0.0.1:6779', relay: { endpoint: 'wrong:443', enabled: false, requireProtectedSecurity: true },
+  const base = { daemon: { listen: 'localhost:6779', relay: { endpoint: 'wrong:443', enabled: false, requireProtectedSecurity: true },
     cors: { allowedOrigins: ['https://local.example', 'https://smart.apporo.ai/', 'https://app.paseo.sh'] }, mcp: { enabled: true } },
     app: { baseUrl: 'https://wrong.example' }, agents: { providers: { claude: { enabled: false } } } };
   const before = structuredClone(base);
@@ -45,7 +45,7 @@ test('daemon config for a target keeps unrelated settings and only the selected 
     assert.equal(config.app.baseUrl, target.appUrl);
     assert.deepEqual({ ...config.daemon.relay, requireProtectedSecurity: undefined }, { enabled: true, endpoint: target.relayEndpoint, publicEndpoint: target.relayEndpoint, useTls: true, publicUseTls: true, requireProtectedSecurity: undefined });
     assert.deepEqual(config.daemon.cors.allowedOrigins, ['https://local.example', target.appUrl]);
-    assert.equal(config.daemon.listen, '127.0.0.1:6779');
+    assert.equal(config.daemon.listen, 'localhost:6779');
     assert.deepEqual(config.daemon.mcp, { enabled: true });
     assert.deepEqual(config.agents, base.agents);
     // The Smart apps only speak the older relay encryption; Paseo keeps the user's choice.

@@ -8,7 +8,7 @@ import { locations, readState, updateState, withRuntimeLock, processIdentity } f
 import { runProcess } from '../src/process.mjs';
 import { activate, deactivate, status, listModels, inheritedEnv } from '../src/runtime.mjs';
 import { demonstrablyReusedPid, linuxProcessBirth, linuxContainerIdentity, instanceFromPreviousContainer } from '../src/daemon-identity.mjs';
-import { seedCurrentRelease } from './helpers/release.mjs';
+import { seedCurrentRelease } from './release-fixtures.mjs';
 const SERVER_MODULES = 'node_modules/@getpaseo/server/dist/server/server/';
 
 function fixture() {

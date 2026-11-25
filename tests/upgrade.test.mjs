@@ -10,10 +10,12 @@ import { locations, readState, updateState, processIdentity } from '../src/state
 import { activate, deactivate, status, writeDaemonConfig, checkDaemonConfig, saveConnectionSettings } from '../src/runtime.mjs';
 import { RUNTIME_REVISION, PRIOR_RELEASES, pruneUnusedPriorReleases, priorRuntimeDirectory, runtimeDirectory } from '../src/runtime-layout.mjs';
 import { saveSelectedTarget, CONNECTION_TARGETS } from '../src/connection-targets.mjs';
-import { fixture, lifecycleModules, seedCurrentRelease, seedPriorRelease, fakeSupervisor, providerlessPath } from './helpers/release.mjs';
+import { fixture, lifecycleModules, seedCurrentRelease, seedPriorRelease, fakeSupervisor, providerlessPath } from './release-fixtures.mjs';
 
 const R2 = PRIOR_RELEASES.find(row => row.generation === 'r2').revision;
 const R1 = PRIOR_RELEASES.find(row => row.generation === 'r1').revision;
+const PORT = 6779;
+const LOOPBACK = `127.0.0.1:${PORT}`;
 const CURRENT_ENV = { HERMES_PASEO_RUNTIME_REVISION: RUNTIME_REVISION, HERMES_PASEO_CONNECTION_PROFILE_VERSION: '1' };
 
 function owned() {
@@ -30,7 +32,7 @@ const realLoader = root => import(pathToFileURL(path.join(root, 'node_modules/@g
 // 0.11.2 accepted all of it; 0.17.4's strict schema accepts it only after its own normalization.
 const rc9Config = () => ({
   $schema: 'https://paseo.sh/schemas/paseo.config.v1.json', version: 1,
-  daemon: { listen: '127.0.0.1:6779', hostnames: ['localhost', '127.0.0.1', '.localhost'], relay: { enabled: true }, mcp: { enabled: true },
+  daemon: { listen: LOOPBACK, hostnames: ['localhost', '127.0.0.1', '.localhost'], relay: { enabled: true }, mcp: { enabled: true },
     cors: { allowedOrigins: ['http://keep.example'] } },
   providers: { openai: { apiKey: 'fixture-not-a-key', stt: { baseUrl: 'https://stt.example' } } },
   agents: { providers: {
@@ -169,7 +171,7 @@ test('the real 0.17.4 loader normalizes an rc.9 config; every target is written 
   for (const target of CONNECTION_TARGETS) {
     fs.writeFileSync(file, JSON.stringify({ ...rc9Config(), daemon: { ...rc9Config().daemon, relay: { enabled: true, requireProtectedSecurity: true } } }));
     saveSelectedTarget(loc, target.id);
-    await writeDaemonConfig(6779, launchers);
+    await writeDaemonConfig(PORT, launchers);
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     const written = loader.readPersistedConfig(loc.paseoHome);
     assert.equal(loader.PersistedConfigSchema.safeParse(JSON.parse(fs.readFileSync(file, 'utf8'))).success, true);
@@ -181,10 +183,10 @@ test('the real 0.17.4 loader normalizes an rc.9 config; every target is written 
     assert.deepEqual(written.features.voiceMode.stt, { provider: 'local' });
     assert.equal(written.providers?.openai, undefined);
     assert.deepEqual(written.agents.providers.hermes, { label: 'Hermes', command: ['/usr/bin/hermes-fixture', 'acp'], env: { HERMES_HOME: loc.agentDir, HOME: loc.home, HERMES_PASEO_ACP_CHILD: '1' }, enabled: true });
-    assert.equal(written.daemon.listen, '127.0.0.1:6779');
+    assert.equal(written.daemon.listen, LOOPBACK);
     assert.equal(written.daemon.name, undefined);
     // The next activation compares against what the daemon saved: nothing to apply.
-    assert.equal(await writeDaemonConfig(6779, launchers), false);
+    assert.equal(await writeDaemonConfig(PORT, launchers), false);
   }
 });
 

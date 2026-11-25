@@ -9,7 +9,7 @@ import { targetEnvironment, CONNECTION_TARGETS } from '../src/connection-targets
 import { patchBrandIdentitySource, applyBrandIdentityPatch, brandIdentityPatchReady, BRAND_SERVER_PATH, BRAND_HELPER_NAME,
   ORIGINAL_BRAND_SERVER_SHA256, PATCHED_BRAND_SERVER_SHA256 } from '../src/brand-identity-patch.mjs';
 import { runtimeDirectory, markRuntimeReady, runtimeReady, priorRuntimeDirectory } from '../src/runtime-layout.mjs';
-import { fixture, seedCurrentRelease, seedPriorRelease, websocketServerSource } from './helpers/release.mjs';
+import { fixture, seedCurrentRelease, seedPriorRelease, websocketServerSource } from './release-fixtures.mjs';
 import { locations } from '../src/state.mjs';
 
 const source = websocketServerSource();

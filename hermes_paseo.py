@@ -164,9 +164,10 @@ def public_pair(value, target='paseo'):
     returning anything but `<official app>/#offer=<base64url>` for the target saved on disk.
     """
     url = value.get('url')
+    if not isinstance(url, str) or len(url) > 8192 or re.search(r'[\s\x00-\x1f\x7f\\]', url):
+        raise BridgeError('INVALID_PAIR_URL')
     origin = TARGET_ORIGINS.get(target)
-    if (origin is None or not isinstance(url, str) or len(url) > 16384
-            or re.search(r'[\s\x00-\x1f\x7f\\]', url) or value.get('target', target) != target):
+    if origin is None or value.get('target', target) != target:
         raise BridgeError('INVALID_PAIR_URL')
     try:
         parsed = urlsplit(url)

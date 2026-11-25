@@ -6,9 +6,9 @@ import path from 'node:path';
 import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
-import { runtimeDirectory, markRuntimeReady, PASEO_VERSION, LEGACY_PASEO_VERSION, PRIOR_RELEASES } from '../../src/runtime-layout.mjs';
+import { runtimeDirectory, markRuntimeReady, PASEO_VERSION, LEGACY_PASEO_VERSION, PRIOR_RELEASES } from '../src/runtime-layout.mjs';
 
-const fixtures = new URL('../fixtures/paseo-0.17.4/', import.meta.url);
+const fixtures = new URL('./fixtures/paseo-0.17.4/', import.meta.url);
 export const websocketServerSource = () => gunzipSync(fs.readFileSync(new URL('websocket-server.js.gz', fixtures))).toString();
 const SERVER = 'node_modules/@getpaseo/server';
 const CLI = 'node_modules/@getpaseo/cli';
