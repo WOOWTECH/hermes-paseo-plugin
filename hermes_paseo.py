@@ -56,12 +56,22 @@ HOST_CREDENTIALS = (
     'HERMES_DASHBOARD_BASIC_AUTH_SECRET',
     'API_SERVER_KEY',
 )
-TIMEOUTS = {'status': 20, 'start': 480, 'stop': 60, 'models': 165,
-            'pair': 40, 'relay': 75, 'acceptance': 480, 'chat': 240, 'continue': 240}
-FIELDS = {'status': (), 'start': (), 'stop': (), 'models': ('provider',),
-          'pair': (), 'relay': (), 'acceptance': ('providers',),
+# `prepare` installs the new runtime beside a running daemon: npm may take up to 300 s, and another
+# install can hold the runtime lock for up to 120 s before it. Callers of `prepare` allow 480 s.
+TIMEOUTS = {'status': 20, 'start': 480, 'stop': 120, 'prepare': 480, 'models': 165,
+            'pair': 40, 'relay': 75, 'config': 45, 'acceptance': 480, 'chat': 240, 'continue': 240}
+FIELDS = {'status': (), 'start': (), 'stop': (), 'prepare': (), 'models': ('provider',),
+          'pair': (), 'relay': (), 'config': ('target',), 'acceptance': ('providers',),
           'chat': ('provider', 'model', 'mode', 'thinking', 'message'),
           'continue': ('agentId', 'message')}
+# What the runtime accepts is wider than what a caller of the bridge may send: only the bridge itself
+# adds `reason: disable` to a stop (see Bridge.call).
+NODE_FIELDS = {**FIELDS, 'stop': ('reason',)}
+# Fixed official apps, mirrored from src/connection-targets.mjs. Pairing material is only
+# released to the selected target's exact origin; no request supplies an origin.
+TARGET_ORIGINS = {'paseo': 'https://app.paseo.sh',
+                  'woowtech': 'https://smart.woowtech.io',
+                  'apporo': 'https://smart.apporo.ai'}
 CODES = frozenset('''INVALID_REQUEST INVALID_PROVIDER INVALID_MESSAGE INVALID_AGENT_ID
 INVALID_MODEL INVALID_PAIR_URL INVALID_COMMAND_OUTPUT REQUEST_TOO_LARGE OUTPUT_LIMIT
 PROCESS_TIMEOUT PROCESS_FAILED NODE_UNAVAILABLE HERMES_UNAVAILABLE RUNTIME_UNAVAILABLE
@@ -76,12 +86,26 @@ PROVIDER_LOGIN_REQUIRED PROVIDER_ERROR START_FAILED STOP_FAILED ACCEPTANCE_CLEAN
 WORKSPACE_CREATE_FAILED PERMISSION_REQUIRED PROVIDER_TIMEOUT PROVIDER_TURN_FAILED MODEL_SELECTION_UNAVAILABLE
 EMPTY_OR_UNEXPECTED_REPLY'''.split())
 CODES = CODES | {'ACCEPTANCE_INTERRUPTED', 'PROVIDER_QUOTA_EXHAUSTED'}
+CODES = CODES | set('''INVALID_TARGET CONFIGURATION_PENDING CONNECTION_STATE_CORRUPT PAIRING_TARGET_MISMATCH
+PAIRING_OFFER_INVALID PAIRING_SECURITY_UNSUPPORTED BRAND_IDENTITY_SOURCE_MISMATCH BRAND_IDENTITY_PATCH_MISMATCH
+CONFIG_INVALID CONFIG_CORRUPT CONFIG_INCOMPATIBLE PORT_UNAVAILABLE DAEMON_STATE_CHANGED
+TERMINAL_CLEANUP_NOT_CONFIRMED STOP_NOT_CONFIRMED DAEMON_REPLACED
+INSUFFICIENT_DISK RUNTIME_INSTALL_FAILED RUNTIME_INSTALL_TIMEOUT RUNTIME_IN_USE RUNTIME_NOT_READY'''.split())
+# A stop the runtime declines before it signals anything (the new release cannot read config.json, or is
+# not installed yet): the daemon keeps serving, so the pause the stop recorded must not outlive it.
+STOP_REFUSALS = frozenset({'CONFIG_INCOMPATIBLE', 'CONFIG_CORRUPT', 'RUNTIME_NOT_READY'})
 PUBLIC_KEYS = frozenset('''ok code installed version enabled phase diagnosticCode daemon running
 reachable relayEnabled relayVerified relayVerifiedAt providers provider label status modes id
 isDefault defaultModeId models defaultThinkingOptionId thinkingOptions chatVerified chatVerifiedAt
 checkedAt passed firstReply followup model modeId thinking agentId message reply errorCode
-available authentication loginHint chatErrorCode cleanup archived workspaceArchived'''.split())
-PAIR_TEXT = re.compile(r'https?://(?:[^\s/]*@)?app\.paseo\.sh[^\s<>\"\']*', re.I)
+available authentication loginHint chatErrorCode cleanup archived workspaceArchived
+selectedTarget activeTarget configurationPending target saved configCheck paths prepare stage at requiredMiB availableMiB retryInSeconds stopRefused'''.split())
+# Free text hides any official app link and the pairing offer of any other URL (the `#offer=` or
+# `#connect=` fragment onward). Every alternative starts at a fixed token, so no scan runs forward
+# from each character: an earlier form began with an unbounded run before the `#` and took
+# quadratic time on a long reply that had no `#`.
+PAIR_TEXT = re.compile(r'(?:https?://(?:[^\s/]*@)?(?:app\.paseo\.sh|smart\.woowtech\.io|smart\.apporo\.ai)'
+                       r'|#(?:offer|connect)=)[^\s<>\"\']*', re.I)
 SECRET_TEXT = re.compile(r'(?i)(?:bearer\s+[a-z0-9._~+/-]+|(?:sk|ghp|github_pat|xoxb|xoxp)[-_][a-z0-9_-]{8,}|(?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*[^\s,;]+)')
 
 
@@ -100,12 +124,17 @@ def get_hermes_home():
     return Path(resolve_home()).expanduser().absolute()
 
 
-def validate_input(action, value=None):
+def validate_input(action, value=None, fields=None):
     value = {} if value is None else value
-    if action not in FIELDS or not isinstance(value, dict) or any(k not in FIELDS[action] for k in value):
+    table = FIELDS if fields is None else fields
+    if action not in table or not isinstance(value, dict) or any(k not in table[action] for k in value):
+        raise BridgeError('INVALID_REQUEST')
+    if action == 'stop' and value.get('reason', 'disable') != 'disable':
         raise BridgeError('INVALID_REQUEST')
     if action in ('models', 'chat') and (not isinstance(value.get('provider'), str) or value['provider'] not in PROVIDERS):
         raise BridgeError('INVALID_PROVIDER')
+    if action == 'config' and (not isinstance(value.get('target'), str) or value['target'] not in TARGET_ORIGINS):
+        raise BridgeError('INVALID_TARGET')
     if 'providers' in value:
         providers = value['providers']
         if not isinstance(providers, list) or not 1 <= len(providers) <= 4 or any(not isinstance(p, str) or p not in PROVIDERS for p in providers) or len(set(providers)) != len(providers):
@@ -144,18 +173,27 @@ def redact(value, depth=0):
     return None
 
 
-def public_pair(value):
+def public_pair(value, target='paseo'):
+    """Release a pairing link only in the selected target's exact official form.
+
+    The runtime already validated the offer; this independent check keeps the HTTP surface from
+    returning anything but `<official app>/#offer=<base64url>` for the target saved on disk.
+    """
     url = value.get('url')
     if not isinstance(url, str) or len(url) > 8192 or re.search(r'[\s\x00-\x1f\x7f\\]', url):
         raise BridgeError('INVALID_PAIR_URL')
+    origin = TARGET_ORIGINS.get(target)
+    if origin is None or value.get('target', target) != target:
+        raise BridgeError('INVALID_PAIR_URL')
     try:
         parsed = urlsplit(url)
-        valid = parsed.scheme == 'https' and parsed.hostname == 'app.paseo.sh' and parsed.netloc in ('app.paseo.sh', 'app.paseo.sh:443') and parsed.username is None and parsed.password is None and parsed.port in (None, 443)
+        valid = (url == origin + '/#' + parsed.fragment
+                 and re.fullmatch(r'offer=[A-Za-z0-9_-]+', parsed.fragment) is not None)
     except ValueError:
         valid = False
     if not valid:
         raise BridgeError('INVALID_PAIR_URL')
-    return {'url': url}
+    return {'url': url, 'target': target}
 
 
 def _safe_path(path):
@@ -378,6 +416,13 @@ class Bridge:
         self._error = None
         self._retry_at = None
         self._retry_count = 0
+        self._preparing = False
+        self._prepare_failures = 0
+        self._prepare_error = None
+        self._prepare_retry_at = None  # no attempt starts before this (monotonic); also a pause after a success
+        self._prepare_given_up = False
+        self._stop_guarded = False
+        self._stop_refusal = None
         self._operation_lock = threading.Lock()
 
     def dashboard_origin(self):
@@ -422,6 +467,21 @@ class Bridge:
         except BridgeError as error:
             return error.code
         return 'ORIGIN_ADOPTED'
+
+    def connection_target(self):
+        """The connection target saved by the runtime (`connection.json`); Paseo by default."""
+        record = _read_json(self.state_dir / 'connection.json', private=True)
+        if record is None:
+            return 'paseo'
+        if set(record) != {'version', 'target'} or record['version'] != 1 or record['target'] not in TARGET_ORIGINS:
+            raise BridgeError('CONNECTION_STATE_CORRUPT')
+        return record['target']
+
+    def _shown_target(self):
+        try:
+            return self.connection_target()
+        except BridgeError:
+            return 'paseo'
 
     def dashboard_origins(self, fallback):
         """At most two operator origins; never persist Ingress over the primary."""
@@ -587,7 +647,7 @@ class Bridge:
                 _write_json(path, record)
 
     def _invoke(self, action, value=None):
-        value = validate_input(action, value)
+        value = validate_input(action, value, NODE_FIELDS)
         env = self.environment()
         node = resolve_executable('node', env)
         if not node:
@@ -599,7 +659,7 @@ class Bridge:
         result = run_process([node, str(self.root / 'bin' / 'control.mjs'), action],
                              json.dumps(value, ensure_ascii=False).encode('utf-8'), env,
                              TIMEOUTS[action])
-        return public_pair(result) if action == 'pair' else redact(result)
+        return public_pair(result, self.connection_target()) if action == 'pair' else redact(result)
 
     def _decorate(self, result):
         result = copy.deepcopy(result)
@@ -614,10 +674,17 @@ class Bridge:
         for key, default in {'running': False, 'reachable': False, 'relayEnabled': False,
                              'relayVerified': False, 'relayVerifiedAt': None}.items():
             result['daemon'].setdefault(key, default)
+        if result.get('selectedTarget') not in TARGET_ORIGINS:
+            result['selectedTarget'] = self._shown_target()
+        if result.get('activeTarget') not in TARGET_ORIGINS:
+            result['activeTarget'] = None
+        result['configurationPending'] = result.get('configurationPending') is True
         result['providers'] = [row for row in result.get('providers', [])
                                if isinstance(row, dict) and row.get('provider') in PROVIDERS]
         result['onboarding'] = self.onboarding()
         result['acceptanceJob'] = self.acceptance_status()
+        if 'prepare' in result or self._preparing or self._prepare_failures:
+            result['prepare'] = self._prepare_view(result.get('prepare'))
         with self._condition:
             if self._phase:
                 result['phase'] = self._phase
@@ -635,6 +702,8 @@ class Bridge:
                 result['enabled'] = False
             if self._error:
                 result['diagnosticCode'] = self._error
+            if self._stop_refusal:
+                result['stopRefused'] = dict(self._stop_refusal)
         return result
 
     def status(self, fresh=False):
@@ -663,11 +732,88 @@ class Bridge:
                 if generation == self._generation and not result.get('diagnosticCode'):
                     self._cache = copy.deepcopy(result)
                     self._cached_at = time.monotonic()
-            return self._decorate(result)
+            decorated = self._decorate(result)
+            self._maybe_prepare(result)
+            return decorated
         finally:
             with self._condition:
                 self._checking = False
                 self._condition.notify_all()
+
+    def _maybe_prepare(self, result):
+        """Install the new release beside an older daemon that keeps serving, and check it can read the config.
+
+        A plugin update leaves the previous release's daemon running until the user stops and starts it.
+        Preparing now keeps that restart short and shows, before anything is stopped, whether the new release
+        can take over. `prepare` never starts or stops a daemon. A failed attempt is tried again after the
+        same growing delays as a failed start (RETRY_BACKOFF, RETRY_LIMIT attempts); an explicit start
+        tries at once. Stopping is refused until the release is ready (see Node `deactivate`).
+        """
+        daemon = result.get('daemon') or {}
+        if (result.get('diagnosticCode') != 'RESTART_REQUIRED' or result.get('installed') is not False
+                or daemon.get('running') is not True or result.get('enabled') is not True):
+            return
+        with self._condition:
+            if (self._preparing or self._pause_requested
+                    or (self._worker is not None and self._worker.is_alive())
+                    or (self._stop_worker is not None and self._stop_worker.is_alive())):
+                return
+            if self._prepare_given_up or (self._prepare_retry_at is not None and time.monotonic() < self._prepare_retry_at):
+                return  # waiting out the delay, or the attempts are used up
+            try:
+                if (_read_json(self.state_dir / 'onboarding.json') or {}).get('paused'):
+                    return
+            except (BridgeError, OSError):
+                return
+            self._preparing = True
+            context = contextvars.copy_context()
+            self._worker = threading.Thread(target=lambda: context.run(self._prepare),
+                                            name='hermes-paseo-prepare', daemon=True)
+            self._worker.start()
+
+    def _prepare(self):
+        failure = None
+        try:
+            with self._operation_lock:
+                with self._condition:
+                    if self._pause_requested:
+                        return
+                self._invoke('prepare')
+        except Exception as error:
+            failure = error.code if isinstance(error, BridgeError) else 'PREPARE_FAILED'
+        finally:
+            with self._condition:
+                self._preparing = False
+                if failure is None:
+                    # Ready. A short pause keeps a status that still disagrees from starting npm checks in a loop.
+                    self._prepare_failures, self._prepare_error, self._prepare_given_up = 0, None, False
+                    self._prepare_retry_at = time.monotonic() + RETRY_BACKOFF[0]
+                else:
+                    self._prepare_failures += 1
+                    self._prepare_error = failure
+                    self._prepare_given_up = self._prepare_failures > RETRY_LIMIT
+                    self._prepare_retry_at = (None if self._prepare_given_up else
+                                              time.monotonic() + RETRY_BACKOFF[min(self._prepare_failures - 1, len(RETRY_BACKOFF) - 1)])
+            self.invalidate()
+
+    def _prepare_view(self, runtime):
+        """Where the new release stands, for the page: ready, being installed, or why not and when it tries again.
+
+        `runtime` is what the runtime recorded (it survives a Dashboard restart); this process adds that an
+        attempt is running now and when the next one is due."""
+        runtime = runtime if isinstance(runtime, dict) else {}
+        with self._condition:
+            if self._preparing:
+                return {'stage': 'running'}
+            if self._prepare_failures:
+                due = None if self._prepare_given_up else max(0, int(self._prepare_retry_at - time.monotonic() + 0.999))
+                view = {'stage': 'failed', 'code': self._prepare_error if self._prepare_error in CODES else 'OPERATION_FAILED',
+                        'retryInSeconds': due}
+                if runtime.get('code') == view['code']:
+                    view.update({key: runtime[key] for key in ('requiredMiB', 'availableMiB') if isinstance(runtime.get(key), int)})
+                return view
+        stage = runtime.get('stage')
+        return {key: value for key, value in runtime.items() if key != 'retryInSeconds'} if stage in ('ready', 'pending', 'failed') else {'stage': 'pending'}
 
     def _initialize(self):
         verify = False
@@ -725,6 +871,9 @@ class Bridge:
                 return self._decorate(self._cache)
             if self._worker is None or not self._worker.is_alive():
                 self._pause_requested = False
+                self._stop_refusal = None
+                # An explicit start also tries the new release again at once.
+                self._prepare_failures, self._prepare_retry_at, self._prepare_given_up = 0, None, False
                 with _state_lock(self.state_dir):
                     record = _read_json(self.state_dir / 'onboarding.json')
                     record['paused'] = False
@@ -740,26 +889,56 @@ class Bridge:
 
     def _background_stop(self):
         try:
-            self._finish_stop()
+            self._finish_stop(None)
         except Exception:
             pass  # the safe error code is already visible in status
 
-    def _finish_stop(self):
+    def _lift_pause(self, code):
+        """A stop the runtime refused changed nothing: the daemon keeps serving, so neither the memory
+        flag nor the persisted pause may outlive it (a paused bridge blocks pairing and recovery)."""
+        with self._condition:
+            self._pause_requested = False
+            self._phase = self._error = None
+            self._stop_refusal = {'code': code, 'at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+            try:
+                with _state_lock(self.state_dir):
+                    record = _read_json(self.state_dir / 'onboarding.json')
+                    if record is not None and record.get('paused'):
+                        record['paused'] = False
+                        _write_json(self.state_dir / 'onboarding.json', record)
+            except (BridgeError, OSError):
+                pass  # the refusal is the answer; the next start clears a pause that could not be written here
+
+    def _finish_stop(self, guard):
+        """Stop through the runtime. `guard` is a user's stop to move to a new release, which the runtime
+        refuses when that release could not start (the daemon keeps running); False is the host turning
+        the plugin off, which is never refused. None takes the guard of a stop queued behind a start."""
+        if guard is None:
+            with self._condition:
+                guard = self._stop_guarded
         try:
             with self._operation_lock:
-                result = self._invoke('stop')
+                result = self._invoke('stop') if guard else self._invoke('stop', {'reason': 'disable'})
                 with self._condition:
                     self._phase = self._error = None
                 return result
         except Exception as error:
-            with self._condition:
-                self._phase = 'error'
-                self._error = error.code if isinstance(error, BridgeError) else 'STOP_FAILED'
+            code = error.code if isinstance(error, BridgeError) else 'STOP_FAILED'
+            if code in STOP_REFUSALS:
+                self._lift_pause(code)
+            else:
+                with self._condition:
+                    self._phase = 'error'
+                    self._error = code
             raise
         finally:
             self.invalidate()
 
-    def call(self, action, value=None, allow_pair=False):
+    def call(self, action, value=None, allow_pair=False, guard_config=False):
+        """Run a runtime action. `guard_config` marks a user's stop that moves an older daemon to this
+        release (the Dashboard's Stop): the runtime then refuses it while the new release cannot take over.
+        Without it a stop is never refused, which is what the host adapter's disable and remove rely on
+        (it calls `call('stop', {})`) and what the explicit /paseo stop before a removal means."""
         value = validate_input(action, value)
         if action == 'pair' and not allow_pair:
             raise BridgeError('INVALID_REQUEST')
@@ -774,6 +953,7 @@ class Bridge:
                 with self._condition:
                     self._pause_requested = True
                     self._phase = 'stopping'
+                    self._stop_refusal = None
                     # Persist pause before waiting for npm/daemon startup. Explicit
                     # /start is the only operation that can resume it.
                     with _state_lock(self.state_dir):
@@ -782,13 +962,16 @@ class Bridge:
                             record['paused'] = True
                             _write_json(self.state_dir / 'onboarding.json', record)
                     if self._worker is not None and self._worker.is_alive():
-                        if self._stop_worker is None or not self._stop_worker.is_alive():
+                        queued = self._stop_worker is not None and self._stop_worker.is_alive()
+                        # A queued stop is as unguarded as its least guarded request.
+                        self._stop_guarded = guard_config and (self._stop_guarded if queued else True)
+                        if not queued:
                             context = contextvars.copy_context()
                             self._stop_worker = threading.Thread(target=lambda: context.run(self._background_stop),
                                                                  name='hermes-paseo-stop', daemon=True)
                             self._stop_worker.start()
                         return self._decorate({'enabled': False, 'phase': 'stopping'})
-                result = self._finish_stop()
+                result = self._finish_stop(guard_config)
                 return self._decorate(result)
             result = self._invoke(action, value)
             if action == 'acceptance' and result.get('passed') is True:

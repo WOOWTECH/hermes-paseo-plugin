@@ -110,3 +110,50 @@ test('the control action takes no input', () => {
   assert.deepEqual(validateInput('relay', {}), {});
   assert.throws(() => validateInput('relay', { url: OFFER }), e => e.code === 'INVALID_REQUEST');
 });
+
+test('every target is checked through its own offer, and evidence counts only for the target it was taken on', async () => {
+  const { saveSelectedTarget, CONNECTION_TARGETS } = await import('../src/connection-targets.mjs');
+  const f = fixture(); try {
+    const seen = [];
+    for (const target of CONNECTION_TARGETS) {
+      saveSelectedTarget(locations(), target.id);
+      const url = `${target.appUrl}/#offer=${Buffer.from(JSON.stringify({ v: 2, serverId: 'srv_1', daemonPublicKeyB64: 'k', relay: { endpoint: target.relayEndpoint, useTls: true } })).toString('base64url')}`;
+      const result = await verifyRelay({ daemon: up, offer: async asked => { assert.equal(asked, target.id); return { url }; },
+        connect: async (offerUrl, work) => { seen.push(offerUrl); return work({ getDaemonStatus: async () => ({}) }); } });
+      assert.equal(result.target, target.id);
+      assert.equal(relayState().target, target.id);
+      assert.equal((await status()).daemon.relayVerified, true);
+    }
+    assert.deepEqual(seen.map(url => new URL(url).origin), CONNECTION_TARGETS.map(row => row.appUrl));
+    // Evidence taken for Apporo says nothing about Paseo.
+    saveSelectedTarget(locations(), 'paseo');
+    assert.equal((await status()).daemon.relayVerified, false);
+    assert.equal((await status()).daemon.relayVerifiedAt, null);
+  } finally { f.close(); }
+});
+
+test('the default connection hands each target offer to the client as an endpoint; the client dials the offer relay', async () => {
+  const { CONNECTION_TARGETS } = await import('../src/connection-targets.mjs');
+  const f = fixture(); try {
+    const root = path.join(runtimeDirectory(locations()), 'node_modules/@getpaseo/cli');
+    fs.mkdirSync(path.join(root, 'dist/utils'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: '@getpaseo/cli', type: 'module', version: '0.17.4' }));
+    const log = path.join(f.dir, 'client.log');
+    // 0.17.4 parses the host with @getpaseo/protocol parseHostTarget, which reads the relay
+    // endpoint and TLS choice from the #offer= payload and ignores the app origin.
+    fs.writeFileSync(path.join(root, 'dist/utils/client.js'), `
+import fs from 'node:fs';
+export async function connectToDaemon(options) {
+  const offer = JSON.parse(Buffer.from(options.target.host.split('#offer=')[1], 'base64url').toString());
+  fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ kind: options.target.kind, relay: offer.relay }) + '\\n');
+  return { getDaemonStatus: async () => ({}), close: async () => {} };
+}
+`);
+    for (const target of CONNECTION_TARGETS) {
+      const url = `${target.appUrl}/#offer=${Buffer.from(JSON.stringify({ v: 2, serverId: 'srv_1', daemonPublicKeyB64: 'k', relay: { endpoint: target.relayEndpoint, useTls: true } })).toString('base64url')}`;
+      await verifyRelay({ daemon: up, offer: async () => ({ url }) });
+    }
+    const calls = fs.readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(calls, CONNECTION_TARGETS.map(row => ({ kind: 'endpoint', relay: { endpoint: row.relayEndpoint, useTls: true } })));
+  } finally { f.close(); }
+});

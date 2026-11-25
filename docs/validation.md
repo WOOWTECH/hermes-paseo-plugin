@@ -1,5 +1,22 @@
 # Hermes Paseo 驗收紀錄
 
+## 0.2.0-rc.1：連線標的與 Paseo 0.17.4（準備中，尚未發布）
+
+移植 Pi Agent 的 Agent Connect 0.1.24：Dashboard 可選 Paseo、Woowtech Smart、Apporo Smart，daemon 由 0.11.2 升到 0.17.4。另依 Agent Connect 0.17.4 的獨立審查修正：`config.json` 先經 0.17.4 自己的讀取器整理再寫回、停止舊 daemon 前先檢查設定（`CONFIG_INCOMPATIBLE`）、只有確切的已知舊版本會交給 0.11.2 模組、PID 檔讀到改寫中途會重讀、Smart 標的關閉 `requireProtectedSecurity` 並拒絕要求新版加密的邀請、只剩終端機清理未確認的停止記為警告。
+
+自動測試（2026-11-25，本機 Node 22.23.3、Python 3.11.2）：Node 132 項、Python 110 項全數通過；`node --check dashboard/dist/index.js` 通過；`npm audit --omit=dev --prefix runtime` 0 項。React／Chromium 瀏覽器測試全部情境通過，新增「儲存標的後等待套用、停止再恢復、產生並開啟 Woowtech Smart 配對連結（opener 與 referrer 為空）」；API 與官方網頁皆為本機模擬。設定整理以 vendored 的 0.17.4 原始檔案驗證（`tests/fixtures/paseo-0.17.4/`，附逐檔 SHA-256 與授權）。以 Hermes v0.22.5 的 `plugin_guard` 比對 rc.9，安全掃描沒有新增項目。
+
+本機真實 daemon 實測（隔離的 HOME、HERMES_HOME、TMPDIR，provider 以必定失敗的 `claude`／`codex`／`hermes`／`pi` 取代），以最終程式碼執行 67 項檢查全數通過：
+
+- rc.9 安裝並啟動 0.11.2（約 23 秒），配對連到 `app.paseo.sh`，在其上建立一個工作區。
+- 新版程式碼在舊 daemon 仍執行時：狀態經 0.11.2 版本目錄讀取（`RESTART_REQUIRED`，daemon 版本 0.11.2），舊 daemon 仍可配對 Paseo（`control.mjs` 與 Python bridge 皆是）；`start` 在旁安裝 0.17.4（冷快取約 20 秒）、通過設定檢查、回報需要重新啟動，supervisor 仍是同一個。品牌修補後的雜湊正確，rc.9 目錄未被改動。
+- 停止（經 rc.9 模組，約 1.4 秒）再啟動（約 11 秒）後由 0.17.4 執行同一個 `PASEO_HOME`：server ID 與 daemon 金鑰雜湊不變，0.11.2 建立的工作區仍在，只有一個 supervisor，r2 目錄保留。
+- 三個標的各自：儲存後等待套用且拒絕配對（`CONFIGURATION_PENDING`）；停止並啟動（約 8–9 秒）後 `config.json` 與執行中 daemon 的 relay 皆為該標的（TLS 開、Smart 標的沒有 `requireProtectedSecurity`）；supervisor 環境帶該標的；0.17.4 用戶端收到的 `server_info.brand` 為該標的；配對來源與路徑正確，Python bridge 只放行該標的的官方來源；經 `relay.paseo.sh`、`relay.woowtech.io`、`relay.apporo.ai` 的端對端 relay 檢查各約 3 秒通過；主機身分不變。
+- 退回：rc.9 程式約 0.5–2 秒停止 0.17.4 daemon（rc.9 的上限為 20 秒），並以 0.17.4 寫入的設定重新啟動 0.11.2、可配對 Paseo、主機身分不變；Apporo 標的時 rc.9 也能啟動 0.11.2，但依預期拒絕 Smart 配對連結。退回後新版可再次接手。
+- 結束後沒有任何程序引用暫存目錄，暫存目錄已刪除。版本目錄實測：0.11.2 r2 約 795 MB、0.17.4 約 1.1 GB。
+
+未驗證：真實 Hermes 模型的對話與驗收（0.17.4 把 Hermes 改為內建 plugin provider，模式改為編輯核准政策，需要真實模型重測）、Smart App 實際配對與對話、PaaS 與 HA 正式映像上的安裝（含 procps 與網路速度）、PaaS 更新器 45 秒限制下的首次安裝。目前的 PaaS 更新器會以 `dependency_manifest_changed` 拒絕本版。
+
 ## 0.1.4-rc.6：官方 relay 迴路自我驗證
 
 `relayVerified` 在 rc.5 以前是保留欄位：程式只讀取、從不寫入，所以永遠是 `false`，與 relay 是否可用無關。rc.6 補上實際驗證：`control.mjs relay`（Dashboard API `POST /relay`；Dashboard 的啟動流程在 daemon 就緒後會自動檢查，從未驗證或上次成功已超過 24 小時才再做）用剛產生的配對邀請，從本機以官方 Paseo 用戶端經 `relay.paseo.sh` 連回同一個 daemon，完成端對端加密握手並讀取 daemon 狀態。成功寫入 `relayVerified: true` 與 `relayVerifiedAt`；失敗寫入 `false` 並回傳 `RELAY_UNVERIFIED`。

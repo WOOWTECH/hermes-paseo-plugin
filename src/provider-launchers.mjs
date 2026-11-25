@@ -25,7 +25,13 @@ export function configureProviders(previous,launchers,loc,env=process.env) {
  for(const provider of providers) {
   const launcher=launchers[provider]||{startup:'missing',command:null};
   const inherited=provider==='hermes'?{HERMES_HOME:loc.agentDir,HOME:loc.home,HERMES_PASEO_ACP_CHILD:'1'}:{HOME:loc.home};
-  configured[provider]={...configured[provider],enabled:launcher.startup==='ready',command:launcher.command?[launcher.command,...(provider==='hermes'?['acp']:[])]:undefined,env:{...configured[provider]?.env,...inherited},...(provider==='hermes'?{extends:'acp',label:'Hermes',description:'Hermes Agent using the current profile and official ACP'}:{})};
+  const entry={...configured[provider]};
+  // Paseo 0.17.4 bundles Hermes as a plugin provider running `hermes acp`, and its config
+  // loader drops `extends: "acp"` and `description` from a stored `hermes` entry. The entry
+  // is now an override of that provider: this profile's executable, environment and label.
+  // Writing that stored form keeps provider reloads comparable with what the daemon saved.
+  if(provider==='hermes'){delete entry.extends;delete entry.description;}
+  configured[provider]={...entry,enabled:launcher.startup==='ready',command:launcher.command?[launcher.command,...(provider==='hermes'?['acp']:[])]:undefined,env:{...entry.env,...inherited},...(provider==='hermes'?{label:'Hermes'}:{})};
  }
  // Expose only configured agents, avoiding noisy unavailable stock entries.
  for(const id of ['copilot','opencode','antigravity','muse','omp'])if(!(id in configured))configured[id]={enabled:false};

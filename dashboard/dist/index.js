@@ -11,11 +11,20 @@
   const PAUSED = new Set(["disabled", "paused", "stopped", "stopping"]);
   const COMPANIONS = new Set(["claude", "codex", "pi"]);
   const AVAILABLE = new Set(["ready", "available", "installed", "authenticated", "auth_required", "login_required"]);
-  let markers = { started: [], guided: [], paused: false };
+  // Fixed official apps. A pairing link is shown only for the saved target's exact origin.
+  const TARGETS = [
+    { id: "woowtech", label: "Woowtech Smart", origin: "https://smart.woowtech.io" },
+    { id: "apporo", label: "Apporo Smart", origin: "https://smart.apporo.ai" },
+    { id: "paseo", label: "Paseo", origin: "https://app.paseo.sh" }
+  ];
+  function knownTarget(id) { return TARGETS.some(row => row.id === id); }
+  function targetOf(id) { return TARGETS.find(row => row.id === id) || TARGETS[2]; }
+  let markers = { started: [], guided: [], refused: [], paused: false };
   try {
     const saved = JSON.parse(window.sessionStorage.getItem(STORAGE));
     if (saved && Array.isArray(saved.started) && Array.isArray(saved.guided)) {
-      markers = { started: saved.started.slice(-40), guided: saved.guided.slice(-40), paused: saved.paused === true };
+      markers = { started: saved.started.slice(-40), guided: saved.guided.slice(-40),
+        refused: Array.isArray(saved.refused) ? saved.refused.slice(-40) : [], paused: saved.paused === true };
     }
   } catch (_) { /* Storage is optional; URLs never enter it. */ }
   function saveMarkers() {
@@ -37,7 +46,7 @@
   }
   function fault(code) { const error = new Error(code); error.code = code; return error; }
   function httpFault(status) {
-    return fault(status === 404 ? "RESTART" : status === 401 ? "AUTH" : status === 403 ? "FORBIDDEN" : status === 409 ? "BUSY" : "REQUEST");
+    return fault(status === 404 ? "RESTART" : status === 401 ? "AUTH" : status === 403 ? "FORBIDDEN" : status === 409 ? "BUSY" : status === 412 ? "REFUSED" : "REQUEST");
   }
   function errorCopy(error) {
     return ({
@@ -45,6 +54,7 @@
       AUTH: "Dashboard 登入已過期，請重新整理頁面並登入。",
       FORBIDDEN: "操作被拒絕。請確認 hermes-paseo 已啟用且登入有效；若使用反向代理，請由管理者確認正式網址設定。",
       BUSY: "服務仍在處理上一項操作，請稍後重試。",
+      REFUSED: "停止被拒絕，目前的服務沒有被動到、照常可用。原因（新版 Paseo 尚未準備好，或無法讀取目前的設定）與處理方式請見上方說明。",
       PAIR: "配對服務沒有傳回有效的官方連結，請重新產生。",
       DATA: "服務傳回的狀態格式不完整，請重新檢查。",
       SDK: "此 Dashboard 缺少外掛 API SDK，請由管理者檢查 Hermes Dashboard 版本。",
@@ -52,11 +62,11 @@
     })[error && error.code] || "無法完成操作，請稍後重試。";
   }
   // authedFetch keeps host authentication without logging response bodies (pairing secrets).
-  async function request(path, method, signal) {
+  async function request(path, method, signal, body) {
     const init = { method: method || "GET", credentials: "same-origin", cache: "no-store", signal };
     if (method === "POST") {
       init.headers = { "Content-Type": "application/json" };
-      init.body = "{}";
+      init.body = body ? JSON.stringify(body) : "{}";
     }
     try {
       if (typeof SDK.authedFetch === "function") {
@@ -69,7 +79,7 @@
       return await SDK.fetchJSON(BASE + path, init);
     } catch (error) {
       if (signal && signal.aborted) throw fault("ABORT");
-      if (error && ["RESTART", "AUTH", "FORBIDDEN", "BUSY", "SDK"].includes(error.code)) throw error;
+      if (error && ["RESTART", "AUTH", "FORBIDDEN", "BUSY", "REFUSED", "SDK"].includes(error.code)) throw error;
       const status = error && (error.status || (/^(\d{3}):/.exec(error.message || "") || [])[1]);
       throw status ? httpFault(Number(status)) : fault("REQUEST");
     }
@@ -97,6 +107,13 @@
     return { acceptanceJob: job, acceptanceUncertain: false,
       acceptance: !jobPending(job) && job.phase === "completed" ? job.result : null };
   }
+  // Where the new release stands while an older daemon serves: ready, being installed, or why not and when it retries.
+  function normalizePrepare(value) {
+    if (!value || typeof value !== "object" || !["ready", "pending", "running", "failed"].includes(value.stage)) return null;
+    const count = number => Number.isSafeInteger(number) && number >= 0 ? number : null;
+    return { stage: value.stage, code: typeof value.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.code) ? value.code : "",
+      retryIn: count(value.retryInSeconds), required: count(value.requiredMiB), available: count(value.availableMiB) };
+  }
   function normalize(value) {
     if (!value || typeof value.enabled !== "boolean" || typeof value.phase !== "string" ||
         !value.daemon || typeof value.daemon.running !== "boolean" || typeof value.daemon.reachable !== "boolean" ||
@@ -106,7 +123,21 @@
       enabled: value.enabled, phase: value.phase,
       acceptanceJob: Object.prototype.hasOwnProperty.call(value, "acceptanceJob") ? normalizeJob(value.acceptanceJob) : undefined,
       diagnosticCode: typeof value.diagnosticCode === "string" ? value.diagnosticCode : null,
-      daemon: { running: value.daemon.running, reachable: value.daemon.reachable },
+      // Whether the new release is installed; absent (null) from a backend that does not say.
+      installed: typeof value.installed === "boolean" ? value.installed : null,
+      prepare: normalizePrepare(value.prepare),
+      // Key paths of the settings the new release refused; never values. Shown as text only.
+      configPaths: value.configCheck && Array.isArray(value.configCheck.paths)
+        ? value.configCheck.paths.filter(row => typeof row === "string" && row.trim()).map(row => text(row, "")).filter(Boolean).slice(0, 20) : [],
+      daemon: { running: value.daemon.running, reachable: value.daemon.reachable,
+        version: typeof value.daemon.version === "string" && /^\d+\.\d+\.\d+$/.test(value.daemon.version) ? value.daemon.version : null },
+      // An older backend still loaded after a plugin update reports no target: keep it on Paseo.
+      targetSupported: typeof value.selectedTarget === "string",
+      selectedTarget: knownTarget(value.selectedTarget) ? value.selectedTarget : "paseo",
+      activeTarget: knownTarget(value.activeTarget) ? value.activeTarget : null,
+      configurationPending: value.configurationPending === true,
+      // A stop the service declined after it had been accepted (it was queued behind a start).
+      stopRefused: value.stopRefused && typeof value.stopRefused.at === "string" ? { at: text(value.stopRefused.at, "") } : null,
       providers: value.providers.filter(row => row && typeof row.provider === "string").map(row => ({
         provider: row.provider, label: text(row.label, row.provider), status: row.status,
         available: row.available, installed: row.installed
@@ -117,7 +148,7 @@
   }
   const subscribers = new Set();
   const modelReads = new Set();
-  let state = { status: null, reading: false, busy: null, stopping: false, error: null, readError: null, pairUrl: null, acceptance: null, acceptanceJob: null, acceptanceUncertain: false };
+  let state = { status: null, reading: false, busy: null, stopping: false, error: null, readError: null, pairUrl: null, targetDraft: null, acceptance: null, acceptanceJob: null, acceptanceUncertain: false };
   let pollTimer = null;
   let statusFlight = null;
   let revision = 0;
@@ -206,12 +237,21 @@
         if (navigationDone) remember("guided", activation(result));
         if (startAttempted) remember("started", activation(result));
         if (pausedStatus(result) && !resuming && state.busy !== "start") { markers.paused = true; saveMarkers(); }
+        // A stop the service declined leaves the daemon running: the pause recorded for it ends there.
+        let declined = null;
+        if (result.stopRefused && result.stopRefused.at && !markers.refused.includes(result.stopRefused.at)) {
+          remember("refused", result.stopRefused.at);
+          if (!pausedStatus(result) && !state.stopping) { markers.paused = false; saveMarkers(); declined = errorCopy(fault("REFUSED")); }
+        }
         // An absent field belongs to an older server. A receipt is authoritative,
         // but a status read during submission may still describe the previous job.
         const acceptance = result.acceptanceJob !== undefined && (state.busy !== "acceptance" || markers.paused)
           ? jobPatch(result.acceptanceJob) : {};
-        publish(Object.assign(acceptance, { status: result, readError: null,
-          pairUrl: result.enabled && !pausedStatus(result) ? state.pairUrl : null }));
+        // A link belongs to the target it was made for, and only while that target is applied.
+        const sameTarget = !state.status || state.status.selectedTarget === result.selectedTarget;
+        publish(Object.assign(acceptance, declined ? { error: declined } : {}, { status: result, readError: null,
+          targetDraft: state.targetDraft === result.selectedTarget ? null : state.targetDraft,
+          pairUrl: result.enabled && !pausedStatus(result) && sameTarget && !result.configurationPending ? state.pairUrl : null }));
         maybeGuide(result);
         maybeStart(result);
       } catch (error) {
@@ -252,7 +292,7 @@
         startAttempted = false;
         resuming = false;
         recoveryAttempted = false;
-        publish({ status: null, readError: null, error: null, pairUrl: null, acceptance: null, acceptanceJob: null,
+        publish({ status: null, readError: null, error: null, pairUrl: null, targetDraft: null, acceptance: null, acceptanceJob: null,
           acceptanceUncertain: state.acceptanceUncertain || jobPending(state.acceptanceJob) || state.busy === "acceptance" });
       } else schedule();
     };
@@ -262,18 +302,28 @@
     useEffect(() => subscribe(kind, setSnapshot), [kind]);
     return snapshot;
   }
-  function validPairUrl(value) {
-    if (!value || typeof value.url !== "string") throw fault("PAIR");
+  function validPairUrl(value, target) {
+    if (!value || typeof value.url !== "string" || value.url.length > 16384 || /[\s\\]/.test(value.url) ||
+        (value.target !== undefined && value.target !== target)) throw fault("PAIR");
     let url;
     try { url = new URL(value.url); } catch (_) { throw fault("PAIR"); }
-    if (url.origin !== "https://app.paseo.sh" || url.username || url.password) throw fault("PAIR");
+    if (url.origin !== targetOf(target).origin || url.username || url.password || url.pathname !== "/" || url.search ||
+        !/^#offer=[A-Za-z0-9_-]+$/.test(url.hash)) throw fault("PAIR");
     return url.href;
+  }
+  function chooseTarget(value) {
+    if (!knownTarget(value) || !state.status) return;
+    publish({ targetDraft: value === state.status.selectedTarget ? null : value, pairUrl: null });
   }
   async function action(name) {
     const status = state.status;
     if (!activated(status) || (name === "stop" ? state.stopping : state.busy || state.stopping)) return;
     if (name === "acceptance" && (jobPending(state.acceptanceJob) || state.acceptanceUncertain || state.readError || dashboardReloading)) return;
     if (["pair", "acceptance"].includes(name) && (!status.daemon.reachable || markers.paused || PAUSED.has(status.phase))) return;
+    // A saved target applies only after the daemon restarted with it; an unsaved one never pairs.
+    if (name === "pair" && (status.configurationPending || state.targetDraft)) return;
+    const target = name === "config" ? state.targetDraft : null;
+    if (name === "config" && (!target || target === status.selectedTarget)) return;
     if (name === "start" || name === "stop") {
       markers.paused = name === "stop";
       resuming = name === "start";
@@ -288,11 +338,13 @@
       { busy: name, error: null, acceptance: name === "acceptance" ? null : state.acceptance,
         acceptanceJob: name === "acceptance" ? null : state.acceptanceJob,
         // Until a receipt arrives, a lost response must never unlock a duplicate paid submission.
-        acceptanceUncertain: name === "acceptance" || state.acceptanceUncertain, pairUrl: name === "pair" || name === "start" ? null : state.pairUrl });
+        acceptanceUncertain: name === "acceptance" || state.acceptanceUncertain,
+        pairUrl: ["pair", "start", "config"].includes(name) ? null : state.pairUrl });
     try {
-      const result = await request("/" + name, "POST");
+      const result = await request("/" + name, "POST", undefined, target ? { target } : undefined);
       if (actionRevision !== revision) return;
-      if (name === "pair" && pageMounted() && visible()) publish({ pairUrl: validPairUrl(result) });
+      if (name === "pair" && pageMounted() && visible()) publish({ pairUrl: validPairUrl(result, status.selectedTarget) });
+      if (name === "config") publish({ targetDraft: null });
       if (name === "acceptance") {
         if (result && Object.prototype.hasOwnProperty.call(result, "phase")) publish(jobPatch(normalizeJob(result)));
         else publish({ acceptance: normalizeAcceptance(result), acceptanceJob: null, acceptanceUncertain: false });
@@ -301,6 +353,8 @@
     } catch (error) {
       if (actionRevision === revision) {
         if (name === "start") resuming = false;
+        // The service refused the stop and did nothing: the pause marked at the click ends here.
+        if (name === "stop" && error.code === "REFUSED") { markers.paused = false; saveMarkers(); }
         if (name === "acceptance") {
           const uncertain = ["REQUEST", "DATA", "BUSY"].includes(error.code);
           publish({ acceptanceUncertain: uncertain, error: uncertain ? null : errorCopy(error) });
@@ -331,6 +385,11 @@
     if (!activated(status)) return "外掛尚未啟用";
     if (markers.paused || pausedStatus(status)) return snapshot.busy === "start" ? "正在恢復" : status.daemon.running ? "停止待確認" : "已手動停止";
     if (status.phase === "stopped" && snapshot.busy === "start") return "正在恢復服務";
+    if (status.diagnosticCode === "CONFIG_INCOMPATIBLE") return "需要修正設定";
+    if (status.daemon.running && status.diagnosticCode === "RESTART_REQUIRED" && status.installed === false) {
+      return status.prepare && status.prepare.stage === "failed" ? "新版準備失敗" : "準備新版中";
+    }
+    if (status.phase === "running" && status.daemon.running && status.diagnosticCode === "RESTART_REQUIRED") return "需要重新啟動";
     return ({ not_installed: "等待初始化", installing: "正在安裝 Paseo", starting: "正在啟動服務",
       running: status.daemon.reachable ? "服務已就緒" : "等待服務連線", ready: "服務已就緒",
       stopped: "服務已中斷", restart_required: "需要重新啟動", error: "啟動失敗" })[status.phase] || "正在確認服務";
@@ -534,6 +593,19 @@
       completed: !job.result ? "驗收已結束，但未取得有效結果，尚未確認通過。請重新檢查狀態。" : null
     })[job.phase];
     const errors = Array.from(new Set([snapshot.readError, snapshot.error].filter(Boolean)));
+    const saved = targetOf(status && status.selectedTarget);
+    const draft = snapshot.targetDraft && knownTarget(snapshot.targetDraft) ? snapshot.targetDraft : saved.id;
+    const targetDirty = draft !== saved.id;
+    const pending = !!(status && status.configurationPending);
+    const pairBlocked = pending || targetDirty;
+    // An older release's daemon keeps serving after a plugin update until it is stopped and resumed, but only
+    // once the new release is installed: until then there is nothing to move to, and a stop would be refused.
+    const olderDaemon = !!(status && status.daemon.running && status.diagnosticCode === "RESTART_REQUIRED");
+    const unprepared = olderDaemon && status.installed === false;
+    const prepareFailed = unprepared && !!status.prepare && status.prepare.stage === "failed";
+    const upgrade = olderDaemon && !unprepared;
+    const incompatible = !!(status && status.diagnosticCode === "CONFIG_INCOMPATIBLE");
+    const restartNotice = status && !pending && !incompatible && !unprepared && (status.phase === "restart_required" || upgrade);
     return h("div", { className: "hermes-paseo hp-page", lang: "zh-Hant" },
       h("header", { className: "hp-title" }, h("div", null, h("p", { className: "hp-eyebrow" }, "HERMES × PASEO"),
         h("h1", null, "把 Hermes 帶到 Paseo"), h("p", { className: "hp-muted" }, "完成服務啟動與官方配對，再從其他裝置繼續對話。")),
@@ -551,21 +623,52 @@
           h("li", { "data-done": !!(status && (status.daemon.running || ["starting", "running", "ready", "restart_required"].includes(status.phase))) }, "安裝執行環境"),
           h("li", { "data-done": !!(status && status.daemon.running) }, "啟動服務"),
           h("li", { "data-done": reachable }, "確認連線")),
-        status && status.phase === "restart_required" && h("p", { className: "hp-error" }, "Paseo 執行環境需要重啟。請先停止，再恢復服務。"),
+        unprepared && h("div", { className: prepareFailed ? "hp-error" : "hp-notice", role: prepareFailed ? "alert" : "status" },
+          h("p", null, prepareFailed
+            ? "新版 Paseo 執行環境準備失敗（原因代碼 " + (status.prepare.code || "未知") + "）。目前" +
+              (status.daemon.version ? "執行 " + status.daemon.version + " 的" : "") + "服務照常可用，不需要停止或重啟。" +
+              (status.prepare.retryIn !== null ? "約 " + status.prepare.retryIn + " 秒後自動重試；" : "自動重試已停止，可按「立即重試準備」；") +
+              "準備完成前停止服務會被拒絕，避免停下後無法再啟動。"
+            : "正在準備新版 Paseo 執行環境（目前的服務照常可用，不需要任何操作）。準備完成後這裡才會提示重新啟動；在那之前停止服務會被拒絕。"),
+          prepareFailed && status.prepare.code === "INSUFFICIENT_DISK" && status.prepare.required !== null && status.prepare.available !== null &&
+            h("p", null, "磁碟空間不足：安裝需要約 " + status.prepare.required + " MiB 可用，目前只有 " + status.prepare.available + " MiB。清出空間後會自動重試。")),
+        restartNotice && h("p", { className: "hp-error" }, upgrade
+          ? "Paseo 執行環境已更新" + (status.daemon.version ? "（目前執行 " + status.daemon.version + "）" : "") +
+            "，需要停止再恢復服務才會換成新版本。目前的服務照常可用；請先結束使用中的對話。"
+          : "Paseo 執行環境需要重啟。請先停止，再恢復服務。"),
+        incompatible && h("div", { className: "hp-error", role: "alert" },
+          h("p", null, status.daemon.running
+            ? "Paseo 執行環境已更新，但新版 Paseo 無法讀取目前的設定（config.json）。目前的服務照常可用；為避免停止後無法再啟動，停止服務會被拒絕。請先修正或移除不相容的設定，修正後本頁會自動重新檢查。"
+            : "新版 Paseo 無法讀取目前的設定（config.json），因此無法啟動。請修正或移除不相容的設定後再恢復服務。"),
+          status.configPaths.length > 0 && h("p", null, "不相容的設定項目（只列路徑，不含內容）：",
+            status.configPaths.map((row, index) => h("code", { key: index, className: "hp-path" }, row))),
+          h("p", { className: "hp-small" }, "設定檔位於 Hermes 資料目錄下的 plugin-data/hermes-paseo/daemon/config.json；編輯前請先備份。若要連同插件一起停用或移除，Hermes 的停用與移除不受這項檢查阻擋。")),
         h("div", { className: "hp-actions" },
           button(snapshot.stopping ? "正在停止…" : "停止服務", () => void action("stop"), !enabled || snapshot.stopping || dashboardReloading || (paused && !status.daemon.running), true),
-          button(snapshot.busy === "start" ? "正在啟動…" : paused ? "恢復服務" : "重新啟動／重試", () => void action("start"),
-            !enabled || busy || !!snapshot.readError || (!paused && reachable), false),
+          button(snapshot.busy === "start" ? "正在啟動…" : paused ? "恢復服務" : prepareFailed ? "立即重試準備" : "重新啟動／重試", () => void action("start"),
+            !enabled || busy || !!snapshot.readError || (!paused && reachable && !prepareFailed), false),
           button(snapshot.reading ? "檢查中…" : "重新檢查", () => void readStatus(), snapshot.reading || dashboardReloading, true)),
         h("p", { className: "hp-muted hp-small" }, "頁面約每 2 秒檢查一次，頁首約每 5 秒檢查。分頁隱藏時暫停讀取；已送出的操作仍由服務處理。")),
       h("section", { className: "hp-card hp-pair", "aria-label": "配對精靈" },
         h("h2", null, "2. 配對精靈"),
-        h("p", null, "啟用後配對精靈會自動顯示。服務就緒後產生連結，再親自點擊開啟 Paseo 官方網站並綁定這台主機。"),
+        h("p", null, "啟用後配對精靈會自動顯示。選擇連線平台並儲存，服務就緒後產生連結，再親自點擊開啟該平台的官方網站並綁定這台主機。"),
+        status && status.targetSupported && h("div", { className: "hp-target" },
+          h("label", { className: "hp-field" }, h("span", null, "連線標的"),
+            h("select", { value: draft, onChange: event => chooseTarget(event.target.value), disabled: !enabled || busy },
+              TARGETS.map(row => h("option", { key: row.id, value: row.id }, row.label)))),
+          h("div", { className: "hp-actions" },
+            button(snapshot.busy === "config" ? "正在儲存…" : "儲存連線標的", () => void action("config"), !enabled || busy || !targetDirty, true),
+            h("a", { className: "hp-button hp-secondary", href: saved.origin + "/", target: "_blank",
+              rel: "noopener noreferrer", referrerPolicy: "no-referrer" }, "開啟 " + saved.label))),
+        targetDirty && h("p", { className: "hp-muted", role: "status" }, "連線標的尚未儲存；儲存後才能產生 " + targetOf(draft).label + " 的配對連結。"),
+        pending && h("p", { className: "hp-notice", role: "status" }, status.daemon.running
+          ? "新的連線標的「" + saved.label + "」等待套用：請先結束使用中的對話，再按「停止服務」並「恢復服務」，之後重新產生配對連結。已配對的裝置不會被撤銷，切回原標的後仍可使用。"
+          : "新的連線標的「" + saved.label + "」會在下次啟動服務時套用。"),
         !reachable && h("p", { className: "hp-muted" }, paused ? "確認停止完成並恢復服務後，即可配對。" : "正在等待服務就緒，無須允許自動彈出視窗。"),
-        button(snapshot.busy === "pair" ? "正在產生連結…" : snapshot.pairUrl ? "重新產生配對連結" : "產生配對連結", () => void action("pair"), !reachable || busy || !!snapshot.readError),
+        button(snapshot.busy === "pair" ? "正在產生連結…" : snapshot.pairUrl ? "重新產生配對連結" : "產生配對連結", () => void action("pair"), !reachable || busy || !!snapshot.readError || pairBlocked),
         snapshot.pairUrl && h("a", { className: "hp-button hp-link", href: snapshot.pairUrl, target: "_blank",
-          rel: "noopener noreferrer", referrerPolicy: "no-referrer" }, "開啟 Paseo 官方網站並綁定"),
-        h("p", { className: "hp-muted hp-small" }, "連結僅顯示在本頁，離開或隱藏分頁後會清除。配對連結可能授予存取權，請勿分享。")),
+          rel: "noopener noreferrer", referrerPolicy: "no-referrer" }, "使用配對連結開啟 " + saved.label),
+        h("p", { className: "hp-muted hp-small" }, "配對連結只適用於 " + saved.label + "，僅顯示在本頁，離開或隱藏分頁後會清除。配對連結可能授予存取權，請勿分享。")),
       status && h(ModelSelectors, { status, blocked: paused || busy || !!snapshot.readError }),
       h("section", { className: "hp-card", "aria-label": "真實對話驗收" },
         h("h2", null, "4. 真實對話驗收"),

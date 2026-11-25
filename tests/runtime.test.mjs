@@ -8,6 +8,8 @@ import { locations, readState, updateState, withRuntimeLock, processIdentity } f
 import { runProcess } from '../src/process.mjs';
 import { activate, deactivate, status, listModels, inheritedEnv } from '../src/runtime.mjs';
 import { demonstrablyReusedPid, linuxProcessBirth, linuxContainerIdentity, instanceFromPreviousContainer } from '../src/daemon-identity.mjs';
+import { seedCurrentRelease } from './release-fixtures.mjs';
+const SERVER_MODULES = 'node_modules/@getpaseo/server/dist/server/server/';
 
 function fixture() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-paseo-runtime-'));
@@ -106,10 +108,7 @@ test('an alive unrelated process referenced by owned home metadata is never stop
     const loc=locations();const state=updateState({desiredEnabled:true});fs.mkdirSync(loc.paseoHome,{recursive:true});
     fs.writeFileSync(path.join(loc.paseoHome,'.hermes-paseo-owner.json'),JSON.stringify({installationId:state.installationId,home:loc.paseoHome}));
     fs.writeFileSync(path.join(loc.paseoHome,'paseo.pid'),JSON.stringify({pid:child.pid,uid:process.getuid?.(),startedAt:new Date().toISOString(),heartbeat:true,listen:'127.0.0.1:6769'}));
-    const pkg=path.join(loc.runtimeDir,'node_modules/@getpaseo/server');fs.mkdirSync(path.join(pkg,'dist/server/server'),{recursive:true});
-    fs.mkdirSync(path.join(loc.runtimeDir,'node_modules/@getpaseo/cli'),{recursive:true});fs.writeFileSync(path.join(loc.runtimeDir,'node_modules/@getpaseo/cli/package.json'),JSON.stringify({version:'0.11.2'}));
-    fs.writeFileSync(path.join(pkg,'package.json'),JSON.stringify({type:'module'}));
-    fs.writeFileSync(path.join(pkg,'dist/server/server/daemon-instance.js'),'import fs from "node:fs";export async function readDaemonInstance(home){return JSON.parse(fs.readFileSync(home+"/paseo.pid","utf8"))};export async function stopDaemonInstance(){throw new Error("stop must never execute")};');
+    seedCurrentRelease(loc,{modules:{[SERVER_MODULES+'daemon-instance.js']:'import fs from "node:fs";export async function readDaemonInstance(home){return JSON.parse(fs.readFileSync(home+"/paseo.pid","utf8"))};export async function stopDaemonInstance(){throw new Error("stop must never execute")};'}});
     const s=await status();assert.equal(s.daemon.running,false);assert.equal(s.diagnosticCode,'DAEMON_NOT_OWNED');
     await assert.rejects(deactivate(),e=>e.code==='DAEMON_NOT_OWNED');assert.ok(processIdentity(child.pid));
   }finally{child.kill('SIGTERM');f.close()}
@@ -129,11 +128,9 @@ test('stale lock from an earlier container retires without signalling the unrela
     fs.writeFileSync(path.join(loc.paseoHome,'.hermes-paseo-owner.json'),JSON.stringify({installationId:state.installationId,home:loc.paseoHome}));
     const record={pid:child.pid,uid:process.getuid(),startedAt:'2000-01-01T00:00:00.000Z',heartbeat:true,listen:'127.0.0.1:6769'};
     fs.writeFileSync(path.join(loc.paseoHome,'paseo.pid'),JSON.stringify(record));
-    const pkg=path.join(loc.runtimeDir,'node_modules/@getpaseo/server');fs.mkdirSync(path.join(pkg,'dist/server/server'),{recursive:true});
-    fs.mkdirSync(path.join(loc.runtimeDir,'node_modules/@getpaseo/cli'),{recursive:true});fs.writeFileSync(path.join(loc.runtimeDir,'node_modules/@getpaseo/cli/package.json'),JSON.stringify({version:'0.11.2'}));
-    fs.writeFileSync(path.join(pkg,'package.json'),JSON.stringify({type:'module'}));
-    fs.writeFileSync(path.join(pkg,'dist/server/server/daemon-instance.js'),'import fs from "node:fs";export async function readDaemonInstance(home){try{return JSON.parse(fs.readFileSync(home+"/paseo.pid","utf8"))}catch{return null}};export async function stopDaemonInstance(){throw new Error("must never signal a reused PID")};');
-    fs.writeFileSync(path.join(pkg,'dist/server/server/pid-lock.js'),'import fs from "node:fs";export async function getPidLockInfo(home){try{return JSON.parse(fs.readFileSync(home+"/paseo.pid","utf8"))}catch{return null}};export async function releasePidLock(home,expected){const x=await getPidLockInfo(home);if(x&&x.pid===expected.ownerPid&&x.startedAt===expected.startedAt)fs.unlinkSync(home+"/paseo.pid")};');
+    seedCurrentRelease(loc,{modules:{
+      [SERVER_MODULES+'daemon-instance.js']:'import fs from "node:fs";export async function readDaemonInstance(home){try{return JSON.parse(fs.readFileSync(home+"/paseo.pid","utf8"))}catch{return null}};export async function stopDaemonInstance(){throw new Error("must never signal a reused PID")};',
+      [SERVER_MODULES+'pid-lock.js']:'import fs from "node:fs";export async function getPidLockInfo(home){try{return JSON.parse(fs.readFileSync(home+"/paseo.pid","utf8"))}catch{return null}};export async function releasePidLock(home,expected){const x=await getPidLockInfo(home);if(x&&x.pid===expected.ownerPid&&x.startedAt===expected.startedAt)fs.unlinkSync(home+"/paseo.pid")};'}});
     assert.ok(linuxProcessBirth(child.pid));
     assert.equal(demonstrablyReusedPid(record),true);
     assert.equal(demonstrablyReusedPid({...record,startedAt:'invalid'}),false);

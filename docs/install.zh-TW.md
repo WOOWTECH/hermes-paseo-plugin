@@ -2,6 +2,8 @@
 
 適用於 v0.1.4-rc.6 公開候選版。本教學將插件部署到已有的 Hermes Agent / Dashboard；Hermes 核心與可用的模型端點須先準備好。實測範圍與待驗項目見 [驗收紀錄](validation.md)。
 
+0.2.0-rc.1（連線標的與 Paseo 0.17.4）是準備中的候選版，尚未發布；以下下載連結仍指向已發布版本。標有「0.2.0-rc.1 起」的步驟只適用於新版。
+
 ## 下載網址
 
 - 原始碼：https://github.com/WOOWTECH/hermes-paseo-plugin
@@ -9,6 +11,7 @@
 - v0.1.4-rc.6：https://github.com/WOOWTECH/hermes-paseo-plugin/releases/tag/v0.1.4-rc.6
 - 固定版本 ZIP：https://github.com/WOOWTECH/hermes-paseo-plugin/archive/refs/tags/v0.1.4-rc.6.zip
 - Paseo 官方介面：https://app.paseo.sh
+- Woowtech Smart：https://smart.woowtech.io、Apporo Smart：https://smart.apporo.ai（0.2.0-rc.1 起可選的連線標的）
 
 公開下載不需要 GitHub token。Web / CLI 從 GitHub 安裝會取得目前 main；ZIP 固定為 v0.1.4-rc.6。候選版不代表已完成所有正式部署環境的驗收。
 
@@ -112,14 +115,15 @@ python3 ~/.hermes/plugins/hermes-paseo/bin/configure-origin.py https://hermes.ex
 
 設定存放於私有的 `plugin-data/hermes-paseo/dashboard-origin.json`。插件仍拒絕不同 Origin 及 cross-site Fetch Metadata，不依靠客戶端任意 Forwarded 標頭取得信任。
 
-## 5. 從 Hermes 配對到 Paseo
+## 5. 從 Hermes 配對到 Paseo 或 Smart App
 
 1. 開啟 Hermes 側欄的 **Paseo**，或自己的 Hermes 網址加 `/paseo`。尚未完成設定時，插件載入後會自動導向此頁。
 2. 等待 **服務已就緒**。第一次會下載並啟動固定 Paseo runtime；已手動停止時，按 **恢復服務**。
-3. 按 **產生配對連結**。
-4. 按 **開啟 Paseo 官方網站並綁定**，在新分頁按 **Connect**。
-5. 全新裝置若顯示 **No projects yet**，先按側欄 **Add project**。可用 **Search for directory** 選擇已有工作目錄；或選 **New directory**，輸入主機上的父目錄，按 **Use this parent**，再填 **Directory name** 並按 Enter。HA 可在 `/opt/data` 下建立自己的專案子目錄，資料會持久保存；這是 Hermes 主機上的路徑。
-6. 按 **New workspace**，確認已選定 project；若仍顯示 **Choose project**，先選取剛建立的專案。再開啟 **Select model**；若先看到供應者清單，按 **Hermes** 再選模型，第一次使用 **Default** 權限模式，填訊息並按 **Create**。
+3. 0.2.0-rc.1 起：在 **2. 配對精靈** 的「連線標的」選擇 **Woowtech Smart**、**Apporo Smart** 或 **Paseo**（預設），按 **儲存連線標的**。出現「等待套用」時，先結束使用中的對話，按 **停止服務** 再按 **恢復服務**。切換會清除舊的配對連結；已配對的裝置不會被撤銷，切回原標的後仍可使用。
+4. 按 **產生配對連結**。新標的尚未套用或選擇尚未儲存時，這個按鈕會停用。
+5. 按 **使用配對連結開啟 <標的>**（0.1.4 為 **開啟 Paseo 官方網站並綁定**），在新分頁按 **Connect**。**開啟 <標的>** 只開啟官方網頁、不帶配對資料。Smart App 的畫面以該平台為準；下列 project 步驟以 Paseo Web 為例。
+6. 全新裝置若顯示 **No projects yet**，先按側欄 **Add project**。可用 **Search for directory** 選擇已有工作目錄；或選 **New directory**，輸入主機上的父目錄，按 **Use this parent**，再填 **Directory name** 並按 Enter。HA 可在 `/opt/data` 下建立自己的專案子目錄，資料會持久保存；這是 Hermes 主機上的路徑。
+7. 按 **New workspace**，確認已選定 project；若仍顯示 **Choose project**，先選取剛建立的專案。再開啟 **Select model**；若先看到供應者清單，按 **Hermes** 再選模型，第一次使用 **Default** 權限模式，填訊息並按 **Create**。
 
 全新 HA 商店實例已重現：配對 Online 但沒有 project 時，無法建立代理；沒有新增模型請求。必須先完成上述 project 步驟，不能只依模型清單或 Create 按鈕判定可對話。
 
@@ -200,6 +204,12 @@ known_plugin_toolsets:
 
 ## 7. 停止、恢復及移除
 
+### 從 0.1.4 升級到 0.2.0-rc.1
+
+- **HA**：在 Hermes **Plugins** 以 Git pull 更新，再按 **重載 Dashboard**。原本的 Paseo 0.11.2 會繼續服務，頁面顯示「需要重新啟動」（目前執行 0.11.2），並在背景下載 0.17.4（約 400 MB，需要約 1.1 GB 空間）。結束使用中的對話後按 **停止服務**，再按 **恢復服務**；設定、對話、配對與主機身分保留。也可以直接重啟附加元件。`host/` 主機轉接檔沒有變更，附加元件不需要更新。
+- **PaaS**：目前的自動更新器不會安裝變更 Paseo runtime 的版本（`dependency_manifest_changed`），需由平台另外安排；手動安裝後同樣依頁面提示停止再恢復。
+- 若頁面顯示 `CONFIG_INCOMPATIBLE`，表示新版 Paseo 讀不了目前的設定，停止會被拒絕以免服務起不來；先修正設定再操作。退回 0.1.4 前先切回 Paseo 標的，細節見 [維運](operations.zh-TW.md#退回-014-rc9)。
+
 在 Paseo 插件頁按 **停止服務**，確認停止後重新整理；服務應保持停止。再按 **恢復服務**，確認回到就緒。這個操作保留配對設定與對話資料。
 
 配置 0.1.4 主機介面時，Hermes Web 的 Disable／移除會先停止 daemon，確認後才執行原生操作。Hermes 0.22 的移除可能顯示為垃圾桶圖示，按下後須在確認視窗按 Delete。重新安裝同一 repo 並開啟 Enable after install，會沿用 plugin-data 中的配對及安裝識別。
@@ -213,6 +223,10 @@ Hermes 0.19 的首次引導為插件頁配對精靈；此版沒有公開的新�
 | 現象 | 處理方式 |
 | --- | --- |
 | 啟用後側欄沒有 Paseo | Hermes 0.19 重新整理頁面一次。 |
+| 「等待套用」／`CONFIGURATION_PENDING` | 已儲存新的連線標的，daemon 仍連著原標的。結束對話後停止再恢復服務，再產生配對連結。 |
+| 「需要重新啟動」（目前執行 0.11.2） | 插件已更新，舊 daemon 繼續服務。結束對話後停止再恢復服務即換成 0.17.4。 |
+| `CONFIG_INCOMPATIBLE` | Paseo 0.17.4 無法讀取目前的 `config.json`，停止會被拒絕。修正或移除不相容的設定後再停止並恢復。 |
+| `PAIRING_SECURITY_UNSUPPORTED` | daemon 要求新版 relay 加密，Smart App 不支援。停止再恢復服務會套用 Smart 標的的設定（關閉此要求）。 |
 | 插件 API 404／尚未載入 | 在插件頁按「重載 Dashboard」並確認；主機需先配置重載介面。 |
 | Restart Gateway 顯示已啟動但未完成 | 查看工作最終狀態；若為 `no dependency environment is committed`，須由管理者處理官方 PM 環境及修復所需空間，詳見 [主機說明](dashboard-control.zh-TW.md)。 |
 | 403／Origin 被拒絕 | 確認插件已啟用及登入有效；使用服務帳戶設定精確正式 Origin。 |
