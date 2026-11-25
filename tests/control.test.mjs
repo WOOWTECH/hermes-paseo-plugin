@@ -38,7 +38,19 @@ test('public snapshot excludes raw state, pairing offer and unknown provider',()
 });
 test('configure Hermes via official ACP without mixing Pi settings or escalating mode',()=>{
  const c=configureProviders({}, {hermes:{startup:'ready',command:'/bin/hermes'},codex:{startup:'missing'}},{agentDir:'/profile/a',home:'/users/a'});
- assert.equal(c.hermes.extends,'acp');assert.deepEqual(c.hermes.command,['/bin/hermes','acp']);assert.equal(c.hermes.env.HERMES_HOME,'/profile/a');assert.equal(c.hermes.env.HERMES_PASEO_ACP_CHILD,'1');assert.equal(c.codex.enabled,false);assert.equal(c.hermes.options,undefined);assert.ok(!('PI_CODING_AGENT_DIR' in c.hermes.env));
+ assert.deepEqual(c.hermes.command,['/bin/hermes','acp']);assert.equal(c.hermes.env.HERMES_HOME,'/profile/a');assert.equal(c.hermes.env.HERMES_PASEO_ACP_CHILD,'1');assert.equal(c.codex.enabled,false);assert.equal(c.hermes.options,undefined);assert.ok(!('PI_CODING_AGENT_DIR' in c.hermes.env));
+ // Paseo 0.17.4 runs Hermes as a bundled ACP provider; the entry overrides its command and environment.
+ assert.equal('extends' in c.hermes,false);assert.equal('description' in c.hermes,false);assert.equal(c.hermes.label,'Hermes');
+});
+test('a Hermes entry saved by 0.1.4 loses only the keys Paseo 0.17.4 drops, keeping other overrides',()=>{
+ const previous={hermes:{extends:'acp',label:'Hermes',description:'old',command:['/old/hermes','acp'],env:{HERMES_HOME:'/old',KEEP:'1'},enabled:true,disallowedTools:['x']},custom:{enabled:false}};
+ const c=configureProviders(previous,{hermes:{startup:'ready',command:'/bin/hermes'}},{agentDir:'/profile/a',home:'/users/a'});
+ assert.deepEqual(c.hermes,{label:'Hermes',command:['/bin/hermes','acp'],env:{HERMES_HOME:'/profile/a',KEEP:'1',HOME:'/users/a',HERMES_PASEO_ACP_CHILD:'1'},enabled:true,disallowedTools:['x']});
+ assert.deepEqual(c.custom,{enabled:false});
+ assert.equal(previous.hermes.extends,'acp','the caller record is not mutated');
+ // Without a working launcher there is no command; 0.17.4 accepts the override disabled.
+ const missing=configureProviders({},{hermes:{startup:'missing',command:null}},{agentDir:'/profile/a',home:'/users/a'});
+ assert.equal(missing.hermes.enabled,false);assert.equal(missing.hermes.command,undefined);assert.equal('extends' in missing.hermes,false);
 });
 test('probe detects ACP failure without installing or leaking stderr',async()=>{
  const calls=[];const launchers=await resolveProviderLaunchers({}, {env:{PATH:'/bin'},discover:n=>n==='hermes'?'/bin/hermes':null,run:async(c,a)=>{calls.push(a);if(a[0]==='acp')throw new Error('secret');return'Hermes 0.19.0';}});assert.equal(launchers.hermes.startup,'PROVIDER_LAUNCH_FAILED');assert.equal(launchers.codex.startup,'missing');assert.deepEqual(calls,[['--version'],['acp','--help']]);assert.ok(!JSON.stringify(launchers).includes('secret'));

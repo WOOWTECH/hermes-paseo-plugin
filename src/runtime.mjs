@@ -12,16 +12,21 @@ import { sendVerifiedHermesMessage } from './model-selection.mjs';
 import { assistantEntries, latestAssistantCursor, chatResult } from './chat-result.mjs';
 import {singleFlight,daemonStatusWindow} from './single-flight.mjs';
 import {usingAcceptanceAgent,usingAcceptanceWorkspace} from './acceptance-agent.mjs';
-import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,RUNTIME_REVISION} from './runtime-layout.mjs';
+import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,previousRuntimeDirectory,RUNTIME_REVISION,PASEO_VERSION,LEGACY_PASEO_VERSION} from './runtime-layout.mjs';
 import {demonstrablyReusedPid,linuxContainerIdentity,instanceFromPreviousContainer} from './daemon-identity.mjs';
 import {managedFeatures} from './daemon-config.mjs';
+import {CONNECTION_TARGETS,DEFAULT_TARGET,connectionTarget,selectedTarget,saveSelectedTarget,targetEnvironment,targetConfiguration,targetPairUrl} from './connection-targets.mjs';
 export { locations, readState, updateState } from './state.mjs';
-export const PASEO_VERSION = '0.11.2';
+export { PASEO_VERSION };
 const PROVIDERS = ['hermes', 'claude', 'codex', 'pi'];
+// Bumped when the daemon environment gains settings an older daemon was started without.
+const CONNECTION_PROFILE_VERSION = '1';
+const REVISION_ENTRY = 'HERMES_PASEO_RUNTIME_REVISION=';
+const TARGET_ENTRY = 'HERMES_PASEO_CONNECTION_TARGET=';
 const safeCode = error => /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code || '') ? error.code : 'RUNTIME_FAILED';
-function packageRoot(pkg = 'cli') { return path.join(runtimeDirectory(locations()), 'node_modules/@getpaseo', pkg); }
-function cliPath() { return path.join(packageRoot(), 'bin/paseo'); }
-function runtimeVersion() { try { return JSON.parse(fs.readFileSync(path.join(packageRoot(), 'package.json'), 'utf8')).version; } catch { return null; } }
+function packageRoot(pkg = 'cli', root = controlRoot()) { return path.join(root, 'node_modules/@getpaseo', pkg); }
+function cliPath(root = controlRoot()) { return path.join(packageRoot('cli', root), 'bin/paseo'); }
+function packageVersion(root, pkg) { try { return JSON.parse(fs.readFileSync(path.join(packageRoot(pkg, root), 'package.json'), 'utf8')).version; } catch { return null; } }
 export function inheritedEnv() {
   const loc = locations(); const env = { ...process.env, HOME: loc.home, HERMES_HOME: loc.agentDir, PASEO_HOME: loc.paseoHome, NO_COLOR: '1' };
   delete env.PASEO_HOST; delete env.PASEO_AGENT_ID; delete env.PASEO_WORKSPACE_ID; delete env.PASEO_PASSWORD;
@@ -35,10 +40,13 @@ export function inheritedEnv() {
   delete env.HERMES_DASHBOARD_BASIC_AUTH_SECRET;
   delete env.API_SERVER_KEY;
   env.HERMES_PASEO_RUNTIME_REVISION=RUNTIME_REVISION;
+  // The selected target: its relay and app for the CLI, its brand identity for the daemon.
+  Object.assign(env, targetEnvironment(selectedTarget(loc), process.env.PASEO_CORS_ORIGINS));
+  env.HERMES_PASEO_CONNECTION_PROFILE_VERSION = CONNECTION_PROFILE_VERSION;
   return env;
 }
-async function cli(args, options = {}) {
-  const result = await runProcess(process.execPath, [cliPath(), '--home', locations().paseoHome, '--json', ...args], { env: inheritedEnv(), ...options });
+async function cli(args, options = {}, root = controlRoot()) {
+  const result = await runProcess(process.execPath, [cliPath(root), '--home', locations().paseoHome, '--json', ...args], { env: inheritedEnv(), ...options });
   try { return JSON.parse(result); } catch { throw new RuntimeError('INVALID_COMMAND_OUTPUT'); }
 }
 function ownerFile() { return path.join(locations().paseoHome, '.hermes-paseo-owner.json'); }
@@ -56,15 +64,71 @@ function ensureOwnedHome() {
 function ownsHome() {
   try { const marker = JSON.parse(fs.readFileSync(ownerFile(), 'utf8')); return marker.installationId === readState().installationId && marker.home === locations().paseoHome; } catch { return false; }
 }
+// The pre-release layout installed straight into runtimeDir/node_modules.
 function legacyVersion() {try{return JSON.parse(fs.readFileSync(path.join(locations().runtimeDir,'node_modules/@getpaseo/cli/package.json'))).version;}catch{return null;}}
-async function serverModule(relative) { const root=fs.existsSync(packageRoot('server'))?packageRoot('server'):path.join(locations().runtimeDir,'node_modules/@getpaseo/server');return import(pathToFileURL(path.join(root, relative)).href); }
-async function controlModule() { return serverModule('dist/server/server/daemon-instance.js'); }
-async function currentInstance() { if ((runtimeVersion() !== PASEO_VERSION&&legacyVersion()!==PASEO_VERSION) || !ownsHome()) return null; return (await controlModule()).readDaemonInstance(locations().paseoHome); }
-function instanceNeedsRuntimeRestart(instance) {
- if(process.platform!=='linux')return false;
- try{return !fs.readFileSync(`/proc/${instance.pid}/environ`,'utf8').split('\0').includes(`HERMES_PASEO_RUNTIME_REVISION=${RUNTIME_REVISION}`);}catch{return true;}
+function earlierRuntimeDirectory(loc,revision) {return previousRuntimeDirectory(loc,revision)||(legacyVersion()===LEGACY_PASEO_VERSION?loc.runtimeDir:null);}
+// The revision of an earlier release whose daemon holds this home's PID file, as far as the
+// plugin can tell without upstream modules: on Linux the revision pinned in that live process's
+// environment, elsewhere the one recorded when this plugin started that PID. It only selects
+// control modules; ownership is still verified before any action.
+function earlierDaemonRevision(loc) {
+  let lock;
+  try { lock = JSON.parse(fs.readFileSync(path.join(loc.paseoHome, 'paseo.pid'), 'utf8')); } catch { return null; }
+  if (!Number.isInteger(lock?.pid) || lock.pid <= 1) return null;
+  let revision;
+  if (process.platform === 'linux') {
+    try {
+      const env = fs.readFileSync(`/proc/${lock.pid}/environ`, 'utf8').split('\0');
+      if (!env.includes(`PASEO_HOME=${loc.paseoHome}`)) return null;
+      revision = env.find(entry => entry.startsWith(REVISION_ENTRY))?.slice(REVISION_ENTRY.length);
+    } catch { return null; }
+  } else {
+    const state = readState();
+    if (state.daemonPid !== lock.pid || state.daemonStartedAt !== lock.startedAt) return null;
+    revision = state.daemonRuntimeRevision;
+  }
+  return revision === RUNTIME_REVISION ? null : revision || 'unrecorded';
 }
-async function verifyInstanceOwnership(instance) {
+/**
+ * The release whose modules control the daemon: the one that started it. An upgrade never stops,
+ * queries or reconfigures an older 0.11.2 daemon through 0.17.4 modules; until that daemon is
+ * stopped it keeps serving through its own release. Without a daemon, this release. Starting a
+ * daemon always uses this release (see activate).
+ */
+function controlRuntimeDirectory() {
+  const loc = locations(), earlier = earlierDaemonRevision(loc);
+  if (!runtimeReady(loc)) return earlierRuntimeDirectory(loc, earlier);
+  return (earlier && earlierRuntimeDirectory(loc, earlier)) || runtimeDirectory(loc);
+}
+function controlRoot() { return controlRuntimeDirectory() || runtimeDirectory(locations()); }
+async function serverModule(relative, root = controlRoot()) { return import(pathToFileURL(path.join(packageRoot('server', root), relative)).href); }
+async function readInstance(root) { return (await serverModule('dist/server/server/daemon-instance.js', root)).readDaemonInstance(locations().paseoHome); }
+async function currentInstance(root = controlRuntimeDirectory()) { if (!root || !ownsHome()) return null; return readInstance(root); }
+function instanceNeedsRuntimeRestart(instance) {
+  if (process.platform !== 'linux') {
+    const state = readState();
+    return state.daemonPid !== instance.pid || state.daemonStartedAt !== instance.startedAt || state.daemonRuntimeRevision !== RUNTIME_REVISION;
+  }
+  try {
+    const env = fs.readFileSync(`/proc/${instance.pid}/environ`, 'utf8').split('\0');
+    return !env.includes(REVISION_ENTRY + RUNTIME_REVISION) || !env.includes(`HERMES_PASEO_CONNECTION_PROFILE_VERSION=${CONNECTION_PROFILE_VERSION}`);
+  } catch { return true; }
+}
+/** The target a running daemon serves, or null when it cannot be told. */
+function daemonTarget(instance) {
+  if (process.platform === 'linux') {
+    try {
+      const env = fs.readFileSync(`/proc/${instance.pid}/environ`, 'utf8').split('\0');
+      const value = env.find(entry => entry.startsWith(TARGET_ENTRY))?.slice(TARGET_ENTRY.length);
+      // A daemon started before targets existed only ever served Paseo's relay and app.
+      if (value === undefined) return DEFAULT_TARGET;
+      return CONNECTION_TARGETS.some(row => row.id === value) ? value : null;
+    } catch { /* Not readable here: use the plugin's own record below. */ }
+  }
+  const state = readState();
+  return state.daemonPid === instance.pid && state.daemonStartedAt === instance.startedAt ? state.activeTarget || DEFAULT_TARGET : null;
+}
+async function verifyInstanceOwnership(instance, root = controlRoot()) {
   if (!ownsHome() || !instance || !processIdentity(instance.pid)) throw new RuntimeError('DAEMON_NOT_OWNED');
   if (instance.uid !== (process.getuid?.() ?? instance.uid)) throw new RuntimeError('DAEMON_NOT_OWNED');
   // Linux metadata additionally checks argv and the home actually inherited by this PID.
@@ -72,7 +136,7 @@ async function verifyInstanceOwnership(instance) {
     try {
       const args = fs.readFileSync(`/proc/${instance.pid}/cmdline`, 'utf8').split('\0');
       const env = fs.readFileSync(`/proc/${instance.pid}/environ`, 'utf8').split('\0');
-      const entry = path.join(packageRoot('server'), 'dist/scripts/supervisor-entrypoint.js');
+      const entry = path.join(packageRoot('server', root), 'dist/scripts/supervisor-entrypoint.js');
       const executable = fs.realpathSync(`/proc/${instance.pid}/exe`);
       const expectedNode = fs.realpathSync(process.execPath);
       // Paseo sets process.title, which replaces its original argv on Linux.
@@ -81,7 +145,7 @@ async function verifyInstanceOwnership(instance) {
     } catch { throw new RuntimeError('DAEMON_NOT_OWNED'); }
   }
 }
-async function releaseReusedPid(instance) {
+async function releaseReusedPid(instance, root = controlRoot()) {
   // Caller holds the runtime lock. Do not signal a process that reused a PID
   // from a previous container; only retire this profile's unchanged stale lock.
   const stale = value => instanceFromPreviousContainer(value, readState()) || demonstrablyReusedPid(value);
@@ -90,23 +154,25 @@ async function releaseReusedPid(instance) {
   assertSafePath(file);
   const info = fs.lstatSync(file);
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.uid !== process.getuid?.()) return false;
-  const locks = await serverModule('dist/server/server/pid-lock.js');
+  const locks = await serverModule('dist/server/server/pid-lock.js', root);
   const current = await locks.getPidLockInfo(locations().paseoHome);
   if (!current || current.pid !== instance.pid || current.startedAt !== instance.startedAt || !stale(current)) return false;
   await locks.releasePidLock(locations().paseoHome, { ownerPid: current.pid, startedAt: current.startedAt });
   return (await locks.getPidLockInfo(locations().paseoHome)) === null;
 }
+/** Installs this release beside any earlier one; an earlier release is never modified. */
 async function installRuntime() {
-  privateDirectory(locations().runtimeDir);
-  if (!runtimeReady(locations())) {
+  const loc = locations(); privateDirectory(loc.runtimeDir);
+  const root = runtimeDirectory(loc);
+  if (!runtimeReady(loc)) {
     const npm = findExecutable('npm'); if (!npm) throw new RuntimeError('NPM_UNAVAILABLE');
-    const root=prepareRuntimeManifest(locations());
+    prepareRuntimeManifest(loc);
     await runProcess(npm, ['ci', '--prefix', root, '--omit=dev', '--no-audit', '--no-fund'], { timeoutMs: 300000, env: inheritedEnv() });
   }
-  const version = await runProcess(process.execPath, [cliPath(), '--version'], { env: inheritedEnv() });
-  if (version.trim() !== PASEO_VERSION || runtimeVersion() !== PASEO_VERSION) throw new RuntimeError('VERSION_MISMATCH');
-  if (!fs.existsSync(path.join(packageRoot('server'), 'dist/server/web-ui/index.html'))) throw new RuntimeError('WEB_UI_MISSING');
-  markRuntimeReady(locations());
+  const version = await runProcess(process.execPath, [cliPath(root), '--version'], { env: inheritedEnv() });
+  if (version.trim() !== PASEO_VERSION || packageVersion(root, 'cli') !== PASEO_VERSION || packageVersion(root, 'server') !== PASEO_VERSION) throw new RuntimeError('VERSION_MISMATCH');
+  if (!fs.existsSync(path.join(packageRoot('server', root), 'dist/server/web-ui/index.html'))) throw new RuntimeError('WEB_UI_MISSING');
+  markRuntimeReady(loc);
   updateState({ installedVersion: PASEO_VERSION,installedRuntimeRevision:RUNTIME_REVISION });
 }
 async function choosePort(preferred) {
@@ -119,26 +185,31 @@ async function choosePort(preferred) {
 async function detectLaunchers({ installMissing = false } = {}) {
   return resolveProviderLaunchers(locations(), { installMissing, env: inheritedEnv() });
 }
+// Key order is not meaningful: the daemon saves its parsed form, in schema order.
+function canonical(value) {
+  return JSON.stringify(value, (_key, entry) => entry && typeof entry === 'object' && !Array.isArray(entry)
+    ? Object.fromEntries(Object.keys(entry).sort().map(key => [key, entry[key]])) : entry);
+}
 async function writeConfig(port, launchers) {
   const loc = locations(); const file = path.join(loc.paseoHome, 'config.json');
   let config = {};
   if (fs.existsSync(file)) { try { config = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { throw new RuntimeError('CONFIG_CORRUPT'); } }
   const providers = configureProviders(config.agents?.providers, launchers, loc, inheritedEnv());
-  let name=config.daemon?.name;
-  try {
-    const preferences=JSON.parse(fs.readFileSync(path.join(loc.stateDir,'preferences.json'),'utf8'));
-    if(typeof preferences.name!=='string'||preferences.name.length>100||/[\x00-\x1f]/.test(preferences.name))throw new RuntimeError('CONFIG_INVALID');
-    name=preferences.name;
-  } catch(error) {if(error.code!=='ENOENT')throw new RuntimeError('CONFIG_INVALID');}
-  const providersChanged = JSON.stringify(config.agents?.providers || {}) !== JSON.stringify(providers);
+  // Paseo's strict daemon schema (0.11.2 and 0.17.4) rejects daemon.name; a stored one is removed.
+  const daemon = { ...config.daemon };
+  delete daemon.name;
+  const providersChanged = canonical(config.agents?.providers || {}) !== canonical(providers);
   config = {
     ...config, $schema: 'https://paseo.sh/schemas/paseo.config.v1.json', version: 1,
-    daemon: { ...config.daemon, ...(name?{name}:{}), listen: `127.0.0.1:${port}`, hostnames: ['localhost', '127.0.0.1', '.localhost'], relay: { ...config.daemon?.relay, enabled: true }, mcp: { ...config.daemon?.mcp, enabled: true } },
+    daemon: { ...daemon, listen: `127.0.0.1:${port}`, hostnames: ['localhost', '127.0.0.1', '.localhost'], relay: { ...daemon.relay, enabled: true }, mcp: { ...daemon.mcp, enabled: true } },
     agents: { ...config.agents, providers, metadataGeneration: config.agents?.metadataGeneration || { providers: [] } },
     features: managedFeatures(config.features),
     log: { ...config.log, console: { level: 'warn' }, file: { level: 'warn', path: 'daemon.log', rotate: { maxSize: '5m', maxFiles: 2 } } },
   };
-  const { savePersistedConfig } = await serverModule('dist/server/server/config.js');
+  // Relay, app and CORS for the selected target; other origins and keys are kept.
+  config = targetConfiguration(config, selectedTarget(loc));
+  // Written for this release's daemon: the one about to start, or a running one of this revision.
+  const { savePersistedConfig } = await serverModule('dist/server/server/config.js', runtimeDirectory(loc));
   try { savePersistedConfig(loc.paseoHome, config); fs.chmodSync(file, 0o600); } catch { throw new RuntimeError('CONFIG_INVALID'); }
   updateState({ port, providerLaunchers: launchers });
   return providersChanged;
@@ -146,8 +217,8 @@ async function writeConfig(port, launchers) {
 function safeProvider(entry) {
   return { provider: entry.provider, label: entry.label || entry.provider, status: entry.status || (entry.available === true ? 'ready' : entry.available === false ? 'unavailable' : 'unknown'), enabled: entry.enabled !== false, defaultModeId: entry.defaultModeId || null, modes: (entry.modes || []).map(mode => ({ id: mode.id, label: mode.label || mode.id })), chatVerified: readState().acceptance?.providers?.some(row => row.provider === entry.provider && row.passed) || false };
 }
-async function withClient(fn, timeoutMs = 30000) {
-  const { connectToDaemon } = await import(pathToFileURL(path.join(packageRoot(), 'dist/utils/client.js')).href);
+async function withClient(fn, timeoutMs = 30000, root = controlRoot()) {
+  const { connectToDaemon } = await import(pathToFileURL(path.join(packageRoot('cli', root), 'dist/utils/client.js')).href);
   const client = await connectToDaemon({ target: { kind: 'instance', home: locations().paseoHome }, timeout: 5000 });
   let timer;
   try {
@@ -160,16 +231,24 @@ export async function activate(options = {}) {
     ensureOwnedHome(); updateState({ desiredEnabled: true, phase: 'installing', lastError: null });
     try {
       if (Number(process.versions.node.split('.')[0]) < 22) throw new RuntimeError('NODE_VERSION_UNSUPPORTED');
+      const target = selectedTarget(locations());
       await installRuntime();
-      let existing = await currentInstance(); const launchers = await detectLaunchers({ installMissing: false });
+      let root = controlRuntimeDirectory();
+      let existing = await currentInstance(root); const launchers = await detectLaunchers({ installMissing: false });
       if (existing) {
-        try { await verifyInstanceOwnership(existing); }
-        catch (error) { if (await releaseReusedPid(existing)) existing = null; else throw error; }
+        try { await verifyInstanceOwnership(existing, root); }
+        catch (error) { if (await releaseReusedPid(existing, root)) existing = null; else throw error; }
       }
       if (existing) {
-        await verifyInstanceOwnership(existing);
+        await verifyInstanceOwnership(existing, root);
+        // A daemon started by an earlier release keeps serving through that release until the
+        // user stops and starts it; it is never restarted behind an active conversation.
         if(instanceNeedsRuntimeRestart(existing)) {
           updateState({phase:'restart_required',lastError:{code:'RESTART_REQUIRED',at:new Date().toISOString()}});
+          return status();
+        }
+        if (readState().configurationPending === true || daemonTarget(existing) !== target) {
+          updateState({ phase: 'restart_required', lastError: { code: 'CONFIGURATION_PENDING', at: new Date().toISOString() } });
           return status();
         }
         const pending = readState().providerReloadPending;
@@ -185,9 +264,13 @@ export async function activate(options = {}) {
       } else {
         const port = await choosePort(locations().port); await writeConfig(port, launchers);
         updateState({ phase: 'starting' });
-        await cli(['daemon', 'start', '--timeout', '90'], { timeoutMs: 105000 });
-        const instance = await currentInstance(); await verifyInstanceOwnership(instance);
-        updateState({ phase: 'running', providerReloadPending: null, daemonPid: instance.pid, daemonStartedAt: instance.startedAt, daemonContainerIdentity: linuxContainerIdentity() });
+        // Always this release. `daemon start` returns an already running supervisor instead of
+        // starting a second one; that case is caught below and never recorded as this release.
+        await cli(['daemon', 'start', '--timeout', '90'], { timeoutMs: 105000 }, runtimeDirectory(locations()));
+        root = controlRuntimeDirectory();
+        const instance = await currentInstance(root); await verifyInstanceOwnership(instance, root);
+        if (instanceNeedsRuntimeRestart(instance)) throw new RuntimeError('RESTART_REQUIRED');
+        updateState({ phase: 'running', providerReloadPending: null, daemonPid: instance.pid, daemonStartedAt: instance.startedAt, daemonContainerIdentity: linuxContainerIdentity(), daemonRuntimeRevision: RUNTIME_REVISION, activeTarget: target, configurationPending: false });
       }
       const result = await status();
       if (!result.daemon.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
@@ -199,14 +282,16 @@ export async function activate(options = {}) {
 export async function deactivate() {
   return withRuntimeLock(async () => {
     updateState({ desiredEnabled: false });
-    let instance = await currentInstance();
+    // Read, verify and stop through one release: an earlier daemon is stopped by its own modules.
+    const root = controlRuntimeDirectory();
+    let instance = await currentInstance(root);
     if (instance) {
-      try { await verifyInstanceOwnership(instance); }
-      catch (error) { if (await releaseReusedPid(instance)) instance = null; else throw error; }
+      try { await verifyInstanceOwnership(instance, root); }
+      catch (error) { if (await releaseReusedPid(instance, root)) instance = null; else throw error; }
     }
     if (instance) {
-      await verifyInstanceOwnership(instance);
-      const control = await controlModule();
+      await verifyInstanceOwnership(instance, root);
+      const control = await serverModule('dist/server/server/daemon-instance.js', root);
       // The official lifecycle rechecks PID plus startedAt immediately before signaling.
       try { await control.stopDaemonInstance(locations().paseoHome, { instance, timeoutMs: 20000, force: false }); }
       catch (error) { throw new RuntimeError(safeCode(error)); }
@@ -218,21 +303,30 @@ export async function deactivate() {
 export async function status() {
   return singleFlight(`status:${locations().paseoHome}`,readStatus);
 }
+const semver = value => typeof value === 'string' && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]{1,40})?$/.test(value) ? value : null;
 async function readStatus() {
-  const state = readState(); const installed = runtimeReady(locations()); const owned = ownsHome();
-  const daemon = { running: false, reachable: false, owned, pid: null, listen: null, relayEnabled: false, relayConnected: null, relayVerified: state.relayVerification?.verified === true, relayVerifiedAt: state.relayVerification?.verified === true ? state.relayVerification.checkedAt || null : null };
-  let providers = [], diagnosticCode = state.lastError?.code === 'RESTART_REQUIRED' ? 'RESTART_REQUIRED' : null;
-  if ((installed||legacyVersion()===PASEO_VERSION) && owned) {
+  const loc = locations(); const state = readState(); const installed = runtimeReady(loc); const owned = ownsHome();
+  const verification = state.relayVerification;
+  let diagnosticCode = state.lastError?.code === 'RESTART_REQUIRED' ? 'RESTART_REQUIRED' : null;
+  let target = DEFAULT_TARGET, activeTarget = null;
+  try { target = selectedTarget(loc); } catch (error) { diagnosticCode = safeCode(error); }
+  // Relay evidence counts only for the target it was taken on; older records were Paseo's.
+  const verified = verification?.verified === true && (verification.target ?? DEFAULT_TARGET) === target;
+  const daemon = { running: false, reachable: false, owned, pid: null, listen: null, version: null, relayEnabled: false, relayConnected: null, relayVerified: verified, relayVerifiedAt: verified ? verification.checkedAt || null : null };
+  let providers = [];
+  const root = controlRuntimeDirectory();
+  if (root && owned) {
     try {
-      const instance = await currentInstance();
+      const instance = await readInstance(root);
       if (instance) {
-        await verifyInstanceOwnership(instance); daemon.running = true; daemon.pid = instance.pid; daemon.listen = instance.listen;
+        await verifyInstanceOwnership(instance, root); daemon.running = true; daemon.pid = instance.pid; daemon.listen = instance.listen;
+        activeTarget = daemonTarget(instance);
         if(instanceNeedsRuntimeRestart(instance))diagnosticCode='RESTART_REQUIRED';
-        const key=JSON.stringify([locations().paseoHome,instance.pid,instance.startedAt,state.updatedAt]);
-        const sample = await daemonStatusWindow(key,()=>withClient(client => client.getDaemonStatus({ timeout: 5000 }), 8000));
+        const key=JSON.stringify([loc.paseoHome,instance.pid,instance.startedAt,state.updatedAt]);
+        const sample = await daemonStatusWindow(key,()=>withClient(client => client.getDaemonStatus({ timeout: 5000 }), 8000, root));
         const result=sample.value;
         daemon.statusCheckedAt=new Date(sample.checkedAt).toISOString();daemon.statusMaxAgeMs=3000;
-        daemon.reachable = true; daemon.workerPid = result.pid; daemon.relayEnabled = result.relay?.enabled === true; daemon.relayConnected = typeof result.relay?.connected === 'boolean' ? result.relay.connected : null;
+        daemon.reachable = true; daemon.workerPid = result.pid; daemon.version = semver(result.version); daemon.relayEnabled = result.relay?.enabled === true; daemon.relayConnected = typeof result.relay?.connected === 'boolean' ? result.relay.connected : null;
         providers = (result.providers || []).filter(row => PROVIDERS.includes(row.provider)).map(safeProvider);
       }
     } catch (error) { diagnosticCode = safeCode(error); }
@@ -242,7 +336,8 @@ async function readStatus() {
   // unattended recovery accepts only 'not_installed' / 'stopped'.
   const stalled = ['running', 'installing', 'starting'].includes(state.phase);
   const phase = stalled && !daemon.running ? 'stopped' : state.phase || 'not_installed';
-  return { installed, version: installed ? PASEO_VERSION : null, enabled: state.desiredEnabled === true, phase, daemon, providers, chatVerified: state.acceptance?.passed === true, pairingAvailable: fs.existsSync(path.join(locations().stateDir, 'pairing.private.json')), diagnosticCode, state };
+  const configurationPending = state.configurationPending === true || (daemon.running && activeTarget !== target);
+  return { installed, version: installed ? PASEO_VERSION : null, enabled: state.desiredEnabled === true, phase, daemon, providers, chatVerified: state.acceptance?.passed === true, pairingAvailable: fs.existsSync(path.join(loc.stateDir, 'pairing.private.json')), diagnosticCode, selectedTarget: target, activeTarget: daemon.running ? activeTarget : null, configurationPending, state };
 }
 export async function diagnose() {
   const snapshot = await status(); const launchers = await detectLaunchers();
@@ -272,23 +367,60 @@ async function readModels(provider) {
     return { ...safeProvider(entry || { provider, status: 'unknown' }), models: (result.models || []).map(model => ({ id: model.id, label: model.label || model.id, isDefault: model.isDefault === true, defaultThinkingOptionId: model.defaultThinkingOptionId || null, thinkingOptions: (model.thinkingOptions || []).map(option => ({ id: option.id, label: option.label || option.id, isDefault: option.isDefault === true })) })) };
   }, 150000);
 }
-async function relayOffer() {
+/** A pairing offer from the running daemon, through the release that controls it, for `target` only. */
+async function relayOffer(target = selectedTarget(locations())) {
   const offer = await cli(['daemon', 'pair', '--relay'], { timeoutMs: 15000 });
   if (!offer.url || !offer.relayEnabled) throw new RuntimeError('PAIRING_UNAVAILABLE');
-  const url = new URL(offer.url); if (url.protocol !== 'https:' || url.hostname !== 'app.paseo.sh') throw new RuntimeError('PAIRING_ORIGIN_INVALID');
-  return offer;
+  return { relayEnabled: true, url: targetPairUrl(offer.url, target), target };
 }
 export async function pair() {
-  const result = await status(); if (!result.daemon.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
-  const offer = await relayOffer();
-  const pairing = { url: offer.url, createdAt: new Date().toISOString() };
-  atomicJson(path.join(locations().stateDir, 'pairing.private.json'), pairing);
-  updateState({ pairingCreatedAt: pairing.createdAt });
-  return pairing;
+  return withRuntimeLock(async () => {
+    const target = selectedTarget(locations());
+    const result = await status(); if (!result.daemon.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
+    // A saved target is not offered until the daemon has restarted with it.
+    if (result.configurationPending || result.activeTarget !== target) throw new RuntimeError('CONFIGURATION_PENDING');
+    const offer = await relayOffer(target);
+    const pairing = { url: offer.url, target, createdAt: new Date().toISOString() };
+    atomicJson(path.join(locations().stateDir, 'pairing.private.json'), pairing);
+    updateState({ pairingCreatedAt: pairing.createdAt });
+    return pairing;
+  }, { timeoutMs: 30000 });
+}
+/**
+ * Saves the connection target. A change is applied by the next stop and start: it withdraws the
+ * stored pairing link and relay evidence, keeps the daemon's server ID and key pair, and marks the
+ * configuration pending unless the running daemon already serves the saved target.
+ */
+export async function saveConnectionSettings(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => key !== 'target') || typeof input.target !== 'string') throw new RuntimeError('INVALID_TARGET');
+  const target = connectionTarget(input.target).id;
+  return withRuntimeLock(async () => {
+    const loc = locations();
+    let previous = null;
+    try { previous = selectedTarget(loc); } catch (error) { if (error.code !== 'CONNECTION_STATE_CORRUPT') throw error; }
+    if (previous !== target) {
+      const pairingFile = path.join(loc.stateDir, 'pairing.private.json');
+      assertSafePath(pairingFile);
+      // Pending is published before the new choice, so a partial write never lets the UI
+      // offer the new app while the old daemon still owns the connection.
+      updateState({ configurationPending: true, relayVerification: null, pairingCreatedAt: null });
+      fs.rmSync(pairingFile, { force: true });
+      saveSelectedTarget(loc, target);
+      let running = null;
+      try {
+        const root = controlRuntimeDirectory(), instance = await currentInstance(root);
+        if (instance) { await verifyInstanceOwnership(instance, root); running = daemonTarget(instance); }
+      } catch { running = null; }
+      if (running === target) updateState({ configurationPending: false });
+    }
+    return { saved: true, target, configurationPending: readState().configurationPending === true };
+  }, { timeoutMs: 30000 });
 }
 async function connectViaOffer(url, work, timeoutMs = 30000) {
-  const { connectToDaemon } = await import(pathToFileURL(path.join(packageRoot(), 'dist/utils/client.js')).href);
+  const { connectToDaemon } = await import(pathToFileURL(path.join(packageRoot('cli'), 'dist/utils/client.js')).href);
   // An endpoint target keeps its client id under $PASEO_HOME; use the managed home, never ~/.paseo.
+  // The client reads the relay endpoint and TLS choice from the offer itself, so every target's
+  // relay is exercised the way its official app reaches the daemon.
   const saved = process.env.PASEO_HOME; process.env.PASEO_HOME = locations().paseoHome;
   let client;
   try { client = await connectToDaemon({ target: { kind: 'endpoint', host: url }, timeout: 20000 }); }
@@ -300,25 +432,29 @@ async function connectViaOffer(url, work, timeoutMs = 30000) {
 }
 /**
  * Proves the hosted relay path end to end: a fresh pairing offer is used by a client that leaves this
- * host, enters through the relay and completes the encrypted handshake with this daemon, like the Paseo
- * app does. The offer is a credential; it stays in memory and is never stored, logged or returned.
- * `deps` lets tests replace the daemon, the offer and the connection.
+ * host, enters through the selected target's relay and completes the encrypted handshake with this
+ * daemon, like the official app does. The offer is a credential; it stays in memory and is never
+ * stored, logged or returned. `deps` lets tests replace the daemon, the offer and the connection.
  */
 export async function verifyRelay(deps = {}) {
   return singleFlight(`relay:${locations().paseoHome}`, () => readRelay(deps));
 }
-async function readRelay({ daemon = async () => (await status()).daemon, offer = relayOffer, connect = connectViaOffer } = {}) {
-  if (!(await daemon()).reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
+async function readRelay({ daemon = async () => { const result = await status(); return { ...result.daemon, configurationPending: result.configurationPending }; }, offer = relayOffer, connect = connectViaOffer } = {}) {
+  const current = await daemon();
+  if (!current.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
+  // A daemon still serving the previous target says nothing about the saved one.
+  if (current.configurationPending === true) throw new RuntimeError('CONFIGURATION_PENDING');
+  const target = selectedTarget(locations());
   const checkedAt = new Date().toISOString();
   try {
-    const { url } = await offer();
+    const { url } = await offer(target);
     await connect(url, client => client.getDaemonStatus({ timeout: 10000 }));
   } catch {
-    updateState({ relayVerification: { verified: false, checkedAt, code: 'RELAY_UNVERIFIED' } });
+    updateState({ relayVerification: { verified: false, checkedAt, code: 'RELAY_UNVERIFIED', target } });
     throw new RuntimeError('RELAY_UNVERIFIED');
   }
-  updateState({ relayVerification: { verified: true, checkedAt } });
-  return { verified: true, checkedAt };
+  updateState({ relayVerification: { verified: true, checkedAt, target } });
+  return { verified: true, checkedAt, target };
 }
 /** Runs exactly two tiny turns per selected provider. Call only after user authorization. */
 export async function acceptance(options = {}) {
