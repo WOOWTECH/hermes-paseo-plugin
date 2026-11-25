@@ -15,7 +15,7 @@ import {usingAcceptanceAgent,usingAcceptanceWorkspace} from './acceptance-agent.
 import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,patchInstalledRuntime,RUNTIME_REVISION} from './runtime-layout.mjs';
 import {demonstrablyReusedPid,linuxContainerIdentity,instanceFromPreviousContainer} from './daemon-identity.mjs';
 import {managedFeatures} from './daemon-config.mjs';
-import {connectionTarget,selectedTarget,saveSelectedTarget,targetConfiguration} from './connection-targets.mjs';
+import {CONNECTION_TARGETS,DEFAULT_TARGET,connectionTarget,selectedTarget,saveSelectedTarget,targetConfiguration} from './connection-targets.mjs';
 export { locations, readState, updateState } from './state.mjs';
 export const PASEO_VERSION = '0.11.2';
 const PROVIDERS = ['hermes', 'claude', 'codex', 'pi'];
@@ -70,6 +70,36 @@ function instanceNeedsRuntimeRestart(instance) {
  if(process.platform!=='linux')return false;
  try{return !fs.readFileSync(`/proc/${instance.pid}/environ`,'utf8').split('\0').includes(`HERMES_PASEO_RUNTIME_REVISION=${RUNTIME_REVISION}`);}catch{return true;}
 }
+const TARGET_ENTRY = 'HERMES_PASEO_CONNECTION_TARGET=';
+/**
+ * The target a running daemon was started with, read from its environment (state.json where /proc is not available).
+ * A daemon started before this plugin knew targets has none recorded and only ever served Paseo's relay and app, so it
+ * counts as Paseo. null: it cannot be told, which is never taken for the saved target.
+ */
+function daemonTarget(instance) {
+  if (process.platform === 'linux') {
+    try {
+      const env = fs.readFileSync(`/proc/${instance.pid}/environ`, 'utf8').split('\0');
+      const value = env.find(entry => entry.startsWith(TARGET_ENTRY))?.slice(TARGET_ENTRY.length);
+      if (value === undefined) return DEFAULT_TARGET;
+      return CONNECTION_TARGETS.some(row => row.id === value) ? value : null;
+    } catch { /* not readable here: use this plugin's own record below */ }
+  }
+  const state = readState();
+  return state.daemonPid === instance.pid && state.daemonStartedAt === instance.startedAt ? state.activeTarget ?? DEFAULT_TARGET : null;
+}
+/** The target served by the daemon running from this profile: undefined when none runs, null when it cannot be told. No daemon is asked anything. */
+async function runningTarget() {
+  try {
+    const instance = await currentInstance();
+    if (!instance) return undefined;
+    await verifyInstanceOwnership(instance);
+    return daemonTarget(instance);
+  } catch { return null; }
+}
+// What waits to be applied. A running daemon decides by itself: it serves the saved target or it does not. With none
+// running, a saved change is pending until the next start applies it (activate clears the flag).
+const configurationPending = (state, running, target) => running === undefined ? state.configurationPending === true : running !== target;
 async function verifyInstanceOwnership(instance) {
   if (!ownsHome() || !instance || !processIdentity(instance.pid)) throw new RuntimeError('DAEMON_NOT_OWNED');
   if (instance.uid !== (process.getuid?.() ?? instance.uid)) throw new RuntimeError('DAEMON_NOT_OWNED');
@@ -170,6 +200,8 @@ export async function activate(options = {}) {
     ensureOwnedHome(); updateState({ desiredEnabled: true, phase: 'installing', lastError: null });
     try {
       if (Number(process.versions.node.split('.')[0]) < 22) throw new RuntimeError('NODE_VERSION_UNSUPPORTED');
+      // A damaged choice stops here, before minutes of npm; the target is read again where it is applied.
+      selectedTarget(locations());
       await installRuntime();
       let existing = await currentInstance(); const launchers = await detectLaunchers({ installMissing: false });
       if (existing) {
@@ -180,6 +212,12 @@ export async function activate(options = {}) {
         await verifyInstanceOwnership(existing);
         if(instanceNeedsRuntimeRestart(existing)) {
           updateState({phase:'restart_required',lastError:{code:'RESTART_REQUIRED',at:new Date().toISOString()}});
+          return status();
+        }
+        // The daemon serves another target than the saved one: nothing is written for it or asked of it. Its next stop
+        // and start applies the saved target.
+        if (daemonTarget(existing) !== selectedTarget(locations())) {
+          updateState({ phase: 'restart_required', lastError: { code: 'CONFIGURATION_PENDING', at: new Date().toISOString() } });
           return status();
         }
         const pending = readState().providerReloadPending;
@@ -234,13 +272,18 @@ export async function status() {
 }
 async function readStatus() {
   const state = readState(); const installed = runtimeReady(locations()); const owned = ownsHome();
-  const daemon = { running: false, reachable: false, owned, pid: null, listen: null, relayEnabled: false, relayConnected: null, relayVerified: state.relayVerification?.verified === true, relayVerifiedAt: state.relayVerification?.verified === true ? state.relayVerification.checkedAt || null : null };
   let providers = [], diagnosticCode = state.lastError?.code === 'RESTART_REQUIRED' ? 'RESTART_REQUIRED' : null;
+  let target = DEFAULT_TARGET, activeTarget = null;
+  try { target = selectedTarget(locations()); } catch (error) { diagnosticCode = safeCode(error); }
+  // Relay evidence counts only for the target it was taken on; a record from before targets existed was Paseo's.
+  const verified = state.relayVerification?.verified === true && (state.relayVerification.target ?? DEFAULT_TARGET) === target;
+  const daemon = { running: false, reachable: false, owned, pid: null, listen: null, relayEnabled: false, relayConnected: null, relayVerified: verified, relayVerifiedAt: verified ? state.relayVerification.checkedAt || null : null };
   if ((installed||legacyVersion()===PASEO_VERSION) && owned) {
     try {
       const instance = await currentInstance();
       if (instance) {
         await verifyInstanceOwnership(instance); daemon.running = true; daemon.pid = instance.pid; daemon.listen = instance.listen;
+        activeTarget = daemonTarget(instance);
         if(instanceNeedsRuntimeRestart(instance))diagnosticCode='RESTART_REQUIRED';
         const key=JSON.stringify([locations().paseoHome,instance.pid,instance.startedAt,state.updatedAt]);
         const sample = await daemonStatusWindow(key,()=>withClient(client => client.getDaemonStatus({ timeout: 5000 }), 8000));
@@ -256,7 +299,8 @@ async function readStatus() {
   // unattended recovery accepts only 'not_installed' / 'stopped'.
   const stalled = ['running', 'installing', 'starting'].includes(state.phase);
   const phase = stalled && !daemon.running ? 'stopped' : state.phase || 'not_installed';
-  return { installed, version: installed ? PASEO_VERSION : null, enabled: state.desiredEnabled === true, phase, daemon, providers, chatVerified: state.acceptance?.passed === true, pairingAvailable: fs.existsSync(path.join(locations().stateDir, 'pairing.private.json')), diagnosticCode, state };
+  return { installed, version: installed ? PASEO_VERSION : null, enabled: state.desiredEnabled === true, phase, daemon, providers, chatVerified: state.acceptance?.passed === true, pairingAvailable: fs.existsSync(path.join(locations().stateDir, 'pairing.private.json')), diagnosticCode,
+    selectedTarget: target, activeTarget: daemon.running ? activeTarget : null, configurationPending: configurationPending(state, daemon.running ? activeTarget : undefined, target), state };
 }
 export async function diagnose() {
   const snapshot = await status(); const launchers = await detectLaunchers();
@@ -293,7 +337,10 @@ async function relayOffer() {
   return offer;
 }
 export async function pair() {
+  const target = selectedTarget(locations());
   const result = await status(); if (!result.daemon.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
+  // A saved target is not offered until the daemon has been stopped and started with it.
+  if (result.configurationPending || result.activeTarget !== target) throw new RuntimeError('CONFIGURATION_PENDING');
   const offer = await relayOffer();
   const pairing = { url: offer.url, createdAt: new Date().toISOString() };
   atomicJson(path.join(locations().stateDir, 'pairing.private.json'), pairing);
@@ -324,7 +371,11 @@ export async function saveConnectionSettings(input) {
     removePairingFile(loc);
     saveSelectedTarget(loc, target);
   }
-  return { saved: true, target, configurationPending: readState().configurationPending === true };
+  // Pending unless the daemon that runs already serves it (a change undone before the next start is no change).
+  // Only its files and environment are read; nothing is asked of it.
+  const running = await runningTarget(), state = readState();
+  if (running === target && state.configurationPending === true) updateState({ configurationPending: false });
+  return { saved: true, target, configurationPending: configurationPending(readState(), running, target) };
 }
 async function connectViaOffer(url, work, timeoutMs = 30000) {
   const { connectToDaemon } = await import(pathToFileURL(path.join(packageRoot(), 'dist/utils/client.js')).href);
@@ -347,18 +398,22 @@ async function connectViaOffer(url, work, timeoutMs = 30000) {
 export async function verifyRelay(deps = {}) {
   return singleFlight(`relay:${locations().paseoHome}`, () => readRelay(deps));
 }
-async function readRelay({ daemon = async () => (await status()).daemon, offer = relayOffer, connect = connectViaOffer } = {}) {
-  if (!(await daemon()).reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
+async function readRelay({ daemon = async () => { const result = await status(); return { ...result.daemon, configurationPending: result.configurationPending }; }, offer = relayOffer, connect = connectViaOffer } = {}) {
+  const current = await daemon();
+  if (!current.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
+  // A daemon still serving the previous target says nothing about the saved one.
+  if (current.configurationPending === true) throw new RuntimeError('CONFIGURATION_PENDING');
+  const target = selectedTarget(locations());
   const checkedAt = new Date().toISOString();
   try {
-    const { url } = await offer();
+    const { url } = await offer(target);
     await connect(url, client => client.getDaemonStatus({ timeout: 10000 }));
   } catch {
-    updateState({ relayVerification: { verified: false, checkedAt, code: 'RELAY_UNVERIFIED' } });
+    updateState({ relayVerification: { verified: false, checkedAt, code: 'RELAY_UNVERIFIED', target } });
     throw new RuntimeError('RELAY_UNVERIFIED');
   }
-  updateState({ relayVerification: { verified: true, checkedAt } });
-  return { verified: true, checkedAt };
+  updateState({ relayVerification: { verified: true, checkedAt, target } });
+  return { verified: true, checkedAt, target };
 }
 /** Runs exactly two tiny turns per selected provider. Call only after user authorization. */
 export async function acceptance(options = {}) {

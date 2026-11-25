@@ -100,6 +100,12 @@ const leaves = (value, prefix = '') => value && typeof value === 'object' && !Ar
   ? Object.entries(value).flatMap(([key, child]) => leaves(child, prefix ? prefix + '.' + key : key)) : [[prefix, JSON.stringify(value)]];
 export async function connectToDaemon({ target }) {
   const trace = entry => process.env.FAKE_PASEO_TRACE && fs.appendFileSync(process.env.FAKE_PASEO_TRACE, JSON.stringify(entry) + '\\n');
+  // A pairing offer as the target: the relay endpoint the real client would dial is the one the offer names.
+  if (target.kind === 'endpoint') {
+    const offer = JSON.parse(Buffer.from(new URL(target.host).hash.slice(7), 'base64url').toString('utf8'));
+    trace({ dial: new URL(target.host).origin, relay: offer.relay.endpoint, useTls: offer.relay.useTls });
+    return { getDaemonStatus: async () => ({ pid: 1 }), close: async () => {} };
+  }
   return {
     getDaemonStatus: async () => { trace({ rpc: 'getDaemonStatus' }); return { pid: 1, relay: { enabled: true, connected: true }, providers: [] }; },
     reloadDaemonConfig: async () => {

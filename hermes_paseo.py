@@ -92,7 +92,7 @@ reachable relayEnabled relayVerified relayVerifiedAt providers provider label st
 isDefault defaultModeId models defaultThinkingOptionId thinkingOptions chatVerified chatVerifiedAt
 checkedAt passed firstReply followup model modeId thinking agentId message reply errorCode
 available authentication loginHint chatErrorCode cleanup archived workspaceArchived
-saved target configurationPending'''.split())
+saved target selectedTarget activeTarget configurationPending'''.split())
 # Free text hides any official app link and the pairing offer of any other URL (the `#offer=` or
 # `#connect=` fragment onward). Every alternative starts at a fixed token, so no scan runs forward
 # from each character: an earlier form began with an unbounded run before the `#` and took
@@ -442,6 +442,25 @@ class Bridge:
             return error.code
         return 'ORIGIN_ADOPTED'
 
+    def connection_target(self):
+        """The connection target saved by the runtime (connection.json); Paseo when nothing was ever saved."""
+        record = _read_json(self.state_dir / 'connection.json', private=True)
+        if record is None:
+            return 'paseo'
+        # Exactly what the runtime writes: JSON `true` is not version 1, and a list is not a target.
+        if (set(record) != {'version', 'target'} or type(record['version']) is not int or record['version'] != 1
+                or not isinstance(record['target'], str) or record['target'] not in TARGET_ORIGINS):
+            raise BridgeError('CONNECTION_STATE_CORRUPT')
+        return record['target']
+
+    def _shown_target(self):
+        # What the page shows when the runtime did not say (it is broken or too old): the saved choice if it can be
+        # read. Never used to release a pairing link; that asks connection_target() and fails closed.
+        try:
+            return self.connection_target()
+        except BridgeError:
+            return 'paseo'
+
     def dashboard_origins(self, fallback):
         """At most two operator origins; never persist Ingress over the primary."""
         primary = self.dashboard_origin() or validate_dashboard_origin(fallback)
@@ -633,6 +652,11 @@ class Bridge:
         for key, default in {'running': False, 'reachable': False, 'relayEnabled': False,
                              'relayVerified': False, 'relayVerifiedAt': None}.items():
             result['daemon'].setdefault(key, default)
+        if result.get('selectedTarget') not in TARGET_ORIGINS:
+            result['selectedTarget'] = self._shown_target()
+        if result.get('activeTarget') not in TARGET_ORIGINS:
+            result['activeTarget'] = None
+        result['configurationPending'] = result.get('configurationPending') is True
         result['providers'] = [row for row in result.get('providers', [])
                                if isinstance(row, dict) and row.get('provider') in PROVIDERS]
         result['onboarding'] = self.onboarding()

@@ -357,6 +357,48 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(timeout, b.TIMEOUTS['config'])
         self.assertLess(b.TIMEOUTS['config'], b.TIMEOUTS['start'], 'saving only records the choice; it never waits for an install')
 
+    def test_status_always_names_a_known_target_and_a_boolean_pending_flag(self):
+        decorated = self.bridge._decorate({'selectedTarget': 'evil', 'activeTarget': 'other', 'configurationPending': 'yes'})
+        self.assertEqual((decorated['selectedTarget'], decorated['activeTarget'], decorated['configurationPending']), ('paseo', None, False))
+        decorated = self.bridge._decorate({'selectedTarget': 'apporo', 'activeTarget': 'paseo', 'configurationPending': True})
+        self.assertEqual((decorated['selectedTarget'], decorated['activeTarget'], decorated['configurationPending']), ('apporo', 'paseo', True))
+        self.assertEqual(set(b.redact({'selectedTarget': 'apporo', 'activeTarget': 'paseo', 'configurationPending': True, 'appUrl': 'x'})),
+                         {'selectedTarget', 'activeTarget', 'configurationPending'})
+
+    def test_a_runtime_that_cannot_answer_still_shows_the_saved_target(self):
+        b._private_dir(self.bridge.state_dir)
+        b._write_json(self.bridge.state_dir / 'connection.json', {'version': 1, 'target': 'woowtech'})
+        with patch.object(self.bridge, '_invoke', side_effect=b.BridgeError('NODE_UNAVAILABLE')):
+            shown = self.bridge.status(fresh=True)
+        self.assertEqual((shown['selectedTarget'], shown['activeTarget'], shown['configurationPending']), ('woowtech', None, False))
+        self.assertEqual(shown['diagnosticCode'], 'NODE_UNAVAILABLE')
+
+    def test_the_saved_target_is_read_from_its_own_private_file_and_a_bad_file_fails_closed(self):
+        self.assertEqual(self.bridge.connection_target(), 'paseo', 'nothing saved')
+        b._private_dir(self.bridge.state_dir)
+        file = self.bridge.state_dir / 'connection.json'
+        for target in b.TARGET_ORIGINS:
+            b._write_json(file, {'version': 1, 'target': target})
+            self.assertEqual(self.bridge.connection_target(), target)
+        for corrupt in ({'version': 1, 'target': 'custom'}, {'target': 'paseo'}, {'version': 1, 'target': 'paseo', 'extra': 1},
+                        {'version': 2, 'target': 'paseo'}, {'version': True, 'target': 'paseo'}, {'version': 1.0, 'target': 'paseo'},
+                        {'version': 1, 'target': ['paseo']}, {'version': 1, 'target': {'id': 'paseo'}}, {'version': 1, 'target': None}):
+            b._write_json(file, corrupt)
+            with self.subTest(corrupt=corrupt), self.assertRaises(b.BridgeError) as caught:
+                self.bridge.connection_target()
+            self.assertEqual(caught.exception.code, 'CONNECTION_STATE_CORRUPT')
+            self.assertEqual(self.bridge._shown_target(), 'paseo', 'the page may show the default; nothing is released on it')
+        b._write_json(file, {'version': 1, 'target': 'apporo'})
+        file.chmod(0o606)
+        with self.assertRaises(b.BridgeError) as caught:
+            self.bridge.connection_target()
+        self.assertEqual(caught.exception.code, 'STATE_UNAVAILABLE', 'a file others can write is not a record')
+        file.chmod(0o600)
+        file.unlink()
+        file.symlink_to(self.bridge.state_dir / 'elsewhere.json')
+        with self.assertRaises(b.BridgeError):
+            self.bridge.connection_target()
+
     def test_config_answers_only_with_public_fields(self):
         shown = b.redact({'saved': True, 'target': 'apporo', 'configurationPending': True, 'appUrl': 'x', 'relayEndpoint': 'y', 'password': 'z'})
         self.assertEqual(shown, {'saved': True, 'target': 'apporo', 'configurationPending': True})

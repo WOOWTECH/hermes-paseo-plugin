@@ -113,3 +113,100 @@ test('a start refuses a runtime whose server it does not recognise, and leaves i
   assert.equal(fs.existsSync(p.marker), false);
   assert.equal((await status()).phase, 'error');
 });
+
+// ---- switching targets (item 4) ----
+import { publicStatus } from '../src/control.mjs';
+import { pair, verifyRelay } from '../src/runtime.mjs';
+import { updateState } from '../src/state.mjs';
+
+const identityFiles = loc => ({ 'server-id': 'srv_keep_this_one', 'daemon-keypair.json': '{"keep":"this key pair"}' });
+const seedIdentity = loc => { for (const [name, content] of Object.entries(identityFiles(loc))) fs.writeFileSync(path.join(loc.paseoHome, name), content); };
+const identityIntact = loc => Object.entries(identityFiles(loc)).every(([name, content]) => fs.readFileSync(path.join(loc.paseoHome, name), 'utf8') === content);
+const pairCalls = p => readTrace(p.trace).filter(row => row.cli?.[0] === 'daemon' && row.cli?.[1] === 'pair');
+const rpc = (p, name) => readTrace(p.trace).filter(row => row.rpc === name).length;
+
+test('status names the saved target, the one the daemon runs, and whether the two differ', async t => {
+  const f = fixture(); t.after(() => f.close());
+  let s = await status();
+  assert.deepEqual([s.selectedTarget, s.activeTarget, s.configurationPending], ['paseo', null, false], 'nothing saved, nothing running: Paseo, nothing pending');
+  assert.deepEqual(Object.keys(publicStatus(s)).filter(key => /Target|Pending/.test(key)).sort(), ['activeTarget', 'configurationPending', 'selectedTarget']);
+  await saveConnectionSettings({ target: 'apporo' });
+  s = await status();
+  assert.deepEqual([s.selectedTarget, s.activeTarget, s.configurationPending], ['apporo', null, true], 'stopped: it applies at the next start');
+  assert.deepEqual([publicStatus(s).selectedTarget, publicStatus(s).activeTarget, publicStatus(s).configurationPending], ['apporo', null, true]);
+  fs.writeFileSync(path.join(locations().stateDir, 'connection.json'), '{broken');
+  s = await status();
+  assert.equal(s.diagnosticCode, 'CONNECTION_STATE_CORRUPT', 'a damaged choice is named, not read as Paseo silently');
+});
+
+test('a target saved while the daemon runs waits for a stop and start; nothing is written, reloaded or paired meanwhile', async t => {
+  const p = profile(t);
+  await activate();
+  seedIdentity(p.loc);
+  let s = await status();
+  assert.deepEqual([s.selectedTarget, s.activeTarget, s.configurationPending], ['paseo', 'paseo', false]);
+  const config = fs.readFileSync(p.config, 'utf8'), pid = s.daemon.pid;
+  updateState({ relayVerification: { verified: true, checkedAt: 'old', target: 'paseo' }, pairingCreatedAt: 'old' });
+  assert.equal((await status()).daemon.relayVerified, true);
+  assert.deepEqual(await saveConnectionSettings({ target: 'woowtech' }), { saved: true, target: 'woowtech', configurationPending: true });
+  s = await status();
+  assert.deepEqual([s.selectedTarget, s.activeTarget, s.configurationPending, s.daemon.running, s.daemon.pid], ['woowtech', 'paseo', true, true, pid]);
+  assert.equal(s.daemon.relayVerified, false, 'the evidence of the old target is gone, and says nothing about the new');
+  assert.equal(readState().pairingCreatedAt, null);
+  // Neither pairing nor the relay check goes near the daemon while the change is pending.
+  const asked = readTrace(p.trace).length;
+  await assert.rejects(pair(), { code: 'CONFIGURATION_PENDING' });
+  await assert.rejects(verifyRelay(), { code: 'CONFIGURATION_PENDING' });
+  assert.equal(readTrace(p.trace).length, asked, 'no pairing offer was asked for, nothing was dialled');
+  // Activating again does not rewrite or reload anything for the running daemon: it names the pending change.
+  const again = await activate();
+  assert.equal(again.phase, 'restart_required');
+  assert.equal(again.configurationPending, true);
+  assert.equal(again.daemon.pid, pid);
+  assert.equal(fs.readFileSync(p.config, 'utf8'), config, 'config.json untouched');
+  assert.equal(rpc(p, 'reloadDaemonConfig'), 0);
+  assert.equal(starts(p).length, 1);
+  assert.equal(identityIntact(p.loc), true);
+  // Stop, start: the change is applied, and the server id and key pair survived.
+  await deactivate();
+  s = await status();
+  assert.deepEqual([s.daemon.running, s.activeTarget, s.configurationPending], [false, null, true], 'stopped, still waiting for the start');
+  s = await activate();
+  assert.deepEqual([s.phase, s.selectedTarget, s.activeTarget, s.configurationPending], ['running', 'woowtech', 'woowtech', false]);
+  assert.equal(starts(p).at(-1).target, 'woowtech');
+  assert.equal(configOf(p).app.baseUrl, 'https://smart.woowtech.io');
+  assert.equal(identityIntact(p.loc), true, 'previously paired devices of the same target keep working');
+  assert.equal(readState().configurationPending, false);
+});
+
+test('choosing the running target again before the restart leaves nothing pending', async t => {
+  const p = profile(t);
+  await activate();
+  await saveConnectionSettings({ target: 'apporo' });
+  assert.equal((await status()).configurationPending, true);
+  assert.deepEqual(await saveConnectionSettings({ target: 'paseo' }), { saved: true, target: 'paseo', configurationPending: false });
+  const s = await status();
+  assert.deepEqual([s.selectedTarget, s.activeTarget, s.configurationPending], ['paseo', 'paseo', false]);
+  assert.equal(readState().configurationPending, false, 'the flag is cleared too, so a later stop does not announce a change');
+  await deactivate();
+  assert.equal((await status()).configurationPending, false);
+  const after = await activate();
+  assert.deepEqual([after.activeTarget, after.configurationPending], ['paseo', false]);
+});
+
+test('a daemon started before this version counts as Paseo, and pairs as Paseo until another target is saved', async t => {
+  const p = profile(t);
+  await activate(); await deactivate();
+  const legacy = await startLegacyDaemon(p.loc);
+  let s = await status();
+  assert.deepEqual([s.daemon.running, s.daemon.pid, s.activeTarget, s.selectedTarget, s.configurationPending], [true, legacy.pid, 'paseo', 'paseo', false]);
+  assert.equal(supervisorEnv(legacy.pid).some(entry => entry.startsWith('HERMES_PASEO_CONNECTION_TARGET=')), false, 'it records no target');
+  const offer = await pair();
+  assert.equal(offer.url.startsWith('https://app.paseo.sh/#offer='), true);
+  await saveConnectionSettings({ target: 'apporo' });
+  s = await status();
+  assert.deepEqual([s.activeTarget, s.configurationPending], ['paseo', true]);
+  await assert.rejects(pair(), { code: 'CONFIGURATION_PENDING' });
+  assert.deepEqual(await saveConnectionSettings({ target: 'paseo' }), { saved: true, target: 'paseo', configurationPending: false });
+  assert.equal(starts(p).length, 2, 'the legacy daemon was never restarted by any of this');
+});
