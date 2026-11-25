@@ -54,7 +54,7 @@
       AUTH: "Dashboard 登入已過期，請重新整理頁面並登入。",
       FORBIDDEN: "操作被拒絕。請確認 hermes-paseo 已啟用且登入有效；若使用反向代理，請由管理者確認正式網址設定。",
       BUSY: "服務仍在處理上一項操作，請稍後重試。",
-      REFUSED: "停止被拒絕，目前的服務沒有被動到、照常可用。原因（新版 Paseo 無法讀取設定）與處理方式請見上方說明。",
+      REFUSED: "停止被拒絕，目前的服務沒有被動到、照常可用。原因（新版 Paseo 尚未準備好，或無法讀取目前的設定）與處理方式請見上方說明。",
       PAIR: "配對服務沒有傳回有效的官方連結，請重新產生。",
       DATA: "服務傳回的狀態格式不完整，請重新檢查。",
       SDK: "此 Dashboard 缺少外掛 API SDK，請由管理者檢查 Hermes Dashboard 版本。",
@@ -107,6 +107,13 @@
     return { acceptanceJob: job, acceptanceUncertain: false,
       acceptance: !jobPending(job) && job.phase === "completed" ? job.result : null };
   }
+  // Where the new release stands while an older daemon serves: ready, being installed, or why not and when it retries.
+  function normalizePrepare(value) {
+    if (!value || typeof value !== "object" || !["ready", "pending", "running", "failed"].includes(value.stage)) return null;
+    const count = number => Number.isSafeInteger(number) && number >= 0 ? number : null;
+    return { stage: value.stage, code: typeof value.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.code) ? value.code : "",
+      retryIn: count(value.retryInSeconds), required: count(value.requiredMiB), available: count(value.availableMiB) };
+  }
   function normalize(value) {
     if (!value || typeof value.enabled !== "boolean" || typeof value.phase !== "string" ||
         !value.daemon || typeof value.daemon.running !== "boolean" || typeof value.daemon.reachable !== "boolean" ||
@@ -116,6 +123,9 @@
       enabled: value.enabled, phase: value.phase,
       acceptanceJob: Object.prototype.hasOwnProperty.call(value, "acceptanceJob") ? normalizeJob(value.acceptanceJob) : undefined,
       diagnosticCode: typeof value.diagnosticCode === "string" ? value.diagnosticCode : null,
+      // Whether the new release is installed; absent (null) from a backend that does not say.
+      installed: typeof value.installed === "boolean" ? value.installed : null,
+      prepare: normalizePrepare(value.prepare),
       // Key paths of the settings the new release refused; never values. Shown as text only.
       configPaths: value.configCheck && Array.isArray(value.configCheck.paths)
         ? value.configCheck.paths.filter(row => typeof row === "string" && row.trim()).map(row => text(row, "")).filter(Boolean).slice(0, 20) : [],
@@ -376,6 +386,9 @@
     if (markers.paused || pausedStatus(status)) return snapshot.busy === "start" ? "正在恢復" : status.daemon.running ? "停止待確認" : "已手動停止";
     if (status.phase === "stopped" && snapshot.busy === "start") return "正在恢復服務";
     if (status.diagnosticCode === "CONFIG_INCOMPATIBLE") return "需要修正設定";
+    if (status.daemon.running && status.diagnosticCode === "RESTART_REQUIRED" && status.installed === false) {
+      return status.prepare && status.prepare.stage === "failed" ? "新版準備失敗" : "準備新版中";
+    }
     if (status.phase === "running" && status.daemon.running && status.diagnosticCode === "RESTART_REQUIRED") return "需要重新啟動";
     return ({ not_installed: "等待初始化", installing: "正在安裝 Paseo", starting: "正在啟動服務",
       running: status.daemon.reachable ? "服務已就緒" : "等待服務連線", ready: "服務已就緒",
@@ -585,10 +598,14 @@
     const targetDirty = draft !== saved.id;
     const pending = !!(status && status.configurationPending);
     const pairBlocked = pending || targetDirty;
-    // An older release's daemon keeps serving after a plugin update until it is stopped and resumed.
-    const upgrade = !!(status && status.daemon.running && status.diagnosticCode === "RESTART_REQUIRED");
+    // An older release's daemon keeps serving after a plugin update until it is stopped and resumed, but only
+    // once the new release is installed: until then there is nothing to move to, and a stop would be refused.
+    const olderDaemon = !!(status && status.daemon.running && status.diagnosticCode === "RESTART_REQUIRED");
+    const unprepared = olderDaemon && status.installed === false;
+    const prepareFailed = unprepared && !!status.prepare && status.prepare.stage === "failed";
+    const upgrade = olderDaemon && !unprepared;
     const incompatible = !!(status && status.diagnosticCode === "CONFIG_INCOMPATIBLE");
-    const restartNotice = status && !pending && !incompatible && (status.phase === "restart_required" || upgrade);
+    const restartNotice = status && !pending && !incompatible && !unprepared && (status.phase === "restart_required" || upgrade);
     return h("div", { className: "hermes-paseo hp-page", lang: "zh-Hant" },
       h("header", { className: "hp-title" }, h("div", null, h("p", { className: "hp-eyebrow" }, "HERMES × PASEO"),
         h("h1", null, "把 Hermes 帶到 Paseo"), h("p", { className: "hp-muted" }, "完成服務啟動與官方配對，再從其他裝置繼續對話。")),
@@ -606,6 +623,15 @@
           h("li", { "data-done": !!(status && (status.daemon.running || ["starting", "running", "ready", "restart_required"].includes(status.phase))) }, "安裝執行環境"),
           h("li", { "data-done": !!(status && status.daemon.running) }, "啟動服務"),
           h("li", { "data-done": reachable }, "確認連線")),
+        unprepared && h("div", { className: prepareFailed ? "hp-error" : "hp-notice", role: prepareFailed ? "alert" : "status" },
+          h("p", null, prepareFailed
+            ? "新版 Paseo 執行環境準備失敗（原因代碼 " + (status.prepare.code || "未知") + "）。目前" +
+              (status.daemon.version ? "執行 " + status.daemon.version + " 的" : "") + "服務照常可用，不需要停止或重啟。" +
+              (status.prepare.retryIn !== null ? "約 " + status.prepare.retryIn + " 秒後自動重試；" : "自動重試已停止，可按「立即重試準備」；") +
+              "準備完成前停止服務會被拒絕，避免停下後無法再啟動。"
+            : "正在準備新版 Paseo 執行環境（目前的服務照常可用，不需要任何操作）。準備完成後這裡才會提示重新啟動；在那之前停止服務會被拒絕。"),
+          prepareFailed && status.prepare.code === "INSUFFICIENT_DISK" && status.prepare.required !== null && status.prepare.available !== null &&
+            h("p", null, "磁碟空間不足：安裝需要約 " + status.prepare.required + " MiB 可用，目前只有 " + status.prepare.available + " MiB。清出空間後會自動重試。")),
         restartNotice && h("p", { className: "hp-error" }, upgrade
           ? "Paseo 執行環境已更新" + (status.daemon.version ? "（目前執行 " + status.daemon.version + "）" : "") +
             "，需要停止再恢復服務才會換成新版本。目前的服務照常可用；請先結束使用中的對話。"
@@ -619,8 +645,8 @@
           h("p", { className: "hp-small" }, "設定檔位於 Hermes 資料目錄下的 plugin-data/hermes-paseo/daemon/config.json；編輯前請先備份。若要連同插件一起停用或移除，Hermes 的停用與移除不受這項檢查阻擋。")),
         h("div", { className: "hp-actions" },
           button(snapshot.stopping ? "正在停止…" : "停止服務", () => void action("stop"), !enabled || snapshot.stopping || dashboardReloading || (paused && !status.daemon.running), true),
-          button(snapshot.busy === "start" ? "正在啟動…" : paused ? "恢復服務" : "重新啟動／重試", () => void action("start"),
-            !enabled || busy || !!snapshot.readError || (!paused && reachable), false),
+          button(snapshot.busy === "start" ? "正在啟動…" : paused ? "恢復服務" : prepareFailed ? "立即重試準備" : "重新啟動／重試", () => void action("start"),
+            !enabled || busy || !!snapshot.readError || (!paused && reachable && !prepareFailed), false),
           button(snapshot.reading ? "檢查中…" : "重新檢查", () => void readStatus(), snapshot.reading || dashboardReloading, true)),
         h("p", { className: "hp-muted hp-small" }, "頁面約每 2 秒檢查一次，頁首約每 5 秒檢查。分頁隱藏時暫停讀取；已送出的操作仍由服務處理。")),
       h("section", { className: "hp-card hp-pair", "aria-label": "配對精靈" },

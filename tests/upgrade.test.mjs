@@ -7,11 +7,12 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { locations, readState, updateState, processIdentity } from '../src/state.mjs';
-import { activate, deactivate, status, writeDaemonConfig, checkDaemonConfig, saveConnectionSettings } from '../src/runtime.mjs';
+import { activate, deactivate, prepare, status, writeDaemonConfig, checkDaemonConfig, saveConnectionSettings, installSettings } from '../src/runtime.mjs';
+import { hostCapacity } from '../src/host-capacity.mjs';
 import { RUNTIME_REVISION, PRIOR_RELEASES, pruneUnusedPriorReleases, priorRuntimeDirectory, runtimeDirectory } from '../src/runtime-layout.mjs';
 import { saveSelectedTarget, CONNECTION_TARGETS } from '../src/connection-targets.mjs';
 import { validateInput, publicStatus } from '../src/control.mjs';
-import { fixture, lifecycleModules, seedCurrentRelease, seedPriorRelease, fakeSupervisor, providerlessPath } from './release-fixtures.mjs';
+import { fixture, lifecycleModules, seedCurrentRelease, seedPriorRelease, fakeSupervisor, fakeNpm, providerlessPath } from './release-fixtures.mjs';
 
 const R2 = PRIOR_RELEASES.find(row => row.generation === 'r2').revision;
 const R1 = PRIOR_RELEASES.find(row => row.generation === 'r1').revision;
@@ -133,8 +134,13 @@ test('stopping an rc.9 daemon goes through its own release; with this release in
   const loc = owned();
   seedPriorRelease(loc, { modules: lifecycleModules('prior') });
   const first = await fakeSupervisor(f, loc.paseoHome, { HERMES_PASEO_RUNTIME_REVISION: R2 });
-  // Not installed yet: nothing can check the config, and the user's stop is honoured.
-  assert.equal((await deactivate()).phase, 'disabled');
+  // Not installed yet: nothing could start Paseo again after the stop, so a stop to move to the new
+  // release is refused; the host turning the plugin off (reason disable) is honoured.
+  await assert.rejects(deactivate(), { code: 'RUNTIME_NOT_READY' });
+  assert.ok(processIdentity(first.child.pid), 'the old daemon keeps serving');
+  assert.equal(readState().desiredEnabled, true, 'a refused stop records no stop intent');
+  assert.equal(handled(loc, 'stopped-by'), '');
+  assert.equal((await deactivate({ reason: 'disable' })).phase, 'disabled');
   assert.equal(handled(loc, 'stopped-by'), 'prior');
   assert.ok(await gone(first.child));
 
@@ -353,3 +359,43 @@ test('fixing config.json clears the refusal without a stop, and breaking it agai
   assert.deepEqual((await status()).configCheck.paths, ['other']);
   assert.equal(handled(loc, 'stopped-by'), '');
 });
+
+// A release that cannot be installed must never cost the user their working daemon.
+for (const [name, install] of [['offline', { mode: 'fail' }], ['out of space', { mode: 'fail', space: true }], ['too slow', { mode: 'hang', timeout: 400 }]]) {
+  test(`when the new release cannot be installed (${name}) the old daemon keeps serving and no stop can strand it`, async t => {
+    const f = fixture(); t.after(() => f.close());
+    const npm = fakeNpm(f, { tree: { persistedConfig: true, modules: lifecycleModules('current') } });
+    const loc = owned();
+    seedPriorRelease(loc, { modules: lifecycleModules('prior') });
+    const { child } = await fakeSupervisor(f, loc.paseoHome, { HERMES_PASEO_RUNTIME_REVISION: R2 });
+    const savedTimeout = installSettings.npmTimeoutMs, saved = { ...hostCapacity };
+    t.after(() => { installSettings.npmTimeoutMs = savedTimeout; Object.assign(hostCapacity, saved); });
+    if (install.timeout) installSettings.npmTimeoutMs = install.timeout;
+    let reads = 0;
+    if (install.space) hostCapacity.availableMiB = () => ++reads === 1 ? 50000 : 5;
+    npm.mode(install.mode);
+    const code = { offline: 'RUNTIME_INSTALL_FAILED', 'out of space': 'INSUFFICIENT_DISK', 'too slow': 'RUNTIME_INSTALL_TIMEOUT' }[name];
+    await assert.rejects(prepare(), { code });
+    // The status says what happened, and it is not a failed start.
+    const shown = await status();
+    assert.equal(shown.installed, false);
+    assert.equal(shown.daemon.running, true);
+    assert.equal(shown.phase, 'running');
+    assert.equal(shown.diagnosticCode, 'RESTART_REQUIRED');
+    assert.deepEqual([shown.prepare.stage, shown.prepare.code], ['failed', code]);
+    assert.equal(publicStatus(shown).prepare.code, code);
+    // A stop to move to the new release is refused, wherever it comes from; the daemon is untouched.
+    for (const attempt of [() => deactivate(), () => deactivate({ reason: undefined })]) {
+      await assert.rejects(attempt(), { code: 'RUNTIME_NOT_READY' });
+      assert.ok(processIdentity(child.pid));
+      assert.equal(readState().desiredEnabled, true);
+      assert.equal(handled(loc, 'stopped-by'), '');
+    }
+    // Once the cause is gone the next prepare installs it and the stop is allowed again.
+    npm.mode('ok'); Object.assign(hostCapacity, saved); installSettings.npmTimeoutMs = savedTimeout;
+    assert.equal((await prepare()).prepare.stage, 'ready');
+    assert.equal((await deactivate()).phase, 'disabled');
+    assert.equal(handled(loc, 'stopped-by'), 'prior');
+    assert.ok(await gone(child));
+  });
+}

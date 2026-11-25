@@ -90,16 +90,16 @@ CODES = CODES | set('''INVALID_TARGET CONFIGURATION_PENDING CONNECTION_STATE_COR
 PAIRING_OFFER_INVALID PAIRING_SECURITY_UNSUPPORTED BRAND_IDENTITY_SOURCE_MISMATCH BRAND_IDENTITY_PATCH_MISMATCH
 CONFIG_INVALID CONFIG_CORRUPT CONFIG_INCOMPATIBLE PORT_UNAVAILABLE DAEMON_STATE_CHANGED
 TERMINAL_CLEANUP_NOT_CONFIRMED STOP_NOT_CONFIRMED DAEMON_REPLACED
-INSUFFICIENT_DISK RUNTIME_INSTALL_FAILED RUNTIME_INSTALL_TIMEOUT RUNTIME_IN_USE'''.split())
-# A stop the runtime declines before it signals anything: the daemon keeps serving, so the pause the
-# stop recorded must not outlive it.
-STOP_REFUSALS = frozenset({'CONFIG_INCOMPATIBLE', 'CONFIG_CORRUPT'})
+INSUFFICIENT_DISK RUNTIME_INSTALL_FAILED RUNTIME_INSTALL_TIMEOUT RUNTIME_IN_USE RUNTIME_NOT_READY'''.split())
+# A stop the runtime declines before it signals anything (the new release cannot read config.json, or is
+# not installed yet): the daemon keeps serving, so the pause the stop recorded must not outlive it.
+STOP_REFUSALS = frozenset({'CONFIG_INCOMPATIBLE', 'CONFIG_CORRUPT', 'RUNTIME_NOT_READY'})
 PUBLIC_KEYS = frozenset('''ok code installed version enabled phase diagnosticCode daemon running
 reachable relayEnabled relayVerified relayVerifiedAt providers provider label status modes id
 isDefault defaultModeId models defaultThinkingOptionId thinkingOptions chatVerified chatVerifiedAt
 checkedAt passed firstReply followup model modeId thinking agentId message reply errorCode
 available authentication loginHint chatErrorCode cleanup archived workspaceArchived
-selectedTarget activeTarget configurationPending target saved configCheck paths prepare stage at requiredMiB availableMiB stopRefused'''.split())
+selectedTarget activeTarget configurationPending target saved configCheck paths prepare stage at requiredMiB availableMiB retryInSeconds stopRefused'''.split())
 # Free text hides any official app link and the pairing offer of any other URL (the `#offer=` or
 # `#connect=` fragment onward). Every alternative starts at a fixed token, so no scan runs forward
 # from each character: an earlier form began with an unbounded run before the `#` and took
@@ -416,7 +416,11 @@ class Bridge:
         self._error = None
         self._retry_at = None
         self._retry_count = 0
-        self._prepare_attempted = False
+        self._preparing = False
+        self._prepare_failures = 0
+        self._prepare_error = None
+        self._prepare_retry_at = None  # no attempt starts before this (monotonic); also a pause after a success
+        self._prepare_given_up = False
         self._stop_guarded = False
         self._stop_refusal = None
         self._operation_lock = threading.Lock()
@@ -679,6 +683,8 @@ class Bridge:
                                if isinstance(row, dict) and row.get('provider') in PROVIDERS]
         result['onboarding'] = self.onboarding()
         result['acceptanceJob'] = self.acceptance_status()
+        if 'prepare' in result or self._preparing or self._prepare_failures:
+            result['prepare'] = self._prepare_view(result.get('prepare'))
         with self._condition:
             if self._phase:
                 result['phase'] = self._phase
@@ -735,44 +741,79 @@ class Bridge:
                 self._condition.notify_all()
 
     def _maybe_prepare(self, result):
-        """Install this release beside an older daemon that keeps serving, once per process.
+        """Install the new release beside an older daemon that keeps serving, and check it can read the config.
 
-        A plugin update leaves the previous release's daemon running until the user stops and
-        starts it. Installing the new runtime now keeps that restart short and lets the runtime
-        check, before anything is stopped, that the new Paseo can load the current config.
-        `start` beside an older daemon only installs and checks: it never stops or restarts it.
+        A plugin update leaves the previous release's daemon running until the user stops and starts it.
+        Preparing now keeps that restart short and shows, before anything is stopped, whether the new release
+        can take over. `prepare` never starts or stops a daemon. A failed attempt is tried again after the
+        same growing delays as a failed start (RETRY_BACKOFF, RETRY_LIMIT attempts); an explicit start
+        tries at once. Stopping is refused until the release is ready (see Node `deactivate`).
         """
         daemon = result.get('daemon') or {}
         if (result.get('diagnosticCode') != 'RESTART_REQUIRED' or result.get('installed') is not False
                 or daemon.get('running') is not True or result.get('enabled') is not True):
             return
         with self._condition:
-            if (self._prepare_attempted or self._pause_requested
+            if (self._preparing or self._pause_requested
                     or (self._worker is not None and self._worker.is_alive())
                     or (self._stop_worker is not None and self._stop_worker.is_alive())):
                 return
+            if self._prepare_given_up or (self._prepare_retry_at is not None and time.monotonic() < self._prepare_retry_at):
+                return  # waiting out the delay, or the attempts are used up
             try:
                 if (_read_json(self.state_dir / 'onboarding.json') or {}).get('paused'):
                     return
             except (BridgeError, OSError):
                 return
-            self._prepare_attempted = True
+            self._preparing = True
             context = contextvars.copy_context()
             self._worker = threading.Thread(target=lambda: context.run(self._prepare),
                                             name='hermes-paseo-prepare', daemon=True)
             self._worker.start()
 
     def _prepare(self):
+        failure = None
         try:
             with self._operation_lock:
                 with self._condition:
                     if self._pause_requested:
                         return
-                self._invoke('start')
-        except Exception:
-            pass  # the outcome is in the runtime state and the next status read
+                self._invoke('prepare')
+        except Exception as error:
+            failure = error.code if isinstance(error, BridgeError) else 'PREPARE_FAILED'
         finally:
+            with self._condition:
+                self._preparing = False
+                if failure is None:
+                    # Ready. A short pause keeps a status that still disagrees from starting npm checks in a loop.
+                    self._prepare_failures, self._prepare_error, self._prepare_given_up = 0, None, False
+                    self._prepare_retry_at = time.monotonic() + RETRY_BACKOFF[0]
+                else:
+                    self._prepare_failures += 1
+                    self._prepare_error = failure
+                    self._prepare_given_up = self._prepare_failures > RETRY_LIMIT
+                    self._prepare_retry_at = (None if self._prepare_given_up else
+                                              time.monotonic() + RETRY_BACKOFF[min(self._prepare_failures - 1, len(RETRY_BACKOFF) - 1)])
             self.invalidate()
+
+    def _prepare_view(self, runtime):
+        """Where the new release stands, for the page: ready, being installed, or why not and when it tries again.
+
+        `runtime` is what the runtime recorded (it survives a Dashboard restart); this process adds that an
+        attempt is running now and when the next one is due."""
+        runtime = runtime if isinstance(runtime, dict) else {}
+        with self._condition:
+            if self._preparing:
+                return {'stage': 'running'}
+            if self._prepare_failures:
+                due = None if self._prepare_given_up else max(0, int(self._prepare_retry_at - time.monotonic() + 0.999))
+                view = {'stage': 'failed', 'code': self._prepare_error if self._prepare_error in CODES else 'OPERATION_FAILED',
+                        'retryInSeconds': due}
+                if runtime.get('code') == view['code']:
+                    view.update({key: runtime[key] for key in ('requiredMiB', 'availableMiB') if isinstance(runtime.get(key), int)})
+                return view
+        stage = runtime.get('stage')
+        return {key: value for key, value in runtime.items() if key != 'retryInSeconds'} if stage in ('ready', 'pending', 'failed') else {'stage': 'pending'}
 
     def _initialize(self):
         verify = False
@@ -831,6 +872,8 @@ class Bridge:
             if self._worker is None or not self._worker.is_alive():
                 self._pause_requested = False
                 self._stop_refusal = None
+                # An explicit start also tries the new release again at once.
+                self._prepare_failures, self._prepare_retry_at, self._prepare_given_up = 0, None, False
                 with _state_lock(self.state_dir):
                     record = _read_json(self.state_dir / 'onboarding.json')
                     record['paused'] = False

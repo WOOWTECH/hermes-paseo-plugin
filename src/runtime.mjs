@@ -427,9 +427,15 @@ export async function deactivate({ reason } = {}) {
       await verifyInstanceOwnership(instance, root);
       // Stopping an earlier release's daemon is the first half of the upgrade. When this release
       // is installed, its config must load first: otherwise Paseo would stay down after the stop.
-      if (reason !== 'disable' && instanceNeedsRuntimeRestart(instance) && runtimeReady(locations())) {
-        // Refused: the daemon keeps serving, so the recorded intent stays enabled.
-        try { await checkDaemonConfig(); } catch (error) { updateState({ desiredEnabled: true }); throw error; }
+      if (reason !== 'disable' && instanceNeedsRuntimeRestart(instance)) {
+        // Moving an earlier release's daemon to this one is only allowed when this release can take over:
+        // installed and verified, and able to read config.json. Otherwise Paseo would be down with nothing
+        // that could start it again (an install that failed, offline or out of space, would just fail
+        // again). Refused: the daemon keeps serving, so the recorded intent stays enabled.
+        try {
+          if (!runtimeReady(locations())) throw new RuntimeError('RUNTIME_NOT_READY');
+          await checkDaemonConfig();
+        } catch (error) { updateState({ desiredEnabled: true }); throw error; }
       }
       const control = await serverModule('dist/server/server/daemon-instance.js', root);
       const identity = processIdentity(instance.pid);
