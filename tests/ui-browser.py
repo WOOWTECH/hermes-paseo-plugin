@@ -95,6 +95,8 @@ class Fixture:
         self.acceptance_job = None
         self.disconnect_acceptance = False
         self.target = 'paseo'
+        self.saved = False  # nobody saved a target yet: the plugin's legacy mode
+        self.connection_code = None
         self.active = None
         self.pending = False
         self.legacy_backend = False
@@ -114,8 +116,8 @@ class Fixture:
                                dict(provider='codex', label='未安裝 Codex', status='unavailable')],
                     onboarding=dict(required=not self.completed, id=self.onboarding_id, completed=self.completed))
         if not self.legacy_backend:
-            value.update(selectedTarget=self.target, activeTarget=self.active if running else None,
-                         configurationPending=self.pending)
+            value.update(selectedTarget=self.target, targetSaved=self.saved, connectionCode=self.connection_code,
+                         activeTarget=self.active if running else None, configurationPending=self.pending)
         if self.acceptance_job is not None:
             value['acceptanceJob'] = self.acceptance_job
         return value
@@ -239,6 +241,8 @@ def run(args):
                 if value['target'] != fixture.target:
                     fixture.target = value['target']
                     fixture.pending = fixture.active != fixture.target if fixture.phase == 'running' else True
+                # The first save ends legacy mode, and saving replaces a record that could not be read.
+                fixture.saved, fixture.connection_code = True, None
                 return self.send(dict(saved=True, target=fixture.target, configurationPending=fixture.pending))
             if body != b'{}' or self.headers.get('Content-Type') != 'application/json':
                 return self.send({}, status=400)
@@ -436,6 +440,50 @@ def run(args):
             assert_posts(fixture, origin)
             context.close()
             print('PASS: a saved target waits for stop and resume before pairing; the unsaved choice survives polling; links open only its own app.')
+
+            # Nothing saved yet (legacy mode) says so and changes nothing; saving the shown Paseo turns the settings on.
+            fixture = Fixture.reloadable()
+            context = browser.new_context(viewport=dict(width=390, height=844))
+            context.route('**/*', route)
+            page = context.new_page()
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(origin + '/paseo')
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_enabled(timeout=10000)
+            expect(page.get_by_text('尚未選擇連線標的：服務維持原有設定', exact=False)).to_be_visible()
+            expect(page.get_by_text('config.json.pre-agent-connect', exact=False)).to_be_visible()
+            save = page.get_by_role('button', name='儲存連線標的', exact=True)
+            expect(save).to_be_enabled()
+            save.click()
+            expect(page.get_by_text('尚未選擇連線標的', exact=False)).to_have_count(0)
+            expect(save).to_be_disabled()
+            assert fixture.count('/config', 'POST') == 1 and fixture.saved and fixture.target == 'paseo'
+            expect(page.get_by_text('標的已儲存，停止再啟動服務後生效', exact=False)).to_have_count(0)
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_enabled()
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            assert_posts(fixture, origin)
+            context.close()
+            print('PASS: before a target is saved the page says nothing changed; saving Paseo turns the settings on without waiting for a restart.')
+
+            # A record that cannot be read is named, blocks pairing and is repaired by saving the shown target.
+            fixture = Fixture.reloadable()
+            fixture.saved, fixture.connection_code = True, 'CONNECTION_STATE_CORRUPT'
+            context = browser.new_context(viewport=dict(width=390, height=844))
+            context.route('**/*', route)
+            page = context.new_page()
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(origin + '/paseo')
+            expect(page.get_by_text('連線標的的紀錄（connection.json）無法辨識', exact=False)).to_be_visible(timeout=10000)
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_disabled()
+            expect(page.get_by_text('尚未選擇連線標的', exact=False)).to_have_count(0)
+            save = page.get_by_role('button', name='儲存連線標的', exact=True)
+            expect(save).to_be_enabled()
+            save.click()
+            expect(page.get_by_text('連線標的的紀錄（connection.json）無法辨識', exact=False)).to_have_count(0)
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_enabled()
+            assert fixture.count('/config', 'POST') == 1 and fixture.connection_code is None
+            assert_posts(fixture, origin)
+            context.close()
+            print('PASS: a damaged record is named, blocks pairing, and saving the shown target repairs it.')
 
             # A backend loaded before a plugin update reports no target: the page stays as it was (Paseo only).
             fixture = Fixture.reloadable()

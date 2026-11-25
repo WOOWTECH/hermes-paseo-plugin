@@ -23,6 +23,29 @@
   function knownTarget(id) { return TARGETS.some(row => row.id === id); }
   // An unknown id is the default, named; it is never another row by position.
   function targetOf(id) { return TARGETS.find(row => row.id === id) || TARGETS.find(row => row.id === DEFAULT_TARGET); }
+  // Until a target is saved (Paseo included) the plugin leaves the daemon's relay, app and CORS settings alone and the
+  // page shows Paseo. A record that cannot be read is shown as Paseo too; saving the displayed target replaces it,
+  // except where the path is a symbolic link, which the plugin never follows or replaces.
+  function repairable(status) { return !!status && (!status.connectionCode || status.connectionCode === "CONNECTION_STATE_CORRUPT"); }
+  function needsRecord(status) { return !!status && status.targetSupported && (!status.targetSaved || !!status.connectionCode) && repairable(status); }
+  function connectionIssue(code) {
+    return ({
+      CONNECTION_STATE_CORRUPT: "連線標的的紀錄（connection.json）無法辨識，暫時顯示為 Paseo，也不會產生配對連結。重新選擇並按「儲存連線標的」即可修復。",
+      UNSAFE_SYMLINK: "連線標的的紀錄路徑含有符號連結，插件不會跟隨或取代它，也不會產生配對連結。請由管理者檢查 plugin-data/hermes-paseo/connection.json 後再重新檢查。"
+    })[code] || "連線標的的紀錄無法讀取（" + code + "），不會產生配對連結。請由管理者檢查後再重新檢查。";
+  }
+  // What a failed start means, for the codes this plugin raises on the way to a start. The code itself is shown too.
+  // Looked up by own property only: the code is data from the backend.
+  const START_FAILURES = {
+    BRAND_IDENTITY_SOURCE_MISMATCH: "所選的 Smart 標的需要在 runtime 加上品牌識別補丁，但 websocket-server.js 不是已知的 Paseo 0.11.2 原版（可能被改過），所以沒有更動它。請改選 Paseo 再啟動，或請管理者還原該檔案。",
+    BRAND_IDENTITY_PATCH_MISMATCH: "品牌識別補丁套用後驗證不通過，已還原檔案。請改選 Paseo 再啟動，並請管理者檢查 runtime。",
+    RUNTIME_NOT_WRITABLE: "插件無法寫入 runtime 目錄（權限不足或唯讀），所以不能為所選的 Smart 標的套用補丁。請管理者修正 plugin-data/hermes-paseo/runtime 的權限，或先改選 Paseo。",
+    RUNTIME_NOT_READABLE: "插件無法讀取 runtime 裡的 websocket-server.js（權限不足）。請管理者修正 plugin-data/hermes-paseo/runtime 的權限，或先改選 Paseo。",
+    CONFIG_BACKUP_FAILED: "無法備份 daemon 的 config.json，所以沒有改寫它。請管理者檢查 plugin-data/hermes-paseo/daemon 的權限與剩餘空間。",
+    UNSAFE_SYMLINK: "外掛資料路徑中有符號連結，插件拒絕跟隨。請管理者檢查 plugin-data/hermes-paseo 下的檔案。",
+    CONNECTION_STATE_CORRUPT: "連線標的的紀錄無法辨識，沒有啟動。請在下方重新選擇並儲存連線標的。"
+  };
+  function startFailure(code) { return typeof code === "string" && Object.prototype.hasOwnProperty.call(START_FAILURES, code) ? START_FAILURES[code] : null; }
   let markers = { started: [], guided: [], paused: false };
   try {
     const saved = JSON.parse(window.sessionStorage.getItem(STORAGE));
@@ -122,6 +145,8 @@
       // An older backend still loaded after a plugin update reports no target: the page then stays Paseo-only.
       targetSupported: typeof value.selectedTarget === "string",
       selectedTarget: knownTarget(value.selectedTarget) ? value.selectedTarget : DEFAULT_TARGET,
+      targetSaved: value.targetSaved === true,
+      connectionCode: typeof value.connectionCode === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.connectionCode) ? value.connectionCode : null,
       activeTarget: knownTarget(value.activeTarget) ? value.activeTarget : null,
       configurationPending: value.configurationPending === true,
       providers: value.providers.filter(row => row && typeof row.provider === "string").map(row => ({
@@ -303,8 +328,9 @@
     if (["pair", "acceptance"].includes(name) && (!status.daemon.reachable || markers.paused || PAUSED.has(status.phase))) return;
     // A saved target applies only after the daemon was stopped and started with it; an unsaved one never pairs.
     if (name === "pair" && (status.configurationPending || state.targetDraft)) return;
-    const target = name === "config" ? state.targetDraft : null;
-    if (name === "config" && (!target || target === status.selectedTarget)) return;
+    // Saving what is shown is allowed where nothing was ever saved (Paseo included) or the record must be replaced.
+    const target = name === "config" ? state.targetDraft || (needsRecord(status) ? status.selectedTarget : null) : null;
+    if (name === "config" && (!target || !repairable(status) || (target === status.selectedTarget && !needsRecord(status)))) return;
     if (name === "start" || name === "stop") {
       markers.paused = name === "stop";
       resuming = name === "start";
@@ -328,7 +354,7 @@
       if (name === "config") {
         // Show the saved choice at once instead of the old one until the next read; that read has the last word.
         const saved = result && result.saved === true && result.target === target;
-        publish({ targetDraft: null, status: saved && state.status ? Object.assign({}, state.status, { selectedTarget: target, configurationPending: result.configurationPending === true }) : state.status });
+        publish({ targetDraft: null, status: saved && state.status ? Object.assign({}, state.status, { selectedTarget: target, targetSaved: true, connectionCode: null, configurationPending: result.configurationPending === true }) : state.status });
       }
       if (name === "acceptance") {
         if (result && Object.prototype.hasOwnProperty.call(result, "phase")) publish(jobPatch(normalizeJob(result)));
@@ -575,8 +601,11 @@
     const draft = snapshot.targetDraft && knownTarget(snapshot.targetDraft) ? snapshot.targetDraft : saved.id;
     const targetDirty = draft !== saved.id;
     const pending = !!(status && status.configurationPending);
-    // A saved target waits for a stop and start, and an unsaved one has not been saved: neither pairs.
-    const pairBlocked = pending || targetDirty;
+    const legacy = !!(status && status.targetSupported && !status.targetSaved && !status.connectionCode);
+    const unreadable = !!(status && status.targetSupported && status.connectionCode);
+    // A saved target waits for a stop and start, an unsaved one has not been saved, and a record that cannot be read
+    // names no target: none of them pairs.
+    const pairBlocked = pending || targetDirty || unreadable;
     return h("div", { className: "hermes-paseo hp-page", lang: "zh-Hant" },
       h("header", { className: "hp-title" }, h("div", null, h("p", { className: "hp-eyebrow" }, "HERMES × PASEO"),
         h("h1", null, "把 Hermes 帶到 Paseo"), h("p", { className: "hp-muted" }, "完成服務啟動與官方配對，再從其他裝置繼續對話。")),
@@ -595,6 +624,8 @@
           h("li", { "data-done": !!(status && status.daemon.running) }, "啟動服務"),
           h("li", { "data-done": reachable }, "確認連線")),
         status && status.phase === "restart_required" && !pending && h("p", { className: "hp-error" }, "Paseo 執行環境需要重啟。請先停止，再恢復服務。"),
+        status && status.phase === "error" && startFailure(status.diagnosticCode) && h("p", { className: "hp-error", role: "alert" },
+          startFailure(status.diagnosticCode), "（代碼 " + status.diagnosticCode + "）"),
         h("div", { className: "hp-actions" },
           button(snapshot.stopping ? "正在停止…" : "停止服務", () => void action("stop"), !enabled || snapshot.stopping || dashboardReloading || (paused && !status.daemon.running), true),
           button(snapshot.busy === "start" ? "正在啟動…" : paused ? "恢復服務" : "重新啟動／重試", () => void action("start"),
@@ -609,9 +640,13 @@
             h("select", { value: draft, onChange: event => chooseTarget(event.target.value), disabled: !enabled || busy },
               TARGETS.map(row => h("option", { key: row.id, value: row.id }, row.label)))),
           h("div", { className: "hp-actions" },
-            button(snapshot.busy === "config" ? "正在儲存…" : "儲存連線標的", () => void action("config"), !enabled || busy || !targetDirty, true),
+            button(snapshot.busy === "config" ? "正在儲存…" : "儲存連線標的", () => void action("config"), !enabled || busy || !repairable(status) || !(targetDirty || needsRecord(status)), true),
             h("a", { className: "hp-button hp-secondary", href: saved.origin + "/", target: "_blank",
               rel: "noopener noreferrer", referrerPolicy: "no-referrer" }, "開啟 " + saved.label))),
+        legacy && h("div", { className: "hp-notice", role: "status" },
+          h("p", null, "尚未選擇連線標的：服務維持原有設定，沿用 Paseo 官方 relay，插件不會改動 daemon 的 config.json。"),
+          h("p", { className: "hp-small" }, "儲存連線標的（Paseo 也可以）之後，下次啟動服務才會依所選標的寫入 relay、App 網址與 CORS 設定，並先把原來的 config.json 備份為 config.json.pre-agent-connect。")),
+        unreadable && h("p", { className: "hp-error", role: "alert" }, connectionIssue(status.connectionCode)),
         targetDirty && h("p", { className: "hp-muted", role: "status" }, "連線標的尚未儲存；儲存後才能產生 " + targetOf(draft).label + " 的配對連結。"),
         pending && h("div", { className: "hp-notice", role: "status" },
           h("p", null, "標的已儲存，停止再啟動服務後生效。"),

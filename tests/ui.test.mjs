@@ -846,7 +846,7 @@ test('explicit Dashboard recovery permits one failed first-start retry without c
 });
 
 // ---- connection targets (item 6) ----
-const targeted = (patch = {}) => snapshot({ selectedTarget: 'paseo', activeTarget: 'paseo', configurationPending: false, ...patch });
+const targeted = (patch = {}) => snapshot({ selectedTarget: 'paseo', targetSaved: true, connectionCode: null, activeTarget: 'paseo', configurationPending: false, ...patch });
 const targetSelect = app => nodes(nodes(app.tree()).find(row => row.type === 'label' && content(row.children[0]) === '連線標的')).find(row => row.type === 'select');
 const linkNamed = (app, name) => nodes(app.tree()).find(row => row.type === 'a' && content(row) === name);
 const offerFor = origin => origin + '/#offer=PRIVATE-' + Buffer.from(origin).toString('base64url');
@@ -1021,10 +1021,97 @@ test('a pending target, an unsaved choice and a busy save each keep the pairing 
   assert.equal(targetSelect(app).props.disabled, false);
 });
 
+test('before any target is saved the page says nothing was changed, and saving what is shown (Paseo too) turns the plugin\'s settings on', async () => {
+  const app = host({ status: targeted({ targetSaved: false }) }); await app.mount('page');
+  assert.match(content(app.tree()), /尚未選擇連線標的：服務維持原有設定，沿用 Paseo 官方 relay，插件不會改動 daemon 的 config\.json/);
+  assert.match(content(app.tree()), /下次啟動服務才會依所選標的寫入 relay、App 網址與 CORS 設定，並先把原來的 config\.json 備份為 config\.json\.pre-agent-connect/);
+  assert.equal(targetSelect(app).props.value, 'paseo');
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, false, 'rc.9 paired in this state, and so does the page');
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, false, 'Paseo is a choice that can be saved');
+  app.handle('/config', () => { app.status(targeted()); return { saved: true, target: 'paseo', configurationPending: false }; });
+  await app.click('儲存連線標的');
+  const post = app.calls.find(call => call.path.endsWith('/config'));
+  assert.equal(post.init.body, '{"target":"paseo"}');
+  assert.doesNotMatch(content(app.tree()), /尚未選擇連線標的/, 'saved: the notice is gone');
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, true);
+  assert.doesNotMatch(content(app.tree()), /標的已儲存，停止再啟動服務後生效/, 'saving the shown target changes nothing that waits');
+  // Choosing another target while nothing is saved works as it does later.
+  const other = host({ status: targeted({ targetSaved: false }) }); await other.mount('page');
+  await other.change('連線標的', 'apporo');
+  assert.match(content(other.tree()), /連線標的尚未儲存；儲存後才能產生 Apporo Smart 的配對連結/);
+  other.handle('/config', () => { other.status(targeted({ selectedTarget: 'apporo', configurationPending: true })); return { saved: true, target: 'apporo', configurationPending: true }; });
+  await other.click('儲存連線標的');
+  assert.equal(other.calls.find(call => call.path.endsWith('/config')).init.body, '{"target":"apporo"}');
+  assert.match(content(other.tree()), /標的已儲存，停止再啟動服務後生效/);
+  assert.doesNotMatch(content(other.tree()), /尚未選擇連線標的/);
+});
+
+test('a record that cannot be read is named, blocks pairing, and saving the shown target repairs it', async () => {
+  const app = host({ status: targeted({ targetSaved: true, connectionCode: 'CONNECTION_STATE_CORRUPT', diagnosticCode: 'CONNECTION_STATE_CORRUPT' }) }); await app.mount('page');
+  assert.match(content(app.tree()), /連線標的的紀錄（connection\.json）無法辨識，暫時顯示為 Paseo，也不會產生配對連結。重新選擇並按「儲存連線標的」即可修復/);
+  assert.doesNotMatch(content(app.tree()), /尚未選擇連線標的/, 'it is not the legacy state');
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, true);
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, false, 'the shown target can be saved to replace the record');
+  app.handle('/config', () => { app.status(targeted()); return { saved: true, target: 'paseo', configurationPending: false }; });
+  await app.click('儲存連線標的');
+  assert.equal(app.calls.find(call => call.path.endsWith('/config')).init.body, '{"target":"paseo"}');
+  assert.doesNotMatch(content(app.tree()), /無法辨識/);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, false);
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, true);
+  // Another target can be chosen and saved from there too.
+  const other = host({ status: targeted({ selectedTarget: 'paseo', targetSaved: true, connectionCode: 'CONNECTION_STATE_CORRUPT' }) }); await other.mount('page');
+  await other.change('連線標的', 'woowtech');
+  other.handle('/config', () => { other.status(targeted({ selectedTarget: 'woowtech', configurationPending: true })); return { saved: true, target: 'woowtech', configurationPending: true }; });
+  await other.click('儲存連線標的');
+  assert.equal(other.calls.find(call => call.path.endsWith('/config')).init.body, '{"target":"woowtech"}');
+  assert.doesNotMatch(content(other.tree()), /無法辨識/);
+});
+
+test('a record path that is a link is named, cannot be saved over from here, and blocks pairing', async () => {
+  const app = host({ status: targeted({ targetSaved: true, connectionCode: 'UNSAFE_SYMLINK' }) }); await app.mount('page');
+  assert.match(content(app.tree()), /含有符號連結，插件不會跟隨或取代它，也不會產生配對連結。請由管理者檢查 plugin-data\/hermes-paseo\/connection\.json/);
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, true);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, true);
+  await app.change('連線標的', 'apporo');
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, true, 'not even for another target: the write would be refused');
+  buttonNode(app, '儲存連線標的').props.onClick(); await app.settle();
+  assert.equal(count(app, '/config'), 0, 'and a click that gets through anyway sends nothing');
+  // Any other code is named as a code, and never as prose from the backend.
+  const odd = host({ status: targeted({ targetSaved: true, connectionCode: 'STATE_UNAVAILABLE' }) }); await odd.mount('page');
+  assert.match(content(odd.tree()), /連線標的的紀錄無法讀取（STATE_UNAVAILABLE）/);
+  assert.equal(buttonNode(odd, '儲存連線標的').props.disabled, true, 'only a record that is known to be damaged is replaced');
+  const hostile = host({ status: targeted({ targetSaved: true, connectionCode: '<b>x</b> not a code' }) }); await hostile.mount('page');
+  assert.doesNotMatch(content(hostile.tree()), /<b>/);
+  assert.equal(buttonNode(hostile, '產生配對連結').props.disabled, false, 'a value that is not a code is no record problem');
+});
+
+test('a failed start for a target reason is explained in plain words with its code, and a code that is not ours is not', async () => {
+  const failure = (code, phase = 'error') => host({ status: targeted({ phase, diagnosticCode: code, daemon: { running: false, reachable: false } }) });
+  const expected = {
+    BRAND_IDENTITY_SOURCE_MISMATCH: /不是已知的 Paseo 0\.11\.2 原版（可能被改過），所以沒有更動它。請改選 Paseo 再啟動/,
+    BRAND_IDENTITY_PATCH_MISMATCH: /驗證不通過，已還原檔案/,
+    RUNTIME_NOT_WRITABLE: /無法寫入 runtime 目錄（權限不足或唯讀）/,
+    RUNTIME_NOT_READABLE: /無法讀取 runtime 裡的 websocket-server\.js/,
+    CONFIG_BACKUP_FAILED: /無法備份 daemon 的 config\.json，所以沒有改寫它/,
+    UNSAFE_SYMLINK: /外掛資料路徑中有符號連結，插件拒絕跟隨/,
+    CONNECTION_STATE_CORRUPT: /連線標的的紀錄無法辨識，沒有啟動/,
+  };
+  for (const [code, pattern] of Object.entries(expected)) {
+    const app = failure(code); await app.mount('page');
+    assert.match(content(app.tree()), pattern, code);
+    assert.match(content(app.tree()), new RegExp('（代碼 ' + code + '）'));
+  }
+  for (const code of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'PROCESS_FAILED', '', null]) {
+    const app = failure(code); await app.mount('page');
+    assert.doesNotMatch(content(app.tree()), /（代碼 /, String(code));
+  }
+  const running = failure('BRAND_IDENTITY_SOURCE_MISMATCH', 'running'); await running.mount('page');
+  assert.doesNotMatch(content(running.tree()), /（代碼 /, 'only while the start has failed');
+});
+
 test('the Dashboard zh-TW wording for targets stays Traditional Chinese', () => {
   const copy = [...source.matchAll(/"([^"\n]*[\u4e00-\u9fff][^"\n]*)"/g)].map(match => match[1]).join('\n');
-  for (const phrase of ['連線標的', '儲存連線標的', '標的已儲存，停止再啟動服務後生效', '連線標的尚未儲存', '使用配對連結開啟']) assert.ok(copy.includes(phrase), phrase);
+  for (const phrase of ['連線標的', '儲存連線標的', '標的已儲存，停止再啟動服務後生效', '連線標的尚未儲存', '使用配對連結開啟', '尚未選擇連線標的', '重新選擇並按「儲存連線標的」即可修復', '請改選 Paseo 再啟動']) assert.ok(copy.includes(phrase), phrase);
   // Characters that exist only in Simplified Chinese (the Dashboard's other copy is Traditional).
   assert.doesNotMatch(copy, /[连线标储务启动开关态选择码链对话测试验证设绑]/);
 });
-
