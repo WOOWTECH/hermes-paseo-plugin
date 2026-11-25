@@ -55,7 +55,7 @@ Hermes 0.19 的 Web 插件列表只在頁面載入時讀取。從插件頁安裝
 - **儲存只是記錄**：選好後按 **儲存連線標的**，選擇存入 `plugin-data/hermes-paseo/connection.json`；這個動作不會詢問或改動執行中的 daemon，也不取用長時間的 runtime 鎖。頁面顯示「標的已儲存，停止再啟動服務後生效」：先結束使用中的對話，按 **停止服務**，待停止完成再按 **恢復服務**，新標的才套用，之後才能產生它的配對連結。在那之前配對與 relay 驗證都會回報 `CONFIGURATION_PENDING`。
 - **切換保留身分**：切換標的會作廢舊的配對連結與 relay 驗證結果；daemon 的 server ID 與金鑰保留，已配對的裝置在切回同一標的後仍可使用。
 - **套用的內容**：每次啟動 daemon 時，插件依所選標的寫入 `app.baseUrl`、`daemon.relay`（`endpoint`、`publicEndpoint`、`useTls`、`publicUseTls`，TLS 明確寫出）與 `daemon.cors.allowedOrigins`；不屬於這三個標的的 CORS 來源保留。不寫入 `daemon.relay.requireProtectedSecurity`（Paseo 0.11.2 的嚴格設定檔不認得它）。
-- **切換會覆蓋自訂的 relay 與 App 網址**：切換標的（包含切回 Paseo）會經過上表再寫一次設定，所以 `config.json` 裡手動改過的 relay 或 App 網址會被所選標的的值取代。需要自訂值的人，切換前先備份 `plugin-data/hermes-paseo/daemon/config.json`。
+- **切換會覆蓋自訂的 relay 與 App 網址**：切換標的（包含切回 Paseo）會經過上表再寫一次設定；其實每次啟動 daemon 都是用所選標的（沒選過就是 Paseo）的值寫入這些欄位，所以 `config.json` 裡手動改過的 relay 或 App 網址會在下一次啟動被取代。需要自訂值的人，啟動或切換前先備份 `plugin-data/hermes-paseo/daemon/config.json`。
 - **品牌識別**：Woowtech／Apporo Smart 的網頁 App 要求 daemon 的握手帶有 `brand: {id, name}`。插件以雜湊釘住的小補丁，在已安裝的 runtime 內就地修改 daemon 的 `websocket-server.js` 一個檔案並放置一個輔助檔，讓握手帶有所選標的的品牌（補丁內容與驗證見[維運文件](docs/operations.zh-TW.md#品牌識別補丁與升級)）。已執行的舊 daemon 不會被補丁影響，補丁在下次啟動前才套用。
 - **配對連結**只會是所選標的的網頁 App（`<網頁 App>/#offer=…`），而且不會寫入任何檔案；舊版留下的 `pairing.private.json` 會在啟用時刪除。
 - **回滾到 0.1.4-rc.9**：先在插件頁切回 **Paseo**，停止再恢復服務，確認配對連結是 `app.paseo.sh`，再降版。rc.9 接受已補丁的 runtime（它只檢查鎖定檔與 CLI 版本），但只放行 `app.paseo.sh` 的配對連結；daemon 仍是 Smart 標的時，rc.9 的 daemon 能啟動，卻會拒絕產生配對連結（`PAIRING_ORIGIN_INVALID`）。

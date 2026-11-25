@@ -46,7 +46,7 @@ Paseo 插件資料位於 `$HERMES_HOME/plugin-data/hermes-paseo`。可重建的 
 - **等待套用**：標的改變時，設定標為待套用（`configurationPending`）、清除舊標的的 relay 驗證結果與配對紀錄，並保留 daemon 的 server ID 與金鑰。**只有下一次停止再啟動才會套用**；選回目前執行中的標的則不算待套用。狀態回報 `selectedTarget`（已儲存的）、`activeTarget`（執行中 daemon 啟動時的標的；停止時為 `null`）與 `configurationPending`。0.1.5 之前啟動、環境裡沒有標的紀錄的舊 daemon 視為 `paseo`。
 - **待套用期間**：`pair` 與 `relay` 在向 daemon 要配對邀請或對外連線之前就回報 `CONFIGURATION_PENDING`（只讀取狀態）；對已在執行的 daemon 再按「啟動」只會回報待套用，不改寫設定、不重載。
 - **套用**：每次啟動 daemon（沒有 daemon 在執行時）才寫入 `app.baseUrl`、`daemon.relay`（`enabled`、`endpoint`、`publicEndpoint`、`useTls`、`publicUseTls`）與 `daemon.cors.allowedOrigins`，並以環境變數 `HERMES_PASEO_CONNECTION_TARGET` 把標的交給 daemon（名稱不以 `PASEO_` 開頭，因為受管的 `daemon start` 會移除那些變數）。不屬於三個標的的 CORS 來源保留；`daemon.relay.requireProtectedSecurity` 不寫入（0.11.2 的嚴格設定檔沒有這個欄位，寫了整份設定會失效）。已在執行的 daemon 的 relay 端點與 TLS 不能即時重載，所以對它們不寫入這些設定。
-- **覆蓋自訂值**：切換標的（包含切回 Paseo）會用該標的的值覆蓋 `config.json` 裡自訂的 relay 與 App 網址；其他設定保留。
+- **覆蓋自訂值**：每次啟動 daemon 都用所選標的（沒選過就是 Paseo）的值寫入 relay、App 網址與 CORS 來源，所以切換標的（包含切回 Paseo）時，`config.json` 裡自訂的 relay 與 App 網址會被覆蓋；沒有切換、只是停止再啟動，也會被預設標的 Paseo 的值覆蓋。其他設定保留。
 - **配對連結**：`<網頁 App>/#offer=…`，只放行所選標的的精確網址：Node 端檢查 App 網址、路徑 `/`、`#offer=` 片段，邀請必須是版本 2、帶 server ID 與金鑰、relay 端點是該標的的且為 TLS；Python 端再用 `connection.json` 的標的獨立檢查一次。Smart 標的若收到要求最低安全模式的邀請會回報 `PAIRING_SECURITY_UNSUPPORTED`（0.11.2 不會送出這種邀請，這只是防護）。邀請不寫入任何檔案。
 
 | 代碼 | 意思與處理 |

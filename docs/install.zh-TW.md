@@ -127,7 +127,7 @@ python3 ~/.hermes/plugins/hermes-paseo/bin/configure-origin.py https://hermes.ex
 
 Hermes 頁面的模型／模式選單用於探索可用選項；實際對話設定在所選標的的網頁 App 建立對話時選擇。官方 relay 不需要額外的 Paseo 密碼；每個標的使用自己的 relay。配對連結可能授予存取權，請保留給自己的裝置使用。
 
-切換標的時，插件會用該標的的設定重寫 daemon 的 relay、App 網址與 CORS 來源，包含切回 Paseo；手動改在 `config.json` 的自訂 relay 或 App 網址會被取代，切換前請先備份。回滾到 0.1.4-rc.9 前，先切回 **Paseo** 並完成停止與恢復，否則 rc.9 會拒絕 Smart 標的的配對連結；步驟見[維運文件的回滾一節](operations.zh-TW.md#回滾到-014-rc9)。
+每次啟動 daemon，插件都會用所選標的（沒選過就是 Paseo）的設定重寫 daemon 的 relay、App 網址與 CORS 來源，切換標的（包含切回 Paseo）時同理；手動改在 `config.json` 的自訂 relay 或 App 網址會被取代，啟動或切換前請先備份。回滾到 0.1.4-rc.9 前，先切回 **Paseo** 並完成停止與恢復，否則 rc.9 會拒絕 Smart 標的的配對連結；步驟見[維運文件的回滾一節](operations.zh-TW.md#回滾到-014-rc9)。
 
 在 Hermes 修改預設模型後，既有 ACP 程序可能仍保留舊預設。先完成或停止進行中的對話，再在 Paseo 插件頁「停止服務 → 恢復服務」，重新取得模型清單。官方 Paseo 的模型按鈕位於訊息輸入區，文字可能是「Select model」或已選模型的名稱；選定模型後才顯示權限模式按鈕。不要把「模型清單可讀取」當作帳號已登入或模型已回覆的證據。
 
