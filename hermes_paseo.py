@@ -399,6 +399,7 @@ class Bridge:
         self._error = None
         self._retry_at = None
         self._retry_count = 0
+        self._prepare_attempted = False
         self._operation_lock = threading.Lock()
 
     def dashboard_origin(self):
@@ -704,11 +705,53 @@ class Bridge:
                 if generation == self._generation and not result.get('diagnosticCode'):
                     self._cache = copy.deepcopy(result)
                     self._cached_at = time.monotonic()
-            return self._decorate(result)
+            decorated = self._decorate(result)
+            self._maybe_prepare(result)
+            return decorated
         finally:
             with self._condition:
                 self._checking = False
                 self._condition.notify_all()
+
+    def _maybe_prepare(self, result):
+        """Install this release beside an older daemon that keeps serving, once per process.
+
+        A plugin update leaves the previous release's daemon running until the user stops and
+        starts it. Installing the new runtime now keeps that restart short and lets the runtime
+        check, before anything is stopped, that the new Paseo can load the current config.
+        `start` beside an older daemon only installs and checks: it never stops or restarts it.
+        """
+        daemon = result.get('daemon') or {}
+        if (result.get('diagnosticCode') != 'RESTART_REQUIRED' or result.get('installed') is not False
+                or daemon.get('running') is not True or result.get('enabled') is not True):
+            return
+        with self._condition:
+            if (self._prepare_attempted or self._pause_requested
+                    or (self._worker is not None and self._worker.is_alive())
+                    or (self._stop_worker is not None and self._stop_worker.is_alive())):
+                return
+            try:
+                if (_read_json(self.state_dir / 'onboarding.json') or {}).get('paused'):
+                    return
+            except (BridgeError, OSError):
+                return
+            self._prepare_attempted = True
+            context = contextvars.copy_context()
+            self._worker = threading.Thread(target=lambda: context.run(self._prepare),
+                                            name='hermes-paseo-prepare', daemon=True)
+            self._worker.start()
+
+    def _prepare(self):
+        try:
+            with self._operation_lock:
+                with self._condition:
+                    if self._pause_requested:
+                        return
+                self._invoke('start')
+        except Exception:
+            pass  # the outcome is in the runtime state and the next status read
+        finally:
+            self.invalidate()
 
     def _initialize(self):
         verify = False

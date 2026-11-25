@@ -349,6 +349,66 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(set(b.redact({'selectedTarget': 'apporo', 'activeTarget': 'paseo', 'configurationPending': True, 'appUrl': 'x'})),
                          {'selectedTarget', 'activeTarget', 'configurationPending'})
 
+    def test_an_older_daemon_gets_the_new_runtime_prepared_once_without_being_restarted(self):
+        older = {'enabled': True, 'phase': 'running', 'installed': False, 'diagnosticCode': 'RESTART_REQUIRED',
+                 'daemon': {'running': True, 'reachable': True}}
+        calls = []
+        def invoke(action, *_):
+            calls.append(action)
+            return older if action == 'status' else {**older, 'phase': 'restart_required', 'installed': True}
+        with patch.object(self.bridge, '_invoke', side_effect=invoke):
+            for _ in range(3):
+                self.assertEqual(self.bridge.status()['phase'], 'running')
+                if self.bridge._worker is not None:
+                    self.bridge._worker.join(2)
+        self.assertEqual(calls.count('start'), 1, 'prepared once per process')
+        self.assertEqual(calls.count('stop'), 0)
+        self.assertFalse((self.bridge.state_dir / 'onboarding.json').exists(), 'preparing never resumes or records onboarding')
+
+    def test_preparation_waits_for_a_reason(self):
+        older = {'enabled': True, 'phase': 'running', 'installed': False, 'diagnosticCode': 'RESTART_REQUIRED',
+                 'daemon': {'running': True, 'reachable': True}}
+        for patch_ in ({'installed': True}, {'diagnosticCode': None}, {'diagnosticCode': 'DAEMON_NOT_OWNED'},
+                       {'enabled': False}, {'daemon': {'running': False, 'reachable': False}}, {'installed': None}):
+            bridge = b.Bridge(home=Path(self.temp.name) / ('profile-' + str(abs(hash(str(patch_))))))
+            with self.subTest(patch=patch_), patch.object(bridge, '_invoke', return_value={**older, **patch_}) as invoke:
+                bridge.status()
+                self.assertIsNone(bridge._worker)
+                self.assertEqual([call.args[0] for call in invoke.call_args_list], ['status'])
+        paused = b.Bridge(home=Path(self.temp.name) / 'profile-paused')
+        paused.onboarding(create=True)
+        with b._state_lock(paused.state_dir):
+            record = b._read_json(paused.state_dir / 'onboarding.json')
+            record['paused'] = True
+            b._write_json(paused.state_dir / 'onboarding.json', record)
+        with patch.object(paused, '_invoke', return_value=older) as invoke:
+            paused.status()
+        self.assertIsNone(paused._worker)
+        self.assertEqual([call.args[0] for call in invoke.call_args_list], ['status'])
+
+    def test_a_stop_during_preparation_waits_for_it_and_wins(self):
+        older = {'enabled': True, 'phase': 'running', 'installed': False, 'diagnosticCode': 'RESTART_REQUIRED',
+                 'daemon': {'running': True, 'reachable': True}}
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        def invoke(action, *_):
+            calls.append(action)
+            if action == 'start':
+                entered.set()
+                release.wait(3)
+                return {**older, 'phase': 'restart_required'}
+            if action == 'stop':
+                return {'enabled': False, 'phase': 'disabled', 'daemon': {'running': False, 'reachable': False}}
+            return older
+        with patch.object(self.bridge, '_invoke', side_effect=invoke):
+            self.bridge.status()
+            self.assertTrue(entered.wait(2))
+            self.assertEqual(self.bridge.call('stop')['phase'], 'stopping')
+            release.set()
+            self.bridge._worker.join(2)
+            self.bridge._stop_worker.join(2)
+        self.assertEqual(calls, ['status', 'start', 'stop'])
+
     def test_offers_for_every_official_app_are_hidden_in_free_text(self):
         for text in ['open https://smart.woowtech.io/#offer=PRIVATE now', 'https://smart.apporo.ai/#offer=PRIVATE',
                      'https://app.paseo.sh/#offer=PRIVATE', 'mirror https://elsewhere.example/#offer=PRIVATE']:
