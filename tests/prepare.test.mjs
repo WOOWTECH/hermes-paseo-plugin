@@ -123,7 +123,7 @@ test('bin/control.mjs prepare: exit 0 with the status when ready, the failing co
   const failed = run();
   assert.equal(failed.status, 1);
   assert.equal(JSON.parse(failed.stdout).ok, false);
-  assert.match(JSON.parse(failed.stdout).code, /^[A-Z][A-Z0-9_]+$/);
+  assert.equal(JSON.parse(failed.stdout).code, 'RUNTIME_INSTALL_FAILED');
   assert.equal(runtimeReady(locations()), false);
   npm.mode('ok');
   const done = run();

@@ -67,7 +67,11 @@ node "$HERMES_HOME/plugins/hermes-paseo/bin/control.mjs" relay <<< '{}'
 - **PaaS**：目前的更新器會以 `dependency_manifest_changed` 拒絕本版，Job 失敗但服務不動。日後若以 chart／更新器變更或管理者手動安裝放行，流程是「舊版程式停止 0.11.2 → 安裝 → 新版程式啟動 0.17.4」：新程式看不到舊 daemon，直接全新安裝並啟動。注意更新器對 `control start` 只等 45 秒，而首次下載 0.17.4 約 400 MB（本機冷快取約 14 秒，PaaS 網路未測）；逾時時更新器會裝回舊版並重新啟動 0.11.2，被中斷的 `npm ci` 可能留在背景完成，隔天重試會用到 npm 快取。
 - **HA 或手動更新**：Git pull 後重載 Dashboard，舊 daemon 繼續服務，頁面顯示「需要重新啟動」並註明目前執行 0.11.2。插件在背景安裝 0.17.4（每個 Dashboard 程序一次；手動停止時不會），並用 0.17.4 的讀取器在記憶體中檢查 `config.json`；這與手動執行 `control.mjs prepare` 相同（見下節）。結束對話後按「停止服務」再按「恢復服務」完成升級；重啟附加元件也會讓 daemon 以新版啟動。
 - **設定檢查**：`config.json` 先經過目標版本自己的 `readPersistedConfig`（0.17.4 會把舊的語音、`providers.openai` 設定整理成新格式）再合併插件管理的欄位，最後以 0.17.4 的嚴格結構驗證。讀不進來時回報 `CONFIG_INCOMPATIBLE` 且不改寫檔案；若此時要停止的是舊版 daemon，停止會被拒絕，避免 Paseo 停下後起不來。插件停用／移除也會因此被拒絕，修正設定或重啟附加元件／Pod 後再操作。
-- **磁碟**：0.17.4 版本目錄約 1.1 GB。本版 daemon 成功啟動後，刪除沒有 daemon 使用的 `0.11.2-r1-*`，保留最新的 `0.11.2-r2-*`（實測約 0.8 GB）供退回；只刪除有自己收據的確切目錄，不跟隨連結。
+- **磁碟需求**：安裝期間約 **1.5 GB** 可用（npm 下載快取約 0.4 GB 加解開後約 1.1 GB），完成後約 **0.75 GB**，另外舊版 runtime（0.11.2 r2 實測約 0.8 GB）在新版 daemon 啟動並裁剪前仍在碟上。PaaS chart 的預設資料碟是 5 GiB，且與 Hermes 自己的資料共用，空間很緊；要在這種服務上升級，先確認資料碟用量。
+- **安裝前檢查**：可用空間低於 1536 MiB 時以 `INSUFFICIENT_DISK` 拒絕，沒有建立任何目錄、沒有啟動 npm，舊版 daemon 與它的 runtime 完全不動。`status` 的 `prepare` 欄位帶 `{"state":"failed","code":"INSUFFICIENT_DISK","requiredMiB":1536,"availableMiB":…}`（只有數字，沒有路徑）；清出空間後下一次 `prepare` 或啟動就會安裝。讀不到可用空間的檔案系統不擋安裝。
+- **安裝後清理**：npm 的快取放在新版本目錄內的暫存目錄（不是持久的 HOME），安裝成功或失敗都移除；glibc 主機另外移除用不到的 `node_modules/@anthropic-ai/claude-agent-sdk-*-musl`（每版約 340 MB，非 glibc 主機不動）。就緒判斷與收據不依賴這些目錄。
+- **失敗與中斷的安裝**：任何失敗（`RUNTIME_INSTALL_FAILED`、`RUNTIME_INSTALL_TIMEOUT`、安裝中途空間用盡的 `INSUFFICIENT_DISK`、版本或品牌修補驗證失敗）都會整個移除該版本目錄；被強制中止而留下的目錄沒有收據，下一次安裝會先整個丟棄再從零開始。只有空目錄或帶本插件 runtime 清單的目錄才會被刪除，連結與他人的目錄一律拒絕（`RUNTIME_NOT_OWNED`）；若仍有 daemon 以這個版本目錄執行則不碰它（`RUNTIME_IN_USE`）。
+- **裁剪與退回**：本版 daemon 成功啟動後，刪除沒有 daemon 使用的 `0.11.2-r1-*`；最新的 `0.11.2-r2-*` 只在裁剪後仍有約 3 GiB（3072 MiB）可用空間時保留供退回，否則一併刪除，之後退回 rc.9 會重新下載舊版 runtime（約 400 MB）。只刪除有自己收據的確切目錄，不跟隨連結。
 
 ### 預先準備新版：`prepare`
 
@@ -79,7 +83,7 @@ node "$HERMES_HOME/plugins/hermes-paseo/bin/control.mjs" prepare <<< '{}'
 
 - **輸入**：沒有（`{}`；多餘欄位以 `INVALID_REQUEST` 拒絕）。`bin/control.mjs` 與其他動作走同一個入口，沒有另外的指令檔。
 - **冪等**：已安裝並驗證的版本只做核對，不下載、不取得 runtime 鎖，也不重寫 `config.json`。只有安裝期間持有鎖，所以配對、設定儲存與狀態讀取不會因為安裝而被擋住；若別的啟動或準備正在安裝，最多等 120 秒，之後版本已就緒就直接回報。
-- **結束行為**：安裝並驗證成功時結束碼為 0，輸出公開狀態（同 `status`），其中 `installed` 為 `true`，`configCheck` 是設定檢查結果：`{"ok":true,...}`，或 `{"ok":false,"code":"CONFIG_INCOMPATIBLE"}`、`{"ok":false,"code":"CONFIG_CORRUPT"}`。**設定不相容不是失敗**：結束碼仍為 0，檔案不改寫，呼叫端必須自己讀 `configCheck.ok`，為 `false` 就不可停止舊版 daemon。安裝或驗證失敗時結束碼為 1，輸出 `{"ok":false,"code":"..."}`（例如 `NPM_UNAVAILABLE`、`NODE_VERSION_UNSUPPORTED`、`RUNTIME_BUSY`），舊版 daemon 沒有被動過。
+- **結束行為**：安裝並驗證成功時結束碼為 0，輸出公開狀態（同 `status`），其中 `installed` 為 `true`，`configCheck` 是設定檢查結果：`{"ok":true,...}`，或 `{"ok":false,"code":"CONFIG_INCOMPATIBLE"}`、`{"ok":false,"code":"CONFIG_CORRUPT"}`。**設定不相容不是失敗**：結束碼仍為 0，檔案不改寫，呼叫端必須自己讀 `configCheck.ok`，為 `false` 就不可停止舊版 daemon。安裝或驗證失敗時結束碼為 1，輸出 `{"ok":false,"code":"..."}`（例如 `NPM_UNAVAILABLE`、`NODE_VERSION_UNSUPPORTED`、`RUNTIME_BUSY`、`INSUFFICIENT_DISK`、`RUNTIME_INSTALL_FAILED`、`RUNTIME_INSTALL_TIMEOUT`、`RUNTIME_IN_USE`），沒有留下看起來已就緒的半成品，舊版 daemon 沒有被動過；失敗的細節可再用 `status` 的 `prepare` 欄位讀取。
 - **時間**：npm 安裝上限 300 秒，加上最多 120 秒等鎖與數秒驗證；橋接層對 `prepare` 的上限是 480 秒。呼叫端請至少給 480 秒。PaaS 更新器現有的 `control()` 對每個動作只給 45 秒，首次下載約 400 MB 可能放不進去，日後的更新器需要為 `prepare` 另設逾時。
 - **更新器建議順序**：`prepare` → 結束碼 0、`installed` 與 `configCheck.ok` 皆為 `true` → 停止舊版 daemon → 安裝新版插件 → 啟動。任何一項不符就在停止之前中止，Paseo 不會因此停機。
 

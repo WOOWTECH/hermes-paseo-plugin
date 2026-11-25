@@ -234,18 +234,19 @@ test('after this release starts, older releases go except the newest 0.11.2, and
   const loc = locations();
   const { root: r2 } = seedPriorRelease(loc, { generation: 'r2' });
   const { root: r1 } = seedPriorRelease(loc, { generation: 'r1' });
-  assert.deepEqual(pruneUnusedPriorReleases(loc), [R1]);
+  const plenty = { availableMiB: () => 50000 };
+  assert.deepEqual(pruneUnusedPriorReleases(loc, plenty), [R1]);
   assert.equal(fs.existsSync(r1), false);
   assert.equal(fs.existsSync(r2), true, 'kept for a rollback to 0.1.4');
   // A link or a directory without its receipt is not ours to delete.
   fs.mkdirSync(path.join(f.dir, 'elsewhere'));
   fs.symlinkSync(path.join(f.dir, 'elsewhere'), r1);
-  assert.deepEqual(pruneUnusedPriorReleases(loc), []);
+  assert.deepEqual(pruneUnusedPriorReleases(loc, plenty), []);
   assert.equal(fs.existsSync(path.join(f.dir, 'elsewhere')), true);
   fs.rmSync(r1);
   fs.mkdirSync(r1, { recursive: true });
   fs.writeFileSync(path.join(r1, 'keep'), 'x');
-  assert.deepEqual(pruneUnusedPriorReleases(loc), []);
+  assert.deepEqual(pruneUnusedPriorReleases(loc, plenty), []);
   assert.equal(fs.existsSync(path.join(r1, 'keep')), true);
   assert.equal(fs.existsSync(runtimeDirectory(loc)), false, 'this release is never touched');
 });

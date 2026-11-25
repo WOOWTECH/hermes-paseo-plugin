@@ -12,7 +12,8 @@ import { sendVerifiedHermesMessage } from './model-selection.mjs';
 import { assistantEntries, latestAssistantCursor, chatResult } from './chat-result.mjs';
 import {singleFlight,daemonStatusWindow} from './single-flight.mjs';
 import {usingAcceptanceAgent,usingAcceptanceWorkspace} from './acceptance-agent.mjs';
-import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,priorRuntimeDirectory,pruneUnusedPriorReleases,RUNTIME_REVISION,PASEO_VERSION} from './runtime-layout.mjs';
+import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,priorRuntimeDirectory,pruneUnusedPriorReleases,discardPartialRuntime,removeUnusedLibcVariants,RUNTIME_REVISION,PASEO_VERSION} from './runtime-layout.mjs';
+import {hostCapacity,INSTALL_PEAK_MIB,OUT_OF_SPACE_MIB} from './host-capacity.mjs';
 import {demonstrablyReusedPid,linuxContainerIdentity,instanceFromPreviousContainer} from './daemon-identity.mjs';
 import {managedFeatures} from './daemon-config.mjs';
 import {CONNECTION_TARGETS,DEFAULT_TARGET,connectionTarget,selectedTarget,saveSelectedTarget,targetEnvironment,targetConfiguration,targetPairUrl} from './connection-targets.mjs';
@@ -173,20 +174,75 @@ async function releaseReusedPid(instance, root) {
   await locks.releasePidLock(locations().paseoHome, { ownerPid: current.pid, startedAt: current.startedAt });
   return (await locks.getPidLockInfo(locations().paseoHome)) === null;
 }
-/** Installs this release beside any earlier one; an earlier release is never modified. */
-async function installRuntime() {
-  const loc = locations(); privateDirectory(loc.runtimeDir);
-  const root = runtimeDirectory(loc);
-  if (!runtimeReady(loc)) {
-    const npm = findExecutable('npm'); if (!npm) throw new RuntimeError('NPM_UNAVAILABLE');
-    prepareRuntimeManifest(loc);
-    await runProcess(npm, ['ci', '--prefix', root, '--omit=dev', '--no-audit', '--no-fund'], { timeoutMs: 300000, env: inheritedEnv() });
-  }
+// How long `npm ci` may run. A setting, not a constant, so a test can shorten it.
+export const installSettings = { npmTimeoutMs: 300000 };
+// npm's cache lives inside the release directory being installed and goes with the attempt: about 0.4 GB
+// that would otherwise stay in the persistent HOME for good.
+const NPM_CACHE_DIRECTORY = '.npm-cache';
+const INSTALL_FAILURES = new Set(['COMMAND_FAILED', 'COMMAND_OUTPUT_LIMIT', 'COMMAND_UNAVAILABLE', 'COMMAND_ABORTED']);
+/** The version, files and brand patch of an installed release, which a ready one is also checked against on every start. */
+async function verifyRuntime(root) {
   const version = await runProcess(process.execPath, [cliPath(root), '--version'], { env: inheritedEnv() });
   if (version.trim() !== PASEO_VERSION || packageVersion(root, 'cli') !== PASEO_VERSION || packageVersion(root, 'server') !== PASEO_VERSION) throw new RuntimeError('VERSION_MISMATCH');
   if (!fs.existsSync(path.join(packageRoot('server', root), 'dist/server/web-ui/index.html'))) throw new RuntimeError('WEB_UI_MISSING');
-  markRuntimeReady(loc);
-  updateState({ installedVersion: PASEO_VERSION,installedRuntimeRevision:RUNTIME_REVISION });
+}
+/** What a failed install is called: the caller sees a stable code, never npm's output. */
+function installFailure(error, availableMiB) {
+  if (error?.code === 'COMMAND_TIMEOUT') return new RuntimeError('RUNTIME_INSTALL_TIMEOUT');
+  if (!INSTALL_FAILURES.has(error?.code)) return error;
+  if (typeof availableMiB === 'number' && availableMiB < OUT_OF_SPACE_MIB) {
+    return new RuntimeError('INSUFFICIENT_DISK', 'INSUFFICIENT_DISK', { requiredMiB: INSTALL_PEAK_MIB, availableMiB });
+  }
+  return new RuntimeError('RUNTIME_INSTALL_FAILED');
+}
+/**
+ * A new install of this release, from nothing. Whatever an earlier attempt left is discarded first (it
+ * carries no receipt, so it never counted as a release), unless a running daemon claims this very
+ * directory. The volume must hold the install's peak before anything is created. A failed attempt
+ * removes everything it made, so the next one starts clean and nothing that looks ready is left behind.
+ */
+async function installFresh(loc) {
+  const npm = findExecutable('npm'); if (!npm) throw new RuntimeError('NPM_UNAVAILABLE');
+  const root = runtimeDirectory(loc);
+  if (daemonRevision(loc) === RUNTIME_REVISION) throw new RuntimeError('RUNTIME_IN_USE');
+  discardPartialRuntime(loc);
+  const available = hostCapacity.availableMiB(loc.runtimeDir);
+  if (typeof available === 'number' && available < INSTALL_PEAK_MIB) {
+    throw new RuntimeError('INSUFFICIENT_DISK', 'INSUFFICIENT_DISK', { requiredMiB: INSTALL_PEAK_MIB, availableMiB: available });
+  }
+  privateDirectory(loc.runtimeDir);
+  prepareRuntimeManifest(loc);
+  const cache = path.join(root, NPM_CACHE_DIRECTORY);
+  try {
+    await runProcess(npm, ['ci', '--prefix', root, '--omit=dev', '--no-audit', '--no-fund', '--cache', cache], { timeoutMs: installSettings.npmTimeoutMs, env: inheritedEnv() });
+    fs.rmSync(cache, { recursive: true, force: true });
+    removeUnusedLibcVariants(root);
+    await verifyRuntime(root);
+    markRuntimeReady(loc);
+  } catch (error) {
+    const left = hostCapacity.availableMiB(loc.runtimeDir); // measured with the partial tree still on the volume
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* the next attempt discards it */ }
+    throw installFailure(error, left);
+  }
+}
+/**
+ * Installs this release beside any earlier one; an earlier release is never modified. The outcome of
+ * an install is kept in the state so the status can say why a release is not ready.
+ */
+async function installRuntime() {
+  const loc = locations();
+  if (!runtimeReady(loc)) {
+    try { await installFresh(loc); }
+    catch (error) {
+      try { updateState({ runtimeInstall: { revision: RUNTIME_REVISION, ok: false, code: safeCode(error), at: new Date().toISOString(), ...error.details } }); } catch { /* the original failure is the one to report */ }
+      throw error;
+    }
+  } else {
+    // An installed release is verified again, never reinstalled or removed here: a daemon may run from it.
+    await verifyRuntime(runtimeDirectory(loc));
+    markRuntimeReady(loc);
+  }
+  updateState({ installedVersion: PASEO_VERSION, installedRuntimeRevision: RUNTIME_REVISION, runtimeInstall: null });
 }
 async function choosePort(preferred) {
   for (let port = preferred; port <= Math.min(65535, preferred + 50); port++) {
@@ -433,7 +489,12 @@ async function readStatus() {
   // What this release made of config.json the last time it was checked (an upgrade stop or a prepare).
   const check = state.upgradeCheck?.revision === RUNTIME_REVISION ? state.upgradeCheck : null;
   const configCheck = check ? { ok: check.ok === true, code: check.ok === true ? null : check.code || 'CONFIG_INCOMPATIBLE', checkedAt: check.checkedAt || null } : null;
-  return { installed, version: installed ? PASEO_VERSION : null, enabled: state.desiredEnabled === true, phase, daemon, providers, chatVerified: state.acceptance?.passed === true, pairingAvailable: fs.existsSync(path.join(loc.stateDir, 'pairing.private.json')), diagnosticCode, selectedTarget: target, activeTarget: daemon.running ? activeTarget : null, configurationPending, configCheck, state };
+  // Whether this release can be started: installed, or why the last install did not finish.
+  const attempt = state.runtimeInstall?.revision === RUNTIME_REVISION && state.runtimeInstall.ok === false ? state.runtimeInstall : null;
+  const prepared = installed ? { stage: 'ready' } : attempt
+    ? { stage: 'failed', code: attempt.code, at: attempt.at || null, requiredMiB: attempt.requiredMiB ?? null, availableMiB: attempt.availableMiB ?? null }
+    : { stage: 'pending' };
+  return { installed, version: installed ? PASEO_VERSION : null, enabled: state.desiredEnabled === true, phase, daemon, providers, chatVerified: state.acceptance?.passed === true, pairingAvailable: fs.existsSync(path.join(loc.stateDir, 'pairing.private.json')), diagnosticCode, selectedTarget: target, activeTarget: daemon.running ? activeTarget : null, configurationPending, configCheck, prepare: prepared, state };
 }
 export async function diagnose() {
   const snapshot = await status(); const launchers = await detectLaunchers();

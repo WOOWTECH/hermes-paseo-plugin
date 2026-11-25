@@ -28,7 +28,7 @@ Gitea 原始碼鏡像：<https://git-prod.woowtech.io/mirror/hermes-paseo-plugin
 
 ## 0.2.0-rc.1：Paseo 0.17.4 與升級
 
-受管 daemon 由 `@getpaseo/cli` 0.11.2 升到 **0.17.4**（runtime revision `0.17.4-r1-09cdbfab2022`，依賴與 Agent Connect 0.1.24 相同的 lockfile，`npm audit` 0 項）。下載約 400 MB，版本目錄約 1.1 GB。
+受管 daemon 由 `@getpaseo/cli` 0.11.2 升到 **0.17.4**（runtime revision `0.17.4-r1-09cdbfab2022`，依賴與 Agent Connect 0.1.24 相同的 lockfile，`npm audit` 0 項）。下載約 400 MB；安裝高峰約 **1.5 GB**（npm 快取約 0.4 GB 加解開後約 1.1 GB），裝完移除快取與用不到的 musl 版 Claude SDK（約 0.34 GB），版本目錄穩態約 **0.75 GB**。
 
 **升級採「需要重新啟動」的可見步驟，不自動重啟。** 插件更新後，仍在執行的 0.11.2 daemon 繼續服務：狀態、配對、設定重新載入與停止都交給它自己的 0.11.2 版本目錄（`0.11.2-r2-71709cd7872f`），頁面顯示「需要重新啟動」。插件同時在背景安裝 0.17.4，並以 0.17.4 自己的讀取器檢查目前的 `config.json`（等同 `bin/control.mjs prepare`：不啟動、不停止任何 daemon，見[維運](docs/operations.zh-TW.md#預先準備新版prepare)）。結束使用中的對話後按「停止服務」再按「恢復服務」，同一個 `PASEO_HOME` 改由 0.17.4 執行；設定、對話資料、server ID 與 daemon 金鑰保留。理由：
 
@@ -87,6 +87,8 @@ hermes chat --toolsets hermes_paseo --query "請用 paseo_status 查看連線狀
 ## 環境與資料
 
 Linux、Python 3.11+、Node.js 22.19.0+、npm、util-linux flock、procps `ps`（Paseo 0.17.4 停止時用來清理終端機程序）；Hermes 須支援原生 Dashboard plugins 與 `hermes acp`，並已安裝 ACP extra。插件不自動替換 Hermes 核心或 Python 環境。
+
+**磁碟**：安裝新 runtime 的高峰需要約 **1.5 GB** 可用空間，完成後約 **0.75 GB**，升級期間舊版 runtime（0.11.2，約 0.8 GB）在新版 daemon 啟動前仍在碟上。PaaS chart 的預設資料碟只有 5 GiB，且與 Hermes 自己的資料共用。安裝前先檢查可用空間，不足時以 `INSUFFICIENT_DISK` 拒絕（狀態的 `prepare` 欄位帶所需與可用的 MiB），舊 daemon 完全不受影響；失敗或被中斷的安裝會整個移除，不留看起來已就緒的半成品。
 
 每個 Hermes profile 的 plugin-data/hermes-paseo 存放 runtime、Paseo home、連線標的、狀態與初始化紀錄；不與 Pi plugin 或使用者原來的 Paseo home 混用。停止後保留手動暫停、登入與對話資料。Hermes 0.19 沒有公開卸載 callback，停用／移除插件前請先在 Paseo 頁按「停止服務」，或執行 `/paseo stop`，確認 `/paseo status` 中 `daemon.running=false` 後再停用；此版本不宣稱停用按鈕會自動清理背景 daemon。其他同容器已安裝的 Claude Code、Codex、Pi 會被偵測；缺少或未登入的 provider 不宣稱能對話。
 

@@ -20,11 +20,17 @@ export function validateInput(action,input) {
 }
 const target=value=>targets.has(value)?value:null;
 const safeCode=value=>typeof value==='string'&&/^[A-Z][A-Z0-9_]{0,63}$/.test(value)?value:null;
+const count=value=>Number.isSafeInteger(value)&&value>=0?value:null;
+const publicPrepare=value=>{
+ const stage=['ready','pending','failed'].includes(value?.stage)?value.stage:'pending';
+ if(stage!=='failed')return {stage,code:null,at:null,requiredMiB:null,availableMiB:null};
+ return {stage,code:safeCode(value.code)||'RUNTIME_FAILED',at:typeof value.at==='string'?value.at.slice(0,40):null,requiredMiB:count(value.requiredMiB),availableMiB:count(value.availableMiB)};
+};
 const publicConfigCheck=value=>value&&typeof value==='object'?{ok:value.ok===true,code:value.ok===true?null:safeCode(value.code)||'CONFIG_INCOMPATIBLE',checkedAt:typeof value.checkedAt==='string'?value.checkedAt.slice(0,40):null}:null;
 export function publicStatus(s) {
  return {installed:s.installed,version:s.version,enabled:s.enabled,phase:s.phase,diagnosticCode:s.diagnosticCode||null,daemon:{running:s.daemon.running,reachable:s.daemon.reachable,version:s.daemon.version||null,relayEnabled:s.daemon.relayEnabled,relayVerified:s.daemon.relayVerified,relayVerifiedAt:s.daemon.relayVerifiedAt},providers:s.providers.filter(p=>providers.has(p.provider)),chatVerified:s.chatVerified,chatVerifiedAt:s.state?.acceptance?.checkedAt||null,
   selectedTarget:target(s.selectedTarget)||'paseo',activeTarget:target(s.activeTarget),configurationPending:s.configurationPending===true,
-  configCheck:publicConfigCheck(s.configCheck)};
+  configCheck:publicConfigCheck(s.configCheck),prepare:publicPrepare(s.prepare)};
 }
 export async function control(action,input={}) {
  validateInput(action,input);

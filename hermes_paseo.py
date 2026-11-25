@@ -86,13 +86,14 @@ CODES = CODES | {'ACCEPTANCE_INTERRUPTED', 'PROVIDER_QUOTA_EXHAUSTED'}
 CODES = CODES | set('''INVALID_TARGET CONFIGURATION_PENDING CONNECTION_STATE_CORRUPT PAIRING_TARGET_MISMATCH
 PAIRING_OFFER_INVALID PAIRING_SECURITY_UNSUPPORTED BRAND_IDENTITY_SOURCE_MISMATCH BRAND_IDENTITY_PATCH_MISMATCH
 CONFIG_INVALID CONFIG_CORRUPT CONFIG_INCOMPATIBLE PORT_UNAVAILABLE DAEMON_STATE_CHANGED
-TERMINAL_CLEANUP_NOT_CONFIRMED STOP_NOT_CONFIRMED DAEMON_REPLACED'''.split())
+TERMINAL_CLEANUP_NOT_CONFIRMED STOP_NOT_CONFIRMED DAEMON_REPLACED
+INSUFFICIENT_DISK RUNTIME_INSTALL_FAILED RUNTIME_INSTALL_TIMEOUT RUNTIME_IN_USE'''.split())
 PUBLIC_KEYS = frozenset('''ok code installed version enabled phase diagnosticCode daemon running
 reachable relayEnabled relayVerified relayVerifiedAt providers provider label status modes id
 isDefault defaultModeId models defaultThinkingOptionId thinkingOptions chatVerified chatVerifiedAt
 checkedAt passed firstReply followup model modeId thinking agentId message reply errorCode
 available authentication loginHint chatErrorCode cleanup archived workspaceArchived
-selectedTarget activeTarget configurationPending target saved configCheck'''.split())
+selectedTarget activeTarget configurationPending target saved configCheck prepare stage at requiredMiB availableMiB'''.split())
 # Free text hides any official app link and the pairing offer of any other URL (the `#offer=` or
 # `#connect=` fragment onward). Every alternative starts at a fixed token, so no scan runs forward
 # from each character: an earlier form began with an unbounded run before the `#` and took

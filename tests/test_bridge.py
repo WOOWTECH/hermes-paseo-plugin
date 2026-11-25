@@ -433,6 +433,17 @@ class BridgeTests(unittest.TestCase):
                 self.assertEqual(b.BridgeError(code).code, code)
         self.assertEqual(b.redact({'daemon': {'version': '0.11.2'}}), {'daemon': {'version': '0.11.2'}})
 
+    def test_install_failures_reach_the_dashboard_as_codes_and_numbers_only(self):
+        for code in ('INSUFFICIENT_DISK', 'RUNTIME_INSTALL_FAILED', 'RUNTIME_INSTALL_TIMEOUT', 'RUNTIME_IN_USE'):
+            with self.subTest(code=code):
+                self.assertEqual(b.BridgeError(code).code, code)
+                self.assertEqual(b.redact({'prepare': {'stage': 'failed', 'code': code}})['prepare']['code'], code)
+        shown = b.redact({'prepare': {'stage': 'failed', 'code': 'INSUFFICIENT_DISK', 'at': '2026-11-25T00:00:00Z', 'requiredMiB': 1536,
+                                      'availableMiB': 100, 'path': '/private/place', 'output': 'npm ERR! secret'}})
+        self.assertEqual(shown['prepare'], {'stage': 'failed', 'code': 'INSUFFICIENT_DISK', 'at': '2026-11-25T00:00:00Z',
+                                            'requiredMiB': 1536, 'availableMiB': 100})
+        self.assertEqual(b.redact({'prepare': {'stage': 'failed', 'code': 'NPM ERR! with /private/path'}})['prepare']['code'], 'OPERATION_FAILED')
+
     def test_offers_for_every_official_app_are_hidden_in_free_text(self):
         for text in ['open https://smart.woowtech.io/#offer=PRIVATE now', 'https://smart.apporo.ai/#offer=PRIVATE',
                      'https://app.paseo.sh/#offer=PRIVATE', 'mirror https://elsewhere.example/#offer=PRIVATE']:
