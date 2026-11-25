@@ -145,6 +145,7 @@ test('stopping an rc.9 daemon goes through its own release; with this release in
   const second = await fakeSupervisor(f, loc.paseoHome, { HERMES_PASEO_RUNTIME_REVISION: R2 });
   await assert.rejects(deactivate(), { code: 'CONFIG_INCOMPATIBLE' });
   assert.ok(processIdentity(second.child.pid), 'the old daemon keeps serving');
+  assert.equal(readState().desiredEnabled, true, 'a refused stop records no stop intent');
   assert.equal(handled(loc, 'stopped-by'), '');
   assert.deepEqual(JSON.parse(fs.readFileSync(config, 'utf8')), incompatible, 'nothing was rewritten');
   const reported = await status();

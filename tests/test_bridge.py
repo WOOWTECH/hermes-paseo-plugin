@@ -409,6 +409,14 @@ class BridgeTests(unittest.TestCase):
             self.bridge._stop_worker.join(2)
         self.assertEqual(calls, ['status', 'start', 'stop'])
 
+    def test_upgrade_and_target_codes_reach_the_dashboard(self):
+        for code in ('CONFIG_INCOMPATIBLE', 'CONFIGURATION_PENDING', 'PAIRING_SECURITY_UNSUPPORTED', 'TERMINAL_CLEANUP_NOT_CONFIRMED',
+                     'CONNECTION_STATE_CORRUPT', 'RESTART_REQUIRED', 'INVALID_TARGET'):
+            with self.subTest(code=code):
+                self.assertEqual(b.redact({'diagnosticCode': code})['diagnosticCode'], code)
+                self.assertEqual(b.BridgeError(code).code, code)
+        self.assertEqual(b.redact({'daemon': {'version': '0.11.2'}}), {'daemon': {'version': '0.11.2'}})
+
     def test_offers_for_every_official_app_are_hidden_in_free_text(self):
         for text in ['open https://smart.woowtech.io/#offer=PRIVATE now', 'https://smart.apporo.ai/#offer=PRIVATE',
                      'https://app.paseo.sh/#offer=PRIVATE', 'mirror https://elsewhere.example/#offer=PRIVATE']:

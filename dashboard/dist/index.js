@@ -360,7 +360,8 @@
     if (!activated(status)) return "外掛尚未啟用";
     if (markers.paused || pausedStatus(status)) return snapshot.busy === "start" ? "正在恢復" : status.daemon.running ? "停止待確認" : "已手動停止";
     if (status.phase === "stopped" && snapshot.busy === "start") return "正在恢復服務";
-    if (status.phase === "running" && status.daemon.running && ["RESTART_REQUIRED", "CONFIG_INCOMPATIBLE"].includes(status.diagnosticCode)) return "需要重新啟動";
+    if (status.diagnosticCode === "CONFIG_INCOMPATIBLE") return "需要修正設定";
+    if (status.phase === "running" && status.daemon.running && status.diagnosticCode === "RESTART_REQUIRED") return "需要重新啟動";
     return ({ not_installed: "等待初始化", installing: "正在安裝 Paseo", starting: "正在啟動服務",
       running: status.daemon.reachable ? "服務已就緒" : "等待服務連線", ready: "服務已就緒",
       stopped: "服務已中斷", restart_required: "需要重新啟動", error: "啟動失敗" })[status.phase] || "正在確認服務";
@@ -570,8 +571,9 @@
     const pending = !!(status && status.configurationPending);
     const pairBlocked = pending || targetDirty;
     // An older release's daemon keeps serving after a plugin update until it is stopped and resumed.
-    const upgrade = !!(status && status.daemon.running && ["RESTART_REQUIRED", "CONFIG_INCOMPATIBLE"].includes(status.diagnosticCode));
-    const restartNotice = status && !pending && (status.phase === "restart_required" || upgrade);
+    const upgrade = !!(status && status.daemon.running && status.diagnosticCode === "RESTART_REQUIRED");
+    const incompatible = !!(status && status.diagnosticCode === "CONFIG_INCOMPATIBLE");
+    const restartNotice = status && !pending && !incompatible && (status.phase === "restart_required" || upgrade);
     return h("div", { className: "hermes-paseo hp-page", lang: "zh-Hant" },
       h("header", { className: "hp-title" }, h("div", null, h("p", { className: "hp-eyebrow" }, "HERMES × PASEO"),
         h("h1", null, "把 Hermes 帶到 Paseo"), h("p", { className: "hp-muted" }, "完成服務啟動與官方配對，再從其他裝置繼續對話。")),
@@ -593,8 +595,9 @@
           ? "Paseo 執行環境已更新" + (status.daemon.version ? "（目前執行 " + status.daemon.version + "）" : "") +
             "，需要停止再恢復服務才會換成新版本。目前的服務照常可用；請先結束使用中的對話。"
           : "Paseo 執行環境需要重啟。請先停止，再恢復服務。"),
-        status && status.diagnosticCode === "CONFIG_INCOMPATIBLE" && h("p", { className: "hp-error", role: "alert" },
-          "新版 Paseo 無法讀取目前的 Paseo 設定（config.json）。為避免停止後無法再啟動，停止服務會被拒絕；請先修正或移除不相容的設定，再停止並恢復服務。"),
+        incompatible && h("p", { className: "hp-error", role: "alert" }, status.daemon.running
+          ? "Paseo 執行環境已更新，但新版 Paseo 無法讀取目前的設定（config.json）。目前的服務照常可用；為避免停止後無法再啟動，停止服務會被拒絕。請先修正或移除不相容的設定。"
+          : "新版 Paseo 無法讀取目前的設定（config.json），因此無法啟動。請修正或移除不相容的設定後再恢復服務。"),
         h("div", { className: "hp-actions" },
           button(snapshot.stopping ? "正在停止…" : "停止服務", () => void action("stop"), !enabled || snapshot.stopping || dashboardReloading || (paused && !status.daemon.running), true),
           button(snapshot.busy === "start" ? "正在啟動…" : paused ? "恢復服務" : "重新啟動／重試", () => void action("start"),
