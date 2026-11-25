@@ -90,7 +90,9 @@ hermes plugins install WOOWTECH/hermes-paseo-plugin --ref <commit-sha> --force -
 
 要發佈 Release，必須先修好 runtime 鎖定檔，並讓 chart 接受它，再讓五項檢查全綠。
 
-更新前後 daemon 的行為：更新（Git pull 與 Dashboard 重載）不會重啟仍在執行的 daemon，連線標的與品牌補丁在下一次停止再啟動才套用。若更新器因 Dashboard 或 daemon 不健康而自動裝回上一版，上一版（rc.9）接受已補丁的 runtime 與新版寫下的 `config.json`，見下節。
+更新前後 daemon 的行為：**自動更新器會重啟執行中的 daemon。** 在啟用 `paseoAutoUpdate` 的服務上，更新器對執行中的 daemon 依序做 `control stop`、`hermes plugins install … --ref <sha> --force --enable`、`control start`，所以 daemon 會以新版程式碼啟動一次；更新後 Dashboard 重載與 Plugin Doctor 檢查若不健康，它會裝回上一版並再 `control stop`、`control start`（以舊程式碼）。手動更新（Web／CLI 安裝、Git pull 並重載 Dashboard）才不會重啟仍在執行的 daemon。
+
+這次由更新器發起的重啟，在本版**什麼都不會改變**：沒有人儲存過連線標的（沒有 `connection.json`）時，啟動與 0.1.4-rc.9 的啟動完全相同，不寫入 relay、App 網址或 CORS，不補丁 runtime，不備份，不刪檔，daemon 視為 Paseo，`config.json` 與 runtime 目錄位元組不變。連線標的與品牌補丁要等有人在插件頁儲存標的（Paseo 也算）之後的**下一次**停止再啟動才套用。若更新器因 Dashboard 或 daemon 不健康而自動裝回上一版，上一版（rc.9）接受已補丁的 runtime 與新版寫下的 `config.json`，見下節。
 
 ## 回滾到 0.1.4-rc.9
 

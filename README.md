@@ -51,7 +51,7 @@ Hermes 0.19 的 Web 插件列表只在頁面載入時讀取。從插件頁安裝
 | Woowtech Smart | `https://smart.woowtech.io` | `relay.woowtech.io:443` |
 | Apporo Smart | `https://smart.apporo.ai` | `relay.apporo.ai:443` |
 
-- **預設與升級**：沒有人選擇其他標的前，標的是 Paseo。從 0.1.4-rc.9 升級時，仍在執行的舊 daemon 視為 Paseo，不會被重啟、重裝或改設定；它保持原樣直到下一次「停止服務 → 恢復服務」。
+- **預設與升級**：沒有人儲存連線標的之前，標的是 Paseo，插件的行為與 0.1.4-rc.9 完全相同：啟動 daemon 時不寫入 relay、App 網址或 CORS，不補丁 runtime，不備份、不刪除任何檔案，`config.json` 維持原樣。手動更新（從 GitHub 安裝或 Git pull，並重載 Dashboard）不會重啟執行中的 daemon；**PaaS 自動更新器會**：它依序執行 `control stop`、安裝新版、`control start`，所以 daemon 會以新程式碼重啟一次。這次重啟與 rc.9 的啟動相同，什麼都不會改變；連線標的與品牌補丁要等有人在插件頁儲存標的之後的下一次停止再啟動才套用。仍在執行的舊 daemon 視為 Paseo，runtime 不會重新下載或重新執行 `npm ci`。
 - **儲存只是記錄**：選好後按 **儲存連線標的**，選擇存入 `plugin-data/hermes-paseo/connection.json`；這個動作不會詢問或改動執行中的 daemon，也不取用長時間的 runtime 鎖。頁面顯示「標的已儲存，停止再啟動服務後生效」：先結束使用中的對話，按 **停止服務**，待停止完成再按 **恢復服務**，新標的才套用，之後才能產生它的配對連結。在那之前配對與 relay 驗證都會回報 `CONFIGURATION_PENDING`。
 - **切換保留身分**：切換標的會作廢舊的配對連結與 relay 驗證結果；daemon 的 server ID 與金鑰保留，已配對的裝置在切回同一標的後仍可使用。
 - **套用的內容**：每次啟動 daemon 時，插件依所選標的寫入 `app.baseUrl`、`daemon.relay`（`endpoint`、`publicEndpoint`、`useTls`、`publicUseTls`，TLS 明確寫出）與 `daemon.cors.allowedOrigins`；不屬於這三個標的的 CORS 來源保留。不寫入 `daemon.relay.requireProtectedSecurity`（Paseo 0.11.2 的嚴格設定檔不認得它）。

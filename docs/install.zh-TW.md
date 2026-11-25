@@ -12,7 +12,7 @@
 
 公開下載不需要 GitHub token。Web / CLI 從 GitHub 安裝會取得目前 main；ZIP 固定為 v0.1.5-rc.1。上列 v0.1.5-rc.1 的 Release 與固定版本網址要在該 tag 發佈之後才存在，發佈前請從 main 安裝。候選版不代表已完成所有正式部署環境的驗收。
 
-從 0.1.4-rc.9 升級時：Git pull 並重載 Dashboard 後，仍在執行的舊 daemon 照常運作，不會被重啟、重裝或改設定，也視為 Paseo 標的；新功能（連線標的、品牌識別補丁）在下一次「停止服務 → 恢復服務」時套用。Paseo runtime 不會重新下載。
+從 0.1.4-rc.9 升級時：在有人儲存連線標的之前，插件的行為與 rc.9 完全相同（不寫入 relay、App 網址或 CORS，不補丁 runtime，`config.json` 不動），仍在執行的舊 daemon 視為 Paseo。手動更新（Git pull 並重載 Dashboard）不會重啟執行中的 daemon；**PaaS 自動更新器會重啟它**（`control stop`、安裝新版、`control start`，以新程式碼啟動一次），但這次啟動與 rc.9 的相同，什麼都不會改變。連線標的與品牌識別補丁要等有人在插件頁儲存標的之後的下一次「停止服務 → 恢復服務」才套用。Paseo runtime 不會重新下載。
 
 ## 1. 確認環境
 
