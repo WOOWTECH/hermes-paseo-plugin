@@ -57,11 +57,16 @@ HOST_CREDENTIALS = (
     'API_SERVER_KEY',
 )
 TIMEOUTS = {'status': 20, 'start': 480, 'stop': 60, 'models': 165,
-            'pair': 40, 'relay': 75, 'acceptance': 480, 'chat': 240, 'continue': 240}
+            'pair': 40, 'relay': 75, 'config': 45, 'acceptance': 480, 'chat': 240, 'continue': 240}
 FIELDS = {'status': (), 'start': (), 'stop': (), 'models': ('provider',),
-          'pair': (), 'relay': (), 'acceptance': ('providers',),
+          'pair': (), 'relay': (), 'config': ('target',), 'acceptance': ('providers',),
           'chat': ('provider', 'model', 'mode', 'thinking', 'message'),
           'continue': ('agentId', 'message')}
+# Fixed official apps, mirrored from src/connection-targets.mjs. Pairing material is only
+# released to the selected target's exact origin; no request supplies an origin.
+TARGET_ORIGINS = {'paseo': 'https://app.paseo.sh',
+                  'woowtech': 'https://smart.woowtech.io',
+                  'apporo': 'https://smart.apporo.ai'}
 CODES = frozenset('''INVALID_REQUEST INVALID_PROVIDER INVALID_MESSAGE INVALID_AGENT_ID
 INVALID_MODEL INVALID_PAIR_URL INVALID_COMMAND_OUTPUT REQUEST_TOO_LARGE OUTPUT_LIMIT
 PROCESS_TIMEOUT PROCESS_FAILED NODE_UNAVAILABLE HERMES_UNAVAILABLE RUNTIME_UNAVAILABLE
@@ -76,12 +81,18 @@ PROVIDER_LOGIN_REQUIRED PROVIDER_ERROR START_FAILED STOP_FAILED ACCEPTANCE_CLEAN
 WORKSPACE_CREATE_FAILED PERMISSION_REQUIRED PROVIDER_TIMEOUT PROVIDER_TURN_FAILED MODEL_SELECTION_UNAVAILABLE
 EMPTY_OR_UNEXPECTED_REPLY'''.split())
 CODES = CODES | {'ACCEPTANCE_INTERRUPTED', 'PROVIDER_QUOTA_EXHAUSTED'}
+CODES = CODES | set('''INVALID_TARGET CONFIGURATION_PENDING CONNECTION_STATE_CORRUPT PAIRING_TARGET_MISMATCH
+PAIRING_OFFER_INVALID PAIRING_SECURITY_UNSUPPORTED BRAND_IDENTITY_SOURCE_MISMATCH BRAND_IDENTITY_PATCH_MISMATCH
+CONFIG_INVALID CONFIG_CORRUPT PORT_UNAVAILABLE DAEMON_STATE_CHANGED'''.split())
 PUBLIC_KEYS = frozenset('''ok code installed version enabled phase diagnosticCode daemon running
 reachable relayEnabled relayVerified relayVerifiedAt providers provider label status modes id
 isDefault defaultModeId models defaultThinkingOptionId thinkingOptions chatVerified chatVerifiedAt
 checkedAt passed firstReply followup model modeId thinking agentId message reply errorCode
-available authentication loginHint chatErrorCode cleanup archived workspaceArchived'''.split())
-PAIR_TEXT = re.compile(r'https?://(?:[^\s/]*@)?app\.paseo\.sh[^\s<>\"\']*', re.I)
+available authentication loginHint chatErrorCode cleanup archived workspaceArchived
+selectedTarget activeTarget configurationPending target saved'''.split())
+# Any official app link, and any URL carrying a pairing offer, is hidden in free text.
+PAIR_TEXT = re.compile(r'(?:https?://(?:[^\s/]*@)?(?:app\.paseo\.sh|smart\.woowtech\.io|smart\.apporo\.ai)'
+                       r'|[^\s<>\"\']*#(?:offer|connect)=)[^\s<>\"\']*', re.I)
 SECRET_TEXT = re.compile(r'(?i)(?:bearer\s+[a-z0-9._~+/-]+|(?:sk|ghp|github_pat|xoxb|xoxp)[-_][a-z0-9_-]{8,}|(?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*[^\s,;]+)')
 
 
@@ -106,6 +117,8 @@ def validate_input(action, value=None):
         raise BridgeError('INVALID_REQUEST')
     if action in ('models', 'chat') and (not isinstance(value.get('provider'), str) or value['provider'] not in PROVIDERS):
         raise BridgeError('INVALID_PROVIDER')
+    if action == 'config' and (not isinstance(value.get('target'), str) or value['target'] not in TARGET_ORIGINS):
+        raise BridgeError('INVALID_TARGET')
     if 'providers' in value:
         providers = value['providers']
         if not isinstance(providers, list) or not 1 <= len(providers) <= 4 or any(not isinstance(p, str) or p not in PROVIDERS for p in providers) or len(set(providers)) != len(providers):
@@ -144,18 +157,26 @@ def redact(value, depth=0):
     return None
 
 
-def public_pair(value):
+def public_pair(value, target='paseo'):
+    """Release a pairing link only in the selected target's exact official form.
+
+    The runtime already validated the offer; this independent check keeps the HTTP surface from
+    returning anything but `<official app>/#offer=<base64url>` for the target saved on disk.
+    """
     url = value.get('url')
-    if not isinstance(url, str) or len(url) > 8192 or re.search(r'[\s\x00-\x1f\x7f\\]', url):
+    origin = TARGET_ORIGINS.get(target)
+    if (origin is None or not isinstance(url, str) or len(url) > 16384
+            or re.search(r'[\s\x00-\x1f\x7f\\]', url) or value.get('target', target) != target):
         raise BridgeError('INVALID_PAIR_URL')
     try:
         parsed = urlsplit(url)
-        valid = parsed.scheme == 'https' and parsed.hostname == 'app.paseo.sh' and parsed.netloc in ('app.paseo.sh', 'app.paseo.sh:443') and parsed.username is None and parsed.password is None and parsed.port in (None, 443)
+        valid = (url == origin + '/#' + parsed.fragment
+                 and re.fullmatch(r'offer=[A-Za-z0-9_-]+', parsed.fragment) is not None)
     except ValueError:
         valid = False
     if not valid:
         raise BridgeError('INVALID_PAIR_URL')
-    return {'url': url}
+    return {'url': url, 'target': target}
 
 
 def _safe_path(path):
@@ -423,6 +444,21 @@ class Bridge:
             return error.code
         return 'ORIGIN_ADOPTED'
 
+    def connection_target(self):
+        """The connection target saved by the runtime (`connection.json`); Paseo by default."""
+        record = _read_json(self.state_dir / 'connection.json', private=True)
+        if record is None:
+            return 'paseo'
+        if set(record) != {'version', 'target'} or record['version'] != 1 or record['target'] not in TARGET_ORIGINS:
+            raise BridgeError('CONNECTION_STATE_CORRUPT')
+        return record['target']
+
+    def _shown_target(self):
+        try:
+            return self.connection_target()
+        except BridgeError:
+            return 'paseo'
+
     def dashboard_origins(self, fallback):
         """At most two operator origins; never persist Ingress over the primary."""
         primary = self.dashboard_origin() or validate_dashboard_origin(fallback)
@@ -599,7 +635,7 @@ class Bridge:
         result = run_process([node, str(self.root / 'bin' / 'control.mjs'), action],
                              json.dumps(value, ensure_ascii=False).encode('utf-8'), env,
                              TIMEOUTS[action])
-        return public_pair(result) if action == 'pair' else redact(result)
+        return public_pair(result, self.connection_target()) if action == 'pair' else redact(result)
 
     def _decorate(self, result):
         result = copy.deepcopy(result)
@@ -614,6 +650,11 @@ class Bridge:
         for key, default in {'running': False, 'reachable': False, 'relayEnabled': False,
                              'relayVerified': False, 'relayVerifiedAt': None}.items():
             result['daemon'].setdefault(key, default)
+        if result.get('selectedTarget') not in TARGET_ORIGINS:
+            result['selectedTarget'] = self._shown_target()
+        if result.get('activeTarget') not in TARGET_ORIGINS:
+            result['activeTarget'] = None
+        result['configurationPending'] = result.get('configurationPending') is True
         result['providers'] = [row for row in result.get('providers', [])
                                if isinstance(row, dict) and row.get('provider') in PROVIDERS]
         result['onboarding'] = self.onboarding()

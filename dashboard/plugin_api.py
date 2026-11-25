@@ -186,6 +186,15 @@ async def relay(request: Request):
     return await asyncio.to_thread(bridge.get_bridge().call, 'relay', body)
 
 
+@router.post('/config')
+async def config(request: Request):
+    # Saves the connection target only. Same origin, Fetch Metadata, JSON and size gates as
+    # every other route; the body is exactly {"target": "<id>"} for one of the fixed targets.
+    body = await read_json(request)
+    bridge.validate_input('config', body)
+    return await asyncio.to_thread(bridge.get_bridge().call, 'config', body)
+
+
 @router.post('/acceptance')
 async def acceptance(request: Request):
     body = await read_json(request)

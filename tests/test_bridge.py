@@ -271,11 +271,89 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn('password', result['providers'][0])
 
     def test_pair_origin_validation(self):
-        self.assertEqual(b.public_pair({'url': 'https://app.paseo.sh/?offer=test', 'token': 'secret'}), {'url': 'https://app.paseo.sh/?offer=test'})
+        self.assertEqual(b.public_pair({'url': 'https://app.paseo.sh/#offer=test', 'token': 'secret'}),
+                         {'url': 'https://app.paseo.sh/#offer=test', 'target': 'paseo'})
         for url in ['http://app.paseo.sh/a', 'https://app.paseo.sh.evil/a', 'https://user@app.paseo.sh/a',
-                    'https://app.paseo.sh:444/a', 'https://app.paseo.sh/\nsecret', 'javascript:test']:
+                    'https://app.paseo.sh:444/a', 'https://app.paseo.sh/\nsecret', 'javascript:test',
+                    'https://app.paseo.sh/?offer=test', 'https://app.paseo.sh/pair#offer=test',
+                    'https://app.paseo.sh:443/#offer=test', 'https://app.paseo.sh/?#offer=test',
+                    'https://app.paseo.sh/#offer=', 'https://app.paseo.sh/#offer=a.b', 'https://app.paseo.sh/#token=x']:
             with self.subTest(url=url), self.assertRaises(b.BridgeError):
                 b.public_pair({'url': url})
+
+    def test_pair_links_are_released_only_for_the_selected_targets_exact_app(self):
+        for target, origin in b.TARGET_ORIGINS.items():
+            url = origin + '/#offer=PRIVATE_offer-1'
+            with self.subTest(target=target):
+                self.assertEqual(b.public_pair({'url': url, 'target': target}, target), {'url': url, 'target': target})
+                for other in set(b.TARGET_ORIGINS) - {target}:
+                    with self.assertRaises(b.BridgeError):
+                        b.public_pair({'url': url}, other)
+                with self.assertRaises(b.BridgeError):
+                    b.public_pair({'url': url, 'target': 'paseo' if target != 'paseo' else 'apporo'}, target)
+        with self.assertRaises(b.BridgeError):
+            b.public_pair({'url': 'https://smart.woowtech.io/#offer=x'}, 'custom')
+
+    def test_pair_uses_the_target_saved_on_disk_not_the_runtime_output(self):
+        b._private_dir(self.bridge.state_dir)
+        b._write_json(self.bridge.state_dir / 'connection.json', {'version': 1, 'target': 'apporo'})
+        (self.bridge.state_dir / 'connection.json').chmod(0o600)
+        self.assertEqual(self.bridge.connection_target(), 'apporo')
+        good = {'url': 'https://smart.apporo.ai/#offer=abc', 'target': 'apporo', 'createdAt': 'now'}
+        with patch.object(b, 'run_process', return_value=good), patch.object(b, 'resolve_executable', return_value=sys.executable):
+            self.assertEqual(self.bridge._invoke('pair'), {'url': good['url'], 'target': 'apporo'})
+        with patch.object(b, 'run_process', return_value={'url': 'https://app.paseo.sh/#offer=abc', 'target': 'paseo'}), \
+                patch.object(b, 'resolve_executable', return_value=sys.executable), self.assertRaises(b.BridgeError) as caught:
+            self.bridge._invoke('pair')
+        self.assertEqual(caught.exception.code, 'INVALID_PAIR_URL')
+        for corrupt in ({'version': 1, 'target': 'custom'}, {'target': 'paseo'}, {'version': 1, 'target': 'paseo', 'extra': 1}):
+            b._write_json(self.bridge.state_dir / 'connection.json', corrupt)
+            with self.subTest(corrupt=corrupt), self.assertRaises(b.BridgeError) as caught:
+                self.bridge.connection_target()
+            self.assertEqual(caught.exception.code, 'CONNECTION_STATE_CORRUPT')
+        (self.bridge.state_dir / 'connection.json').chmod(0o606)
+        with self.assertRaises(b.BridgeError):
+            self.bridge.connection_target()
+
+    def test_config_accepts_exactly_one_known_target(self):
+        for target in b.TARGET_ORIGINS:
+            self.assertEqual(b.validate_input('config', {'target': target}), {'target': target})
+        for body, code in [({}, 'INVALID_TARGET'), ({'target': 'Paseo'}, 'INVALID_TARGET'), ({'target': 'custom'}, 'INVALID_TARGET'),
+                           ({'target': ['paseo']}, 'INVALID_TARGET'), ({'target': None}, 'INVALID_TARGET'),
+                           ({'target': 'paseo', 'url': 'https://evil.example'}, 'INVALID_REQUEST'),
+                           ({'target': 'paseo', 'relayEndpoint': 'evil:443'}, 'INVALID_REQUEST')]:
+            with self.subTest(body=body), self.assertRaises(b.BridgeError) as caught:
+                b.validate_input('config', body)
+            self.assertEqual(caught.exception.code, code)
+
+    def test_config_saves_through_the_runtime_and_invalidates_cached_status(self):
+        calls = []
+        def invoke(action, value=None):
+            calls.append((action, value))
+            if action == 'config':
+                return {'saved': True, 'target': value['target'], 'configurationPending': True, 'url': 'https://smart.woowtech.io/#offer=x'}
+            return {'enabled': True, 'phase': 'running', 'daemon': {'reachable': True}, 'selectedTarget': 'paseo'}
+        with patch.object(self.bridge, '_invoke', side_effect=invoke):
+            self.bridge.status()
+            result = self.bridge.call('config', {'target': 'woowtech'})
+            self.bridge.status()
+        self.assertEqual(result, {'saved': True, 'target': 'woowtech', 'configurationPending': True, 'url': 'https://smart.woowtech.io/#offer=x'})
+        self.assertEqual([action for action, _ in calls], ['status', 'config', 'status'])
+        self.assertEqual(b.redact({'saved': True, 'url': 'https://smart.woowtech.io/#offer=x'}), {'saved': True})
+
+    def test_status_always_names_a_known_target_and_a_boolean_pending_flag(self):
+        decorated = self.bridge._decorate({'selectedTarget': 'evil', 'activeTarget': 'other', 'configurationPending': 'yes'})
+        self.assertEqual((decorated['selectedTarget'], decorated['activeTarget'], decorated['configurationPending']), ('paseo', None, False))
+        decorated = self.bridge._decorate({'selectedTarget': 'apporo', 'activeTarget': 'paseo', 'configurationPending': True})
+        self.assertEqual((decorated['selectedTarget'], decorated['activeTarget'], decorated['configurationPending']), ('apporo', 'paseo', True))
+        self.assertEqual(set(b.redact({'selectedTarget': 'apporo', 'activeTarget': 'paseo', 'configurationPending': True, 'appUrl': 'x'})),
+                         {'selectedTarget', 'activeTarget', 'configurationPending'})
+
+    def test_offers_for_every_official_app_are_hidden_in_free_text(self):
+        for text in ['open https://smart.woowtech.io/#offer=PRIVATE now', 'https://smart.apporo.ai/#offer=PRIVATE',
+                     'https://app.paseo.sh/#offer=PRIVATE', 'mirror https://elsewhere.example/#offer=PRIVATE']:
+            with self.subTest(text=text):
+                self.assertNotIn('PRIVATE', b.redact({'reply': text})['reply'])
 
 
 class ProcessTests(unittest.TestCase):
@@ -416,6 +494,48 @@ class RouteTests(unittest.TestCase):
             response = self.client.post(self.prefix + '/relay', json={}, headers=self.origin)
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json(), {'ok': False, 'code': 'RELAY_UNVERIFIED'})
+
+    def test_config_route_is_protected_like_every_mutation(self):
+        with patch.object(self.runtime, 'call', side_effect=AssertionError('untrusted invocation')):
+            for headers in [{'Origin': 'https://evil.test'}, {}, {'Origin': 'http://testserver', 'Sec-Fetch-Site': 'cross-site'},
+                            {'Origin': 'http://testserver', 'Sec-Fetch-Site': 'same-site'},
+                            {'Origin': 'http://testserver', 'Sec-Fetch-Mode': 'no-cors'}, {'Origin': 'null'}]:
+                response = self.client.post(self.prefix + '/config', json={'target': 'woowtech'}, headers=headers)
+                self.assertEqual(response.status_code, 403, headers)
+                self.privacy(response)
+            for body in ['{"target":"custom"}', '{}', '{"target":"paseo","extra":1}',
+                         '{"target":"paseo","target":"woowtech"}', '[]', '{"target":null}']:
+                response = self.client.post(self.prefix + '/config', content=body,
+                                            headers={**self.origin, 'Content-Type': 'application/json'})
+                self.assertEqual(response.status_code, 400, body)
+                self.privacy(response)
+            response = self.client.post(self.prefix + '/config', content='{"target":"apporo"}',
+                                        headers={**self.origin, 'Content-Type': 'text/plain'})
+            self.assertEqual(response.status_code, 415)
+            self.assertEqual(self.client.post(self.prefix + '/config?profile=other', json={'target': 'apporo'},
+                                              headers=self.origin).status_code, 400)
+        with patch.object(self.runtime, '_invoke', return_value={'saved': True, 'target': 'woowtech', 'configurationPending': True}) as invoke:
+            response = self.client.post(self.prefix + '/config?profile=default', json={'target': 'woowtech'},
+                                        headers={'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'cors'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {'saved': True, 'target': 'woowtech', 'configurationPending': True})
+        invoke.assert_called_once_with('config', {'target': 'woowtech'})
+        self.privacy(response)
+        with patch.object(self.runtime, '_invoke', side_effect=b.BridgeError('RUNTIME_BUSY')):
+            response = self.client.post(self.prefix + '/config', json={'target': 'woowtech'}, headers=self.origin)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {'ok': False, 'code': 'RUNTIME_BUSY'})
+        self.assertEqual(self.client.get(self.prefix + '/config').status_code, 404)
+
+    def test_pair_route_answers_for_the_saved_target_and_refuses_a_pending_switch(self):
+        with patch.object(self.runtime, 'call', return_value={'url': 'https://smart.apporo.ai/#offer=x', 'target': 'apporo'}):
+            response = self.client.post(self.prefix + '/pair', json={}, headers=self.origin)
+        self.assertEqual(response.json(), {'url': 'https://smart.apporo.ai/#offer=x', 'target': 'apporo'})
+        with patch.object(self.runtime, '_invoke', side_effect=b.BridgeError('CONFIGURATION_PENDING')):
+            response = self.client.post(self.prefix + '/pair', json={}, headers=self.origin)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {'ok': False, 'code': 'CONFIGURATION_PENDING'})
+        self.privacy(response)
 
     def test_get_security_applies_to_status_and_models(self):
         with patch.object(self.runtime, '_invoke', side_effect=AssertionError('untrusted invocation')):
