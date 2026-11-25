@@ -19,11 +19,12 @@
   ];
   function knownTarget(id) { return TARGETS.some(row => row.id === id); }
   function targetOf(id) { return TARGETS.find(row => row.id === id) || TARGETS[2]; }
-  let markers = { started: [], guided: [], paused: false };
+  let markers = { started: [], guided: [], refused: [], paused: false };
   try {
     const saved = JSON.parse(window.sessionStorage.getItem(STORAGE));
     if (saved && Array.isArray(saved.started) && Array.isArray(saved.guided)) {
-      markers = { started: saved.started.slice(-40), guided: saved.guided.slice(-40), paused: saved.paused === true };
+      markers = { started: saved.started.slice(-40), guided: saved.guided.slice(-40),
+        refused: Array.isArray(saved.refused) ? saved.refused.slice(-40) : [], paused: saved.paused === true };
     }
   } catch (_) { /* Storage is optional; URLs never enter it. */ }
   function saveMarkers() {
@@ -45,7 +46,7 @@
   }
   function fault(code) { const error = new Error(code); error.code = code; return error; }
   function httpFault(status) {
-    return fault(status === 404 ? "RESTART" : status === 401 ? "AUTH" : status === 403 ? "FORBIDDEN" : status === 409 ? "BUSY" : "REQUEST");
+    return fault(status === 404 ? "RESTART" : status === 401 ? "AUTH" : status === 403 ? "FORBIDDEN" : status === 409 ? "BUSY" : status === 412 ? "REFUSED" : "REQUEST");
   }
   function errorCopy(error) {
     return ({
@@ -53,6 +54,7 @@
       AUTH: "Dashboard 登入已過期，請重新整理頁面並登入。",
       FORBIDDEN: "操作被拒絕。請確認 hermes-paseo 已啟用且登入有效；若使用反向代理，請由管理者確認正式網址設定。",
       BUSY: "服務仍在處理上一項操作，請稍後重試。",
+      REFUSED: "停止被拒絕，目前的服務沒有被動到、照常可用。原因（新版 Paseo 無法讀取設定）與處理方式請見上方說明。",
       PAIR: "配對服務沒有傳回有效的官方連結，請重新產生。",
       DATA: "服務傳回的狀態格式不完整，請重新檢查。",
       SDK: "此 Dashboard 缺少外掛 API SDK，請由管理者檢查 Hermes Dashboard 版本。",
@@ -77,7 +79,7 @@
       return await SDK.fetchJSON(BASE + path, init);
     } catch (error) {
       if (signal && signal.aborted) throw fault("ABORT");
-      if (error && ["RESTART", "AUTH", "FORBIDDEN", "BUSY", "SDK"].includes(error.code)) throw error;
+      if (error && ["RESTART", "AUTH", "FORBIDDEN", "BUSY", "REFUSED", "SDK"].includes(error.code)) throw error;
       const status = error && (error.status || (/^(\d{3}):/.exec(error.message || "") || [])[1]);
       throw status ? httpFault(Number(status)) : fault("REQUEST");
     }
@@ -114,6 +116,9 @@
       enabled: value.enabled, phase: value.phase,
       acceptanceJob: Object.prototype.hasOwnProperty.call(value, "acceptanceJob") ? normalizeJob(value.acceptanceJob) : undefined,
       diagnosticCode: typeof value.diagnosticCode === "string" ? value.diagnosticCode : null,
+      // Key paths of the settings the new release refused; never values. Shown as text only.
+      configPaths: value.configCheck && Array.isArray(value.configCheck.paths)
+        ? value.configCheck.paths.filter(row => typeof row === "string" && row.trim()).map(row => text(row, "")).filter(Boolean).slice(0, 20) : [],
       daemon: { running: value.daemon.running, reachable: value.daemon.reachable,
         version: typeof value.daemon.version === "string" && /^\d+\.\d+\.\d+$/.test(value.daemon.version) ? value.daemon.version : null },
       // An older backend still loaded after a plugin update reports no target: keep it on Paseo.
@@ -121,6 +126,8 @@
       selectedTarget: knownTarget(value.selectedTarget) ? value.selectedTarget : "paseo",
       activeTarget: knownTarget(value.activeTarget) ? value.activeTarget : null,
       configurationPending: value.configurationPending === true,
+      // A stop the service declined after it had been accepted (it was queued behind a start).
+      stopRefused: value.stopRefused && typeof value.stopRefused.at === "string" ? { at: text(value.stopRefused.at, "") } : null,
       providers: value.providers.filter(row => row && typeof row.provider === "string").map(row => ({
         provider: row.provider, label: text(row.label, row.provider), status: row.status,
         available: row.available, installed: row.installed
@@ -220,13 +227,19 @@
         if (navigationDone) remember("guided", activation(result));
         if (startAttempted) remember("started", activation(result));
         if (pausedStatus(result) && !resuming && state.busy !== "start") { markers.paused = true; saveMarkers(); }
+        // A stop the service declined leaves the daemon running: the pause recorded for it ends there.
+        let declined = null;
+        if (result.stopRefused && result.stopRefused.at && !markers.refused.includes(result.stopRefused.at)) {
+          remember("refused", result.stopRefused.at);
+          if (!pausedStatus(result) && !state.stopping) { markers.paused = false; saveMarkers(); declined = errorCopy(fault("REFUSED")); }
+        }
         // An absent field belongs to an older server. A receipt is authoritative,
         // but a status read during submission may still describe the previous job.
         const acceptance = result.acceptanceJob !== undefined && (state.busy !== "acceptance" || markers.paused)
           ? jobPatch(result.acceptanceJob) : {};
         // A link belongs to the target it was made for, and only while that target is applied.
         const sameTarget = !state.status || state.status.selectedTarget === result.selectedTarget;
-        publish(Object.assign(acceptance, { status: result, readError: null,
+        publish(Object.assign(acceptance, declined ? { error: declined } : {}, { status: result, readError: null,
           targetDraft: state.targetDraft === result.selectedTarget ? null : state.targetDraft,
           pairUrl: result.enabled && !pausedStatus(result) && sameTarget && !result.configurationPending ? state.pairUrl : null }));
         maybeGuide(result);
@@ -330,6 +343,8 @@
     } catch (error) {
       if (actionRevision === revision) {
         if (name === "start") resuming = false;
+        // The service refused the stop and did nothing: the pause marked at the click ends here.
+        if (name === "stop" && error.code === "REFUSED") { markers.paused = false; saveMarkers(); }
         if (name === "acceptance") {
           const uncertain = ["REQUEST", "DATA", "BUSY"].includes(error.code);
           publish({ acceptanceUncertain: uncertain, error: uncertain ? null : errorCopy(error) });
@@ -595,9 +610,13 @@
           ? "Paseo 執行環境已更新" + (status.daemon.version ? "（目前執行 " + status.daemon.version + "）" : "") +
             "，需要停止再恢復服務才會換成新版本。目前的服務照常可用；請先結束使用中的對話。"
           : "Paseo 執行環境需要重啟。請先停止，再恢復服務。"),
-        incompatible && h("p", { className: "hp-error", role: "alert" }, status.daemon.running
-          ? "Paseo 執行環境已更新，但新版 Paseo 無法讀取目前的設定（config.json）。目前的服務照常可用；為避免停止後無法再啟動，停止服務會被拒絕。請先修正或移除不相容的設定。"
-          : "新版 Paseo 無法讀取目前的設定（config.json），因此無法啟動。請修正或移除不相容的設定後再恢復服務。"),
+        incompatible && h("div", { className: "hp-error", role: "alert" },
+          h("p", null, status.daemon.running
+            ? "Paseo 執行環境已更新，但新版 Paseo 無法讀取目前的設定（config.json）。目前的服務照常可用；為避免停止後無法再啟動，停止服務會被拒絕。請先修正或移除不相容的設定，修正後本頁會自動重新檢查。"
+            : "新版 Paseo 無法讀取目前的設定（config.json），因此無法啟動。請修正或移除不相容的設定後再恢復服務。"),
+          status.configPaths.length > 0 && h("p", null, "不相容的設定項目（只列路徑，不含內容）：",
+            status.configPaths.map((row, index) => h("code", { key: index, className: "hp-path" }, row))),
+          h("p", { className: "hp-small" }, "設定檔位於 Hermes 資料目錄下的 plugin-data/hermes-paseo/daemon/config.json；編輯前請先備份。若要連同插件一起停用或移除，Hermes 的停用與移除不受這項檢查阻擋。")),
         h("div", { className: "hp-actions" },
           button(snapshot.stopping ? "正在停止…" : "停止服務", () => void action("stop"), !enabled || snapshot.stopping || dashboardReloading || (paused && !status.daemon.running), true),
           button(snapshot.busy === "start" ? "正在啟動…" : paused ? "恢復服務" : "重新啟動／重試", () => void action("start"),

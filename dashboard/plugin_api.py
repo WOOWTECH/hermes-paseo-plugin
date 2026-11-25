@@ -139,7 +139,9 @@ class ProtectedRoute(APIRoute):
             except RequestError as error:
                 response = JSONResponse({'ok': False, 'code': error.code}, status_code=error.status)
             except bridge.BridgeError as error:
-                status = 413 if error.code == 'REQUEST_TOO_LARGE' else 400 if error.code.startswith('INVALID_') else 503
+                # 412: the server declined this request in its current state and nothing changed (a refused stop).
+                status = (413 if error.code == 'REQUEST_TOO_LARGE' else 400 if error.code.startswith('INVALID_')
+                          else 412 if error.code in bridge.STOP_REFUSALS else 503)
                 response = JSONResponse({'ok': False, 'code': error.code}, status_code=status)
             except Exception:
                 response = JSONResponse({'ok': False, 'code': 'OPERATION_FAILED'}, status_code=503)
@@ -171,7 +173,8 @@ async def start(request: Request):
 @router.post('/stop')
 async def stop(request: Request):
     body = await read_json(request)
-    return await asyncio.to_thread(bridge.get_bridge().call, 'stop', body)
+    # The Dashboard's Stop moves an older daemon to this release: the runtime may refuse it (guard_config).
+    return await asyncio.to_thread(bridge.get_bridge().call, 'stop', body, guard_config=True)
 
 
 @router.post('/pair')

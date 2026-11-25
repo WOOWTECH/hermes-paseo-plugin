@@ -96,6 +96,8 @@ class Fixture:
         self.target = 'paseo'
         self.active = None
         self.pending = False
+        self.upgrade = None
+        self.refuse_stop = False
 
     def status(self):
         if self.ready_at and time.monotonic() >= self.ready_at:
@@ -115,6 +117,11 @@ class Fixture:
                     onboarding=dict(required=not self.completed, id=self.onboarding_id, completed=self.completed))
         if self.acceptance_job is not None:
             value['acceptanceJob'] = self.acceptance_job
+        if self.upgrade:
+            # An earlier release's daemon still serves after a plugin update.
+            extra = dict(self.upgrade)
+            value['daemon']['version'] = extra.pop('daemonVersion', None)
+            value.update(extra)
         return value
 
     @staticmethod
@@ -245,6 +252,8 @@ def run(args):
                 fixture.ready_at = time.monotonic() + .15
                 return self.send(fixture.status(), status=202)
             if self.path.endswith('/stop'):
+                if fixture.refuse_stop:
+                    return self.send({'ok': False, 'code': 'CONFIG_INCOMPATIBLE'}, status=412)
                 fixture.phase, fixture.enabled, fixture.ready_at, fixture.active = 'disabled', False, None, None
                 if fixture.acceptance_job and fixture.acceptance_job['pending']:
                     fixture.acceptance_job = dict(fixture.acceptance_job, phase='interrupted', pending=False,
@@ -608,6 +617,36 @@ def run(args):
                 assert fixture.count('/reload', 'POST') == 0
                 context.close()
             print('PASS: active installer/start/stop phases disable Dashboard reload.')
+
+            # An older daemon whose new release cannot read config.json: the offending key paths are
+            # listed as text, a refused stop leaves nothing paused, and the running daemon still pairs.
+            current = Fixture.reloadable()
+            current.upgrade = dict(daemonVersion='0.11.2', diagnosticCode='CONFIG_INCOMPATIBLE', installed=True,
+                                   configCheck=dict(ok=False, code='CONFIG_INCOMPATIBLE', checkedAt='2026-11-25T00:00:00Z',
+                                                    paths=['daemon.keepAliveSeconds', '<b id=injected>agents.providers.claude.enabled']))
+            current.refuse_stop = True
+            fixture = current
+            context = browser.new_context(viewport=dict(width=390, height=844))
+            context.route('**/*', route)
+            page = context.new_page()
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(origin + '/paseo')
+            expect(page.get_by_text('不相容的設定項目', exact=False)).to_be_visible()
+            assert page.locator('code.hp-path').all_text_contents() == ['daemon.keepAliveSeconds', '<b id=injected>agents.providers.claude.enabled']
+            assert page.locator('#injected').count() == 0, 'key paths are text, never markup'
+            expect(page.get_by_text('plugin-data/hermes-paseo/daemon/config.json', exact=False)).to_be_visible()
+            page.get_by_role('button', name='停止服務', exact=True).click()
+            wait_for_calls(page, fixture, '/stop', 1)
+            expect(page.get_by_text('停止被拒絕', exact=False)).to_be_visible()
+            assert page.evaluate('JSON.parse(sessionStorage.getItem("hermes-paseo:ui:v1")).paused') is False
+            assert page.get_by_text('停止待確認', exact=True).count() == 0
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_enabled()
+            expect(page.get_by_role('button', name='停止服務', exact=True)).to_be_enabled()
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            assert fixture.count('/stop', 'POST') == 1 and fixture.count('/start', 'POST') == 0
+            assert_posts(fixture, origin)
+            context.close()
+            print('PASS: an incompatible config lists key paths as text; a refused stop leaves no pause and the daemon still pairs.')
             browser.close()
         assert not errors, f'Browser React errors: {errors}'
         assert not blocked_requests, blocked_requests

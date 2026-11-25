@@ -66,7 +66,7 @@ node "$HERMES_HOME/plugins/hermes-paseo/bin/control.mjs" relay <<< '{}'
 
 - **PaaS**：目前的更新器會以 `dependency_manifest_changed` 拒絕本版，Job 失敗但服務不動。日後若以 chart／更新器變更或管理者手動安裝放行，流程是「舊版程式停止 0.11.2 → 安裝 → 新版程式啟動 0.17.4」：新程式看不到舊 daemon，直接全新安裝並啟動。注意更新器對 `control start` 只等 45 秒，而首次下載 0.17.4 約 400 MB（本機冷快取約 14 秒，PaaS 網路未測）；逾時時更新器會裝回舊版並重新啟動 0.11.2，被中斷的 `npm ci` 可能留在背景完成，隔天重試會用到 npm 快取。
 - **HA 或手動更新**：Git pull 後重載 Dashboard，舊 daemon 繼續服務，頁面顯示「需要重新啟動」並註明目前執行 0.11.2。插件在背景安裝 0.17.4（每個 Dashboard 程序一次；手動停止時不會），並用 0.17.4 的讀取器在記憶體中檢查 `config.json`；這與手動執行 `control.mjs prepare` 相同（見下節）。結束對話後按「停止服務」再按「恢復服務」完成升級；重啟附加元件也會讓 daemon 以新版啟動。
-- **設定檢查**：`config.json` 先經過目標版本自己的 `readPersistedConfig`（0.17.4 會把舊的語音、`providers.openai` 設定整理成新格式）再合併插件管理的欄位，最後以 0.17.4 的嚴格結構驗證。讀不進來時回報 `CONFIG_INCOMPATIBLE` 且不改寫檔案；若此時要停止的是舊版 daemon，停止會被拒絕，避免 Paseo 停下後起不來。插件停用／移除也會因此被拒絕，修正設定或重啟附加元件／Pod 後再操作。
+- **設定檢查**：`config.json` 先經過目標版本自己的 `readPersistedConfig`（0.17.4 會把舊的語音、`providers.openai` 設定整理成新格式）再合併插件管理的欄位，最後以 0.17.4 的嚴格結構驗證。讀不進來時回報 `CONFIG_INCOMPATIBLE` 且不改寫檔案；若此時使用者在 Dashboard 按「停止服務」要停止舊版 daemon，停止會被拒絕，避免 Paseo 停下後起不來。**插件的停用／移除不受這項檢查影響**，處理方式見下節。
 - **磁碟需求**：安裝期間約 **1.5 GB** 可用（npm 下載快取約 0.4 GB 加解開後約 1.1 GB），完成後約 **0.75 GB**，另外舊版 runtime（0.11.2 r2 實測約 0.8 GB）在新版 daemon 啟動並裁剪前仍在碟上。PaaS chart 的預設資料碟是 5 GiB，且與 Hermes 自己的資料共用，空間很緊；要在這種服務上升級，先確認資料碟用量。
 - **安裝前檢查**：可用空間低於 1536 MiB 時以 `INSUFFICIENT_DISK` 拒絕，沒有建立任何目錄、沒有啟動 npm，舊版 daemon 與它的 runtime 完全不動。`status` 的 `prepare` 欄位帶 `{"state":"failed","code":"INSUFFICIENT_DISK","requiredMiB":1536,"availableMiB":…}`（只有數字，沒有路徑）；清出空間後下一次 `prepare` 或啟動就會安裝。讀不到可用空間的檔案系統不擋安裝。
 - **安裝後清理**：npm 的快取放在新版本目錄內的暫存目錄（不是持久的 HOME），安裝成功或失敗都移除；glibc 主機另外移除用不到的 `node_modules/@anthropic-ai/claude-agent-sdk-*-musl`（每版約 340 MB，非 glibc 主機不動）。就緒判斷與收據不依賴這些目錄。
@@ -86,6 +86,23 @@ node "$HERMES_HOME/plugins/hermes-paseo/bin/control.mjs" prepare <<< '{}'
 - **結束行為**：安裝並驗證成功時結束碼為 0，輸出公開狀態（同 `status`），其中 `installed` 為 `true`，`configCheck` 是設定檢查結果：`{"ok":true,...}`，或 `{"ok":false,"code":"CONFIG_INCOMPATIBLE"}`、`{"ok":false,"code":"CONFIG_CORRUPT"}`。**設定不相容不是失敗**：結束碼仍為 0，檔案不改寫，呼叫端必須自己讀 `configCheck.ok`，為 `false` 就不可停止舊版 daemon。安裝或驗證失敗時結束碼為 1，輸出 `{"ok":false,"code":"..."}`（例如 `NPM_UNAVAILABLE`、`NODE_VERSION_UNSUPPORTED`、`RUNTIME_BUSY`、`INSUFFICIENT_DISK`、`RUNTIME_INSTALL_FAILED`、`RUNTIME_INSTALL_TIMEOUT`、`RUNTIME_IN_USE`），沒有留下看起來已就緒的半成品，舊版 daemon 沒有被動過；失敗的細節可再用 `status` 的 `prepare` 欄位讀取。
 - **時間**：npm 安裝上限 300 秒，加上最多 120 秒等鎖與數秒驗證；橋接層對 `prepare` 的上限是 480 秒。呼叫端請至少給 480 秒。PaaS 更新器現有的 `control()` 對每個動作只給 45 秒，首次下載約 400 MB 可能放不進去，日後的更新器需要為 `prepare` 另設逾時。
 - **更新器建議順序**：`prepare` → 結束碼 0、`installed` 與 `configCheck.ok` 皆為 `true` → 停止舊版 daemon → 安裝新版插件 → 啟動。任何一項不符就在停止之前中止，Paseo 不會因此停機。
+
+### 設定不相容：停止被拒絕與處理方式
+
+新版 runtime 讀不進目前的 `config.json`（`CONFIG_INCOMPATIBLE`，或 JSON 本身壞掉的 `CONFIG_CORRUPT`）時，Paseo 若在使用者按下「停止服務」後停下，就會起不來。所以：
+
+- **會被拒絕的停止**：Dashboard 的「停止服務」（用來把舊版 daemon 換成新版）。回應 HTTP 412 與代碼，daemon 繼續執行，**不留下暫停**：`enabled` 維持 `true`，配對與容器重啟後的自動恢復都不受影響。若這個停止是在背景啟動或準備期間排隊的，輪到它時才被拒絕，狀態會帶 `stopRefused`（代碼與時間），頁面據此結束等待並說明。
+- **不會被拒絕的停止**：Hermes Web 的停用與移除（主機轉接檔呼叫 `call('stop', {})`，橋接層會對執行環境送出 `{"reason":"disable"}`，不做任何升級檢查，daemon 一定被停止）；`/paseo stop`、`paseo_stop` 工具（文件上的「停用前先停止」）也是同一種。直接用 CLI 時，`control.mjs stop` 預設會檢查，輸入 `{"reason":"disable"}` 才會略過。
+- **找出是哪個設定**：頁面「需要修正設定」卡片列出不相容的設定**路徑**（例如 `daemon.keepAliveSeconds`），只有鍵的路徑，不含任何值。命令列可讀同一份清單：
+
+  ```bash
+  node "$HERMES_HOME/plugins/hermes-paseo/bin/control.mjs" status <<< '{}'
+  ```
+
+  `configCheck` 是 `{"ok":false,"code":"CONFIG_INCOMPATIBLE","paths":["..."]}`；`CONFIG_CORRUPT` 表示 JSON 本身無法解析（沒有路徑可列）。
+- **設定檔位置**：`$HERMES_HOME/plugin-data/hermes-paseo/daemon/config.json`。PaaS 與 HA 映像的 `HERMES_HOME` 預設為 `/opt/data`，所以是 `/opt/data/plugin-data/hermes-paseo/daemon/config.json`；也就是 Paseo 的 `PASEO_HOME` 底下的 `config.json`。
+- **修正**：先備份這個檔案，再用文字編輯器移除或改正頁面列出的路徑（從 0.11.2 留下、0.17.4 不認得的鍵直接刪除即可；Paseo 之後會自己把檔案整理成新格式）。daemon 執行中時編輯這個檔案不會重啟它。頁面讀取狀態時會重新檢查，修正後約數秒內「需要修正設定」就會消失，再按「停止服務」與「恢復服務」完成升級。
+- **不想修正時**：直接停用或移除插件（Hermes Web 不受影響），或在不更新插件的情況下保留舊版 daemon 繼續服務。重啟附加元件或 Pod 並不能繞過：舊版 daemon 隨容器結束，下一次啟動仍會因為同樣的設定失敗。
 
 ### 退回 0.1.4-rc.9
 

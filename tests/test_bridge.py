@@ -357,6 +357,111 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(result['configCheck'], {'ok': False, 'code': 'CONFIG_INCOMPATIBLE', 'checkedAt': 'now'})
         self.assertNotIn('state', result)
 
+    def runtime_that_refuses_a_guarded_stop(self, code='CONFIG_INCOMPATIBLE'):
+        """A runtime whose daemon is an older release and whose new release cannot start: a user's stop is
+        declined (the daemon keeps running), a stop with reason `disable` is carried out."""
+        calls = []
+        running = {'enabled': True, 'phase': 'running', 'daemon': {'running': True, 'reachable': True}, 'diagnosticCode': 'RESTART_REQUIRED', 'installed': True}
+        def invoke(action, value=None):
+            calls.append((action, value))
+            if action == 'stop' and (value or {}).get('reason') != 'disable':
+                raise b.BridgeError(code)
+            if action == 'stop':
+                running.update(enabled=False, phase='disabled', daemon={'running': False, 'reachable': False})
+            return dict(running)
+        return calls, invoke
+
+    def test_a_refused_stop_leaves_the_bridge_unpaused_and_enabled(self):
+        """The runtime declines a stop it cannot undo (the new release cannot read config.json). The stop had
+        already persisted the pause, which blocked pairing and unattended recovery and, through the host
+        adapter, made disable and remove answer PLUGIN_STOP_PENDING."""
+        self.bridge.onboarding(create=True)
+        calls, invoke = self.runtime_that_refuses_a_guarded_stop()
+        with patch.object(self.bridge, '_invoke', side_effect=invoke):
+            with self.assertRaises(b.BridgeError) as refused:
+                self.bridge.call('stop', {}, guard_config=True)
+            self.assertEqual(refused.exception.code, 'CONFIG_INCOMPATIBLE')
+            self.assertFalse(self.bridge._pause_requested)
+            self.assertIsNone(self.bridge._phase)
+            self.assertIsNone(self.bridge._error)
+            self.assertFalse(json.loads((self.bridge.state_dir / 'onboarding.json').read_text())['paused'])
+            shown = self.bridge.status(fresh=True)
+        self.assertTrue(shown['enabled'])
+        self.assertEqual(shown['phase'], 'running')
+        self.assertEqual(shown['diagnosticCode'], 'RESTART_REQUIRED')
+        self.assertEqual(calls[0], ('stop', None), 'a guarded stop sends no reason')
+
+    def test_a_refused_stop_that_was_queued_behind_a_start_also_lifts_the_pause(self):
+        self.bridge.onboarding(create=True)
+        entered, release = threading.Event(), threading.Event()
+        calls, refusing = self.runtime_that_refuses_a_guarded_stop()
+        def invoke(action, value=None):
+            if action == 'status' and not entered.is_set():
+                return {'enabled': False, 'phase': 'not_installed', 'daemon': {'running': False, 'reachable': False}}
+            if action == 'start':
+                entered.set()
+                release.wait(3)
+                return {'enabled': True, 'phase': 'running', 'daemon': {'running': True, 'reachable': True}}
+            return refusing(action, value)
+        with patch.object(self.bridge, '_invoke', side_effect=invoke):
+            self.bridge.start()
+            self.assertTrue(entered.wait(2))
+            queued = self.bridge.call('stop', {}, guard_config=True)
+            self.assertEqual((queued['enabled'], queued['phase']), (False, 'stopping'))
+            release.set()
+            self.bridge._worker.join(2)
+            self.bridge._stop_worker.join(2)
+            shown = self.bridge.status(fresh=True)
+        self.assertEqual([call for call in calls if call[0] == 'stop'], [('stop', None)])
+        self.assertTrue(shown['enabled'])
+        self.assertFalse(self.bridge._pause_requested)
+        self.assertFalse(json.loads((self.bridge.state_dir / 'onboarding.json').read_text())['paused'])
+
+    def test_a_stop_without_the_guard_is_the_host_turning_the_plugin_off_and_is_never_refused(self):
+        self.bridge.onboarding(create=True)
+        calls, invoke = self.runtime_that_refuses_a_guarded_stop()
+        with patch.object(self.bridge, '_invoke', side_effect=invoke):
+            result = self.bridge.call('stop', {})
+        self.assertEqual(calls, [('stop', {'reason': 'disable'})])
+        self.assertFalse(result['enabled'])
+        self.assertTrue(json.loads((self.bridge.state_dir / 'onboarding.json').read_text())['paused'], 'a real stop keeps its pause')
+
+    def test_only_the_bridge_adds_the_disable_reason(self):
+        for body in ({'reason': 'disable'}, {'reason': 'x'}, {'force': True}):
+            with self.subTest(body=body), self.assertRaises(b.BridgeError) as caught:
+                b.validate_input('stop', body)
+            self.assertEqual(caught.exception.code, 'INVALID_REQUEST')
+        self.assertEqual(b.validate_input('stop', {'reason': 'disable'}, b.NODE_FIELDS), {'reason': 'disable'})
+        for body in ({'reason': 'upgrade'}, {'reason': None}, {'other': 1}):
+            with self.subTest(body=body), self.assertRaises(b.BridgeError):
+                b.validate_input('stop', body, b.NODE_FIELDS)
+
+    def test_a_refused_stop_leaves_a_stop_that_was_already_paused_as_it_found_it_enabled(self):
+        # A failed earlier stop left the pause behind with the daemon still running: a refusal must not keep it.
+        self.bridge.onboarding(create=True)
+        with b._state_lock(self.bridge.state_dir):
+            record = b._read_json(self.bridge.state_dir / 'onboarding.json')
+            record['paused'] = True
+            b._write_json(self.bridge.state_dir / 'onboarding.json', record)
+        calls, invoke = self.runtime_that_refuses_a_guarded_stop('CONFIG_CORRUPT')
+        with patch.object(self.bridge, '_invoke', side_effect=invoke), self.assertRaises(b.BridgeError):
+            self.bridge.call('stop', {}, guard_config=True)
+        self.assertFalse(json.loads((self.bridge.state_dir / 'onboarding.json').read_text())['paused'])
+
+    def test_other_stop_failures_keep_the_pause_so_the_stop_can_be_retried(self):
+        self.bridge.onboarding(create=True)
+        with patch.object(self.bridge, '_invoke', side_effect=b.BridgeError('DAEMON_NOT_OWNED')), self.assertRaises(b.BridgeError):
+            self.bridge.call('stop', {}, guard_config=True)
+        self.assertTrue(self.bridge._pause_requested)
+        self.assertEqual((self.bridge._phase, self.bridge._error), ('error', 'DAEMON_NOT_OWNED'))
+        self.assertTrue(json.loads((self.bridge.state_dir / 'onboarding.json').read_text())['paused'])
+
+    def test_config_key_paths_reach_the_dashboard_and_nothing_else_of_the_check_does(self):
+        shown = b.redact({'configCheck': {'ok': False, 'code': 'CONFIG_INCOMPATIBLE', 'checkedAt': 'now',
+                                          'paths': ['daemon.keepAliveSeconds', 'agents.providers.claude.enabled'], 'value': 'hunter2', 'file': '/private/daemon/config.json'}})
+        self.assertEqual(shown, {'configCheck': {'ok': False, 'code': 'CONFIG_INCOMPATIBLE', 'checkedAt': 'now',
+                                                 'paths': ['daemon.keepAliveSeconds', 'agents.providers.claude.enabled']}})
+
     def test_status_always_names_a_known_target_and_a_boolean_pending_flag(self):
         decorated = self.bridge._decorate({'selectedTarget': 'evil', 'activeTarget': 'other', 'configurationPending': 'yes'})
         self.assertEqual((decorated['selectedTarget'], decorated['activeTarget'], decorated['configurationPending']), ('paseo', None, False))
@@ -573,7 +678,8 @@ class RegistrationTests(unittest.TestCase):
                 'enabled': False, 'phase': 'disabled', 'daemon': {'running': False, 'reachable': False}}) as invoke:
                 result = json.loads(native._setup_command('stop'))
                 self.assertFalse(result['daemon']['running'])
-                invoke.assert_called_once_with('stop')
+                # Stopping before a removal is never refused by an upgrade check.
+                invoke.assert_called_once_with('stop', {'reason': 'disable'})
                 self.assertNotIn('url', result)
         self.assertIn('cannot automatically', native._setup_command(''))
         self.assertIn('/paseo stop', native._setup_command('pair'))
@@ -666,6 +772,31 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json(), {'ok': False, 'code': 'CONFIGURATION_PENDING'})
         self.privacy(response)
+
+    def test_the_dashboard_stop_is_a_guarded_user_stop_and_a_refusal_says_so_without_changing_anything(self):
+        self.runtime.onboarding(create=True)
+        calls = []
+        def invoke(action, value=None):
+            calls.append((action, value))
+            raise b.BridgeError('CONFIG_INCOMPATIBLE')
+        with patch.object(self.runtime, '_invoke', side_effect=invoke):
+            response = self.client.post(self.prefix + '/stop', json={}, headers=self.origin)
+        self.assertEqual(calls, [('stop', None)])
+        self.assertEqual(response.status_code, 412)
+        self.assertEqual(response.json(), {'ok': False, 'code': 'CONFIG_INCOMPATIBLE'})
+        self.privacy(response)
+        self.assertFalse(json.loads((self.runtime.state_dir / 'onboarding.json').read_text())['paused'])
+        with patch.object(self.runtime, '_invoke', return_value={'enabled': False, 'phase': 'disabled', 'daemon': {'running': False}}):
+            self.assertEqual(self.client.post(self.prefix + '/stop', json={}, headers=self.origin).status_code, 200)
+        # A failure that is not a refusal stays a service error.
+        with patch.object(self.runtime, '_invoke', side_effect=b.BridgeError('DAEMON_NOT_OWNED')):
+            self.assertEqual(self.client.post(self.prefix + '/stop', json={}, headers=self.origin).status_code, 503)
+
+    def test_a_request_cannot_ask_for_the_unguarded_stop(self):
+        with patch.object(self.runtime, '_invoke', side_effect=AssertionError('untrusted invocation')):
+            for body in ('{"reason":"disable"}', '{"guard_config":false}', '{"force":true}'):
+                response = self.client.post(self.prefix + '/stop', content=body, headers={**self.origin, 'Content-Type': 'application/json'})
+                self.assertEqual(response.status_code, 400, body)
 
     def test_get_security_applies_to_status_and_models(self):
         with patch.object(self.runtime, '_invoke', side_effect=AssertionError('untrusted invocation')):

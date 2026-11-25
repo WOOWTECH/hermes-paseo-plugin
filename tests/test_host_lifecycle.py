@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('host_lifecycle_test', ROOT / 'host/profile_lifecycle.py')
@@ -153,6 +153,62 @@ class LifecycleTests(unittest.TestCase):
         self.snapshot.update(enabled=False, phase='not_installed')
         self.lifecycle.reconcile()
         self.bridge.start.assert_called_once()
+
+
+class RealBridgeLifecycleTests(unittest.TestCase):
+    """The host adapter and the real bridge, with only the runtime replaced by a stand-in that declines a
+    user's stop (the new release cannot read config.json) and carries out a stop with reason `disable`."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        module.prepare_profile_origin(self.home, 'https://hermes.test')
+        spec = importlib.util.spec_from_file_location('paseo_bridge_lifecycle', ROOT / 'hermes_paseo.py')
+        self.bridge_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.bridge_module)
+        self.bridge = self.bridge_module.Bridge(home=self.home)
+        self.bridge.onboarding(create=True)
+        self.running = True
+        self.after_stop = 'disabled'
+        self.stops = []
+
+    def invoke(self, action, value=None):
+        if action == 'stop':
+            self.stops.append(value)
+            if (value or {}).get('reason') != 'disable':
+                raise self.bridge_module.BridgeError('CONFIG_INCOMPATIBLE')
+            self.running = False
+        return {'enabled': self.running, 'phase': 'running' if self.running else self.after_stop,
+                'daemon': {'running': self.running, 'reachable': self.running}, 'diagnosticCode': 'RESTART_REQUIRED' if self.running else None}
+
+    def lifecycle(self):
+        life = module.ProfileLifecycle(self.home, lambda: True, lambda: 'https://hermes.test')
+        life.load_bridge = lambda: self.bridge
+        return life
+
+    def test_disable_and_remove_stop_the_daemon_though_the_config_check_would_refuse_a_user_stop(self):
+        life = self.lifecycle()
+        with patch.object(self.bridge, '_invoke', side_effect=self.invoke):
+            with self.assertRaises(self.bridge_module.BridgeError):
+                self.bridge.call('stop', {}, guard_config=True)
+            self.assertTrue(self.running, 'the user stop was declined')
+            life.stop_for_disable(False)  # the middleware's call for Disable and Remove
+        self.assertFalse(self.running)
+        self.assertTrue(life.stopped_for_disable)
+        self.assertEqual(self.stops, [None, {'reason': 'disable'}])
+
+    def test_a_declined_user_stop_does_not_block_the_hosts_unattended_recovery(self):
+        life = self.lifecycle()
+        with patch.object(self.bridge, '_invoke', side_effect=self.invoke):
+            with self.assertRaises(self.bridge_module.BridgeError):
+                self.bridge.call('stop', {}, guard_config=True)
+            paused = json.loads((self.home / 'plugin-data/hermes-paseo/onboarding.json').read_text())['paused']
+            self.running, self.after_stop = False, 'stopped'  # the daemon then dies on its own
+            with patch.object(self.bridge, 'start') as start:
+                life.reconcile()
+        self.assertFalse(paused, 'the host reads this file to decide whether to start the service again')
+        start.assert_called_once()
 
 
 if __name__ == '__main__':

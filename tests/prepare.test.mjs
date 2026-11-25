@@ -111,7 +111,7 @@ test('prepare is a control action with no input, answering with the public statu
   fakeNpm(f, { tree: { persistedConfig: true } });
   const shown = publicStatus(await prepare());
   assert.equal(shown.installed, true);
-  assert.deepEqual(Object.keys(shown.configCheck), ['ok', 'code', 'checkedAt']);
+  assert.deepEqual(Object.keys(shown.configCheck), ['ok', 'code', 'paths', 'checkedAt']);
   assert.ok(!('state' in shown));
 });
 

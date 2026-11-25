@@ -64,6 +64,9 @@ FIELDS = {'status': (), 'start': (), 'stop': (), 'prepare': (), 'models': ('prov
           'pair': (), 'relay': (), 'config': ('target',), 'acceptance': ('providers',),
           'chat': ('provider', 'model', 'mode', 'thinking', 'message'),
           'continue': ('agentId', 'message')}
+# What the runtime accepts is wider than what a caller of the bridge may send: only the bridge itself
+# adds `reason: disable` to a stop (see Bridge.call).
+NODE_FIELDS = {**FIELDS, 'stop': ('reason',)}
 # Fixed official apps, mirrored from src/connection-targets.mjs. Pairing material is only
 # released to the selected target's exact origin; no request supplies an origin.
 TARGET_ORIGINS = {'paseo': 'https://app.paseo.sh',
@@ -88,12 +91,15 @@ PAIRING_OFFER_INVALID PAIRING_SECURITY_UNSUPPORTED BRAND_IDENTITY_SOURCE_MISMATC
 CONFIG_INVALID CONFIG_CORRUPT CONFIG_INCOMPATIBLE PORT_UNAVAILABLE DAEMON_STATE_CHANGED
 TERMINAL_CLEANUP_NOT_CONFIRMED STOP_NOT_CONFIRMED DAEMON_REPLACED
 INSUFFICIENT_DISK RUNTIME_INSTALL_FAILED RUNTIME_INSTALL_TIMEOUT RUNTIME_IN_USE'''.split())
+# A stop the runtime declines before it signals anything: the daemon keeps serving, so the pause the
+# stop recorded must not outlive it.
+STOP_REFUSALS = frozenset({'CONFIG_INCOMPATIBLE', 'CONFIG_CORRUPT'})
 PUBLIC_KEYS = frozenset('''ok code installed version enabled phase diagnosticCode daemon running
 reachable relayEnabled relayVerified relayVerifiedAt providers provider label status modes id
 isDefault defaultModeId models defaultThinkingOptionId thinkingOptions chatVerified chatVerifiedAt
 checkedAt passed firstReply followup model modeId thinking agentId message reply errorCode
 available authentication loginHint chatErrorCode cleanup archived workspaceArchived
-selectedTarget activeTarget configurationPending target saved configCheck prepare stage at requiredMiB availableMiB'''.split())
+selectedTarget activeTarget configurationPending target saved configCheck paths prepare stage at requiredMiB availableMiB stopRefused'''.split())
 # Free text hides any official app link and the pairing offer of any other URL (the `#offer=` or
 # `#connect=` fragment onward). Every alternative starts at a fixed token, so no scan runs forward
 # from each character: an earlier form began with an unbounded run before the `#` and took
@@ -118,9 +124,12 @@ def get_hermes_home():
     return Path(resolve_home()).expanduser().absolute()
 
 
-def validate_input(action, value=None):
+def validate_input(action, value=None, fields=None):
     value = {} if value is None else value
-    if action not in FIELDS or not isinstance(value, dict) or any(k not in FIELDS[action] for k in value):
+    table = FIELDS if fields is None else fields
+    if action not in table or not isinstance(value, dict) or any(k not in table[action] for k in value):
+        raise BridgeError('INVALID_REQUEST')
+    if action == 'stop' and value.get('reason', 'disable') != 'disable':
         raise BridgeError('INVALID_REQUEST')
     if action in ('models', 'chat') and (not isinstance(value.get('provider'), str) or value['provider'] not in PROVIDERS):
         raise BridgeError('INVALID_PROVIDER')
@@ -408,6 +417,8 @@ class Bridge:
         self._retry_at = None
         self._retry_count = 0
         self._prepare_attempted = False
+        self._stop_guarded = False
+        self._stop_refusal = None
         self._operation_lock = threading.Lock()
 
     def dashboard_origin(self):
@@ -632,7 +643,7 @@ class Bridge:
                 _write_json(path, record)
 
     def _invoke(self, action, value=None):
-        value = validate_input(action, value)
+        value = validate_input(action, value, NODE_FIELDS)
         env = self.environment()
         node = resolve_executable('node', env)
         if not node:
@@ -685,6 +696,8 @@ class Bridge:
                 result['enabled'] = False
             if self._error:
                 result['diagnosticCode'] = self._error
+            if self._stop_refusal:
+                result['stopRefused'] = dict(self._stop_refusal)
         return result
 
     def status(self, fresh=False):
@@ -817,6 +830,7 @@ class Bridge:
                 return self._decorate(self._cache)
             if self._worker is None or not self._worker.is_alive():
                 self._pause_requested = False
+                self._stop_refusal = None
                 with _state_lock(self.state_dir):
                     record = _read_json(self.state_dir / 'onboarding.json')
                     record['paused'] = False
@@ -832,26 +846,56 @@ class Bridge:
 
     def _background_stop(self):
         try:
-            self._finish_stop()
+            self._finish_stop(None)
         except Exception:
             pass  # the safe error code is already visible in status
 
-    def _finish_stop(self):
+    def _lift_pause(self, code):
+        """A stop the runtime refused changed nothing: the daemon keeps serving, so neither the memory
+        flag nor the persisted pause may outlive it (a paused bridge blocks pairing and recovery)."""
+        with self._condition:
+            self._pause_requested = False
+            self._phase = self._error = None
+            self._stop_refusal = {'code': code, 'at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
+            try:
+                with _state_lock(self.state_dir):
+                    record = _read_json(self.state_dir / 'onboarding.json')
+                    if record is not None and record.get('paused'):
+                        record['paused'] = False
+                        _write_json(self.state_dir / 'onboarding.json', record)
+            except (BridgeError, OSError):
+                pass  # the refusal is the answer; the next start clears a pause that could not be written here
+
+    def _finish_stop(self, guard):
+        """Stop through the runtime. `guard` is a user's stop to move to a new release, which the runtime
+        refuses when that release could not start (the daemon keeps running); False is the host turning
+        the plugin off, which is never refused. None takes the guard of a stop queued behind a start."""
+        if guard is None:
+            with self._condition:
+                guard = self._stop_guarded
         try:
             with self._operation_lock:
-                result = self._invoke('stop')
+                result = self._invoke('stop') if guard else self._invoke('stop', {'reason': 'disable'})
                 with self._condition:
                     self._phase = self._error = None
                 return result
         except Exception as error:
-            with self._condition:
-                self._phase = 'error'
-                self._error = error.code if isinstance(error, BridgeError) else 'STOP_FAILED'
+            code = error.code if isinstance(error, BridgeError) else 'STOP_FAILED'
+            if code in STOP_REFUSALS:
+                self._lift_pause(code)
+            else:
+                with self._condition:
+                    self._phase = 'error'
+                    self._error = code
             raise
         finally:
             self.invalidate()
 
-    def call(self, action, value=None, allow_pair=False):
+    def call(self, action, value=None, allow_pair=False, guard_config=False):
+        """Run a runtime action. `guard_config` marks a user's stop that moves an older daemon to this
+        release (the Dashboard's Stop): the runtime then refuses it while the new release cannot take over.
+        Without it a stop is never refused, which is what the host adapter's disable and remove rely on
+        (it calls `call('stop', {})`) and what the explicit /paseo stop before a removal means."""
         value = validate_input(action, value)
         if action == 'pair' and not allow_pair:
             raise BridgeError('INVALID_REQUEST')
@@ -866,6 +910,7 @@ class Bridge:
                 with self._condition:
                     self._pause_requested = True
                     self._phase = 'stopping'
+                    self._stop_refusal = None
                     # Persist pause before waiting for npm/daemon startup. Explicit
                     # /start is the only operation that can resume it.
                     with _state_lock(self.state_dir):
@@ -874,13 +919,16 @@ class Bridge:
                             record['paused'] = True
                             _write_json(self.state_dir / 'onboarding.json', record)
                     if self._worker is not None and self._worker.is_alive():
-                        if self._stop_worker is None or not self._stop_worker.is_alive():
+                        queued = self._stop_worker is not None and self._stop_worker.is_alive()
+                        # A queued stop is as unguarded as its least guarded request.
+                        self._stop_guarded = guard_config and (self._stop_guarded if queued else True)
+                        if not queued:
                             context = contextvars.copy_context()
                             self._stop_worker = threading.Thread(target=lambda: context.run(self._background_stop),
                                                                  name='hermes-paseo-stop', daemon=True)
                             self._stop_worker.start()
                         return self._decorate({'enabled': False, 'phase': 'stopping'})
-                result = self._finish_stop()
+                result = self._finish_stop(guard_config)
                 return self._decorate(result)
             result = self._invoke(action, value)
             if action == 'acceptance' and result.get('passed') is True:

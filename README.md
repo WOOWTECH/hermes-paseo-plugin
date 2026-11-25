@@ -35,7 +35,12 @@ Gitea 原始碼鏡像：<https://git-prod.woowtech.io/mirror/hermes-paseo-plugin
 - PaaS 自動更新器本身就是「舊版程式停止 → 安裝 → 新版程式啟動」，插件不需要也不應該再自行重啟。
 - HA 從 Hermes Plugins 以 Git pull 更新，Dashboard 重載不會停止獨立的 daemon；自動重啟會中斷進行中的代理回合。重啟附加元件時容器內所有程序重開，daemon 會直接以新版啟動。
 
-0.17.4 若無法讀取目前設定，頁面顯示 `CONFIG_INCOMPATIBLE`，停止服務會被拒絕，避免停止後無法再啟動；請先修正 `config.json`。
+0.17.4 若無法讀取目前設定，頁面顯示「需要修正設定」並列出不相容的設定**路徑**（只有鍵的路徑，不含內容），「停止服務」會被拒絕以避免停止後無法再啟動；被拒絕的停止不會留下暫停，daemon 與配對照常。處理方式：
+
+- 設定檔是 `$HERMES_HOME/plugin-data/hermes-paseo/daemon/config.json`（PaaS 與 HA 預設 `HERMES_HOME=/opt/data`，即 `/opt/data/plugin-data/hermes-paseo/daemon/config.json`）。
+- 路徑清單也可由命令列取得：`node "$HERMES_HOME/plugins/hermes-paseo/bin/control.mjs" status <<< '{}'` 的 `configCheck.paths`。
+- 備份後移除或改正那些路徑；頁面讀取狀態時會自動重新檢查，通過後再按「停止服務」與「恢復服務」。
+- 不想修正、只想停用或移除插件：Hermes Web 的停用／移除**不受這項檢查阻擋**，daemon 會被直接停止。細節見[維運](docs/operations.zh-TW.md#設定不相容停止被拒絕與處理方式)。
 
 - **退回 rc.9**：rc.9 可停止 0.17.4 daemon 並以 0.11.2 重新啟動（已實測）。但 0.17.4 會把代理紀錄的 `config.featureValues` 改寫成 `controls`，退回後這些代理選項（例如思考等級）會遺失、需重新選擇；選了 Smart 標的時要先切回 Paseo。
 - **0.17.4 新預設，插件維持原樣不覆寫**：`agents.idleRuntimeCleanup` 會在代理閒置 60 分鐘後關閉其執行環境，下次訊息再啟動接續；`daemon.usage.enabled` 讓內建 Claude／Codex 用量來源讀取 `~/.claude/.credentials.json`、`~/.codex/auth.json` 並呼叫 Anthropic／ChatGPT 用量 API（0.11.2 已內含、只是沒有開關）。不寫入的原因：0.11.2 的嚴格設定不認得這兩個鍵，寫入後就無法退回 rc.9。

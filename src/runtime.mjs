@@ -16,6 +16,7 @@ import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,pr
 import {hostCapacity,INSTALL_PEAK_MIB,OUT_OF_SPACE_MIB} from './host-capacity.mjs';
 import {demonstrablyReusedPid,linuxContainerIdentity,instanceFromPreviousContainer} from './daemon-identity.mjs';
 import {managedFeatures} from './daemon-config.mjs';
+import {configIssuePaths,issueKeyPaths} from './config-issues.mjs';
 import {CONNECTION_TARGETS,DEFAULT_TARGET,connectionTarget,selectedTarget,saveSelectedTarget,targetEnvironment,targetConfiguration,targetPairUrl} from './connection-targets.mjs';
 export { locations, readState, updateState } from './state.mjs';
 export { PASEO_VERSION };
@@ -271,7 +272,8 @@ async function loadDaemonConfig(root) {
   if (!fs.existsSync(file)) return {};
   try { JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { throw new RuntimeError('CONFIG_CORRUPT'); }
   const { readPersistedConfig } = await persistedConfig(root);
-  try { return readPersistedConfig(loc.paseoHome); } catch { throw new RuntimeError('CONFIG_INCOMPATIBLE'); }
+  try { return readPersistedConfig(loc.paseoHome); }
+  catch (error) { throw new RuntimeError('CONFIG_INCOMPATIBLE', 'CONFIG_INCOMPATIBLE', { paths: configIssuePaths(error) }); }
 }
 /** The config this plugin runs `root`'s daemon with: the loaded file plus the managed keys. */
 async function buildDaemonConfig(root, port, launchers) {
@@ -292,10 +294,23 @@ async function buildDaemonConfig(root, port, launchers) {
   // Relay, app and CORS for the selected target; other origins and keys are kept.
   return { config: targetConfiguration(config, selectedTarget(loc)), providersChanged };
 }
+/** What this release made of config.json, for the status; only key paths of the settings it refused, never values. */
+function recordConfigCheck(ok, code, paths = []) {
+  const previous = readState().upgradeCheck;
+  // An unchanged answer is not written again: a failing check is repeated while the status is polled.
+  if (previous?.revision === RUNTIME_REVISION && previous.ok === ok && previous.code === code && JSON.stringify(previous.paths ?? []) === JSON.stringify(paths)) return;
+  updateState({ upgradeCheck: { revision: RUNTIME_REVISION, ok, ...(ok ? {} : { code, paths }), checkedAt: new Date().toISOString() } });
+}
 /** Written for this release's daemon: the one about to start, or a running one of this revision. */
 export async function writeDaemonConfig(port, launchers) {
   const loc = locations(), root = runtimeDirectory(loc), file = path.join(loc.paseoHome, 'config.json');
-  const { config, providersChanged } = await buildDaemonConfig(root, port, launchers);
+  let built;
+  try { built = await buildDaemonConfig(root, port, launchers); }
+  catch (error) {
+    if (['CONFIG_CORRUPT', 'CONFIG_INCOMPATIBLE'].includes(error.code)) recordConfigCheck(false, error.code, error.details?.paths);
+    throw error;
+  }
+  const { config, providersChanged } = built;
   const { savePersistedConfig } = await persistedConfig(root);
   try { savePersistedConfig(loc.paseoHome, config); fs.chmodSync(file, 0o600); } catch { throw new RuntimeError('CONFIG_INVALID'); }
   updateState({ port, providerLaunchers: launchers });
@@ -303,22 +318,23 @@ export async function writeDaemonConfig(port, launchers) {
 }
 /**
  * Whether this release can run with the current config.json, decided in memory before an
- * earlier release's daemon is stopped for the upgrade. Throws CONFIG_INCOMPATIBLE otherwise.
+ * earlier release's daemon is stopped for the upgrade. Throws CONFIG_INCOMPATIBLE otherwise, and
+ * records which key paths it refused (never their values) for the status.
  */
 export async function checkDaemonConfig() {
   const loc = locations(), root = runtimeDirectory(loc);
   if (!runtimeReady(loc)) return false;
-  const checkedAt = new Date().toISOString();
   try {
     const { config } = await buildDaemonConfig(root, loc.port, readState().providerLaunchers || {});
     const { PersistedConfigSchema } = await persistedConfig(root);
-    if (!PersistedConfigSchema.safeParse(config).success) throw new RuntimeError('CONFIG_INCOMPATIBLE');
+    const result = PersistedConfigSchema.safeParse(config);
+    if (!result.success) throw new RuntimeError('CONFIG_INCOMPATIBLE', 'CONFIG_INCOMPATIBLE', { paths: issueKeyPaths(result.error?.issues) });
   } catch (error) {
     const code = ['CONFIG_CORRUPT', 'CONFIG_INCOMPATIBLE'].includes(error.code) ? error.code : 'CONFIG_INCOMPATIBLE';
-    updateState({ upgradeCheck: { revision: RUNTIME_REVISION, ok: false, code, checkedAt } });
+    recordConfigCheck(false, code, code === 'CONFIG_INCOMPATIBLE' ? error.details?.paths ?? [] : []);
     throw new RuntimeError(code);
   }
-  updateState({ upgradeCheck: { revision: RUNTIME_REVISION, ok: true, checkedAt } });
+  recordConfigCheck(true);
   return true;
 }
 function safeProvider(entry) {
@@ -391,7 +407,13 @@ export async function activate(options = {}) {
     } catch (error) { updateState({ phase: error.code === 'RESTART_REQUIRED' ? 'restart_required' : 'error', lastError: { code: safeCode(error), at: new Date().toISOString() } }); throw new RuntimeError(safeCode(error)); }
   }, { timeoutMs: options.lockTimeoutMs || 360000 });
 }
-export async function deactivate() {
+/**
+ * Stops the daemon. By default this is the stop that moves an earlier release's daemon to this one,
+ * so it is refused when this release could not start again (see below). `reason: 'disable'` is the
+ * plugin being turned off or removed, or a stop with no new release to move to: nothing is started
+ * afterwards, so no upgrade check applies and the daemon is always stopped.
+ */
+export async function deactivate({ reason } = {}) {
   return withRuntimeLock(async () => {
     updateState({ desiredEnabled: false });
     // Read, verify and stop through one release: an earlier daemon is stopped by its own modules.
@@ -405,7 +427,7 @@ export async function deactivate() {
       await verifyInstanceOwnership(instance, root);
       // Stopping an earlier release's daemon is the first half of the upgrade. When this release
       // is installed, its config must load first: otherwise Paseo would stay down after the stop.
-      if (instanceNeedsRuntimeRestart(instance) && runtimeReady(locations())) {
+      if (reason !== 'disable' && instanceNeedsRuntimeRestart(instance) && runtimeReady(locations())) {
         // Refused: the daemon keeps serving, so the recorded intent stays enabled.
         try { await checkDaemonConfig(); } catch (error) { updateState({ desiredEnabled: true }); throw error; }
       }
@@ -449,7 +471,12 @@ export async function status() {
 }
 const semver = value => typeof value === 'string' && /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]{1,40})?$/.test(value) ? value : null;
 async function readStatus() {
-  const loc = locations(); const state = readState(); const installed = runtimeReady(loc); const owned = ownsHome();
+  const loc = locations(); const installed = runtimeReady(loc); const owned = ownsHome();
+  // A config this release refused is looked at again while the status is read, so fixing the file
+  // clears the notice without a stop. An unchanged answer writes nothing.
+  const refused = readState().upgradeCheck;
+  if (installed && refused?.revision === RUNTIME_REVISION && refused.ok === false) { try { await checkDaemonConfig(); } catch { /* still refused: recorded */ } }
+  const state = readState();
   const verification = state.relayVerification;
   let diagnosticCode = ['RESTART_REQUIRED', 'CONFIG_INCOMPATIBLE'].includes(state.lastError?.code) ? state.lastError.code : null;
   let target = DEFAULT_TARGET, activeTarget = null;
@@ -488,7 +515,7 @@ async function readStatus() {
   const configurationPending = state.configurationPending === true || (daemon.running && activeTarget !== target);
   // What this release made of config.json the last time it was checked (an upgrade stop or a prepare).
   const check = state.upgradeCheck?.revision === RUNTIME_REVISION ? state.upgradeCheck : null;
-  const configCheck = check ? { ok: check.ok === true, code: check.ok === true ? null : check.code || 'CONFIG_INCOMPATIBLE', checkedAt: check.checkedAt || null } : null;
+  const configCheck = check ? { ok: check.ok === true, code: check.ok === true ? null : check.code || 'CONFIG_INCOMPATIBLE', paths: check.ok === true ? [] : check.paths ?? [], checkedAt: check.checkedAt || null } : null;
   // Whether this release can be started: installed, or why the last install did not finish.
   const attempt = state.runtimeInstall?.revision === RUNTIME_REVISION && state.runtimeInstall.ok === false ? state.runtimeInstall : null;
   const prepared = installed ? { stage: 'ready' } : attempt

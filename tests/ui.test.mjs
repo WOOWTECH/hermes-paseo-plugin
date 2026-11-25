@@ -951,3 +951,86 @@ test('an older daemon after a plugin update keeps serving and names the restart;
   assert.match(content(app.tree()), /因此無法啟動/);
   assert.doesNotMatch(content(app.tree()), /停止服務會被拒絕/);
 });
+
+const refusedBy = (paths = ['daemon.keepAliveSeconds']) => targeted({ diagnosticCode: 'CONFIG_INCOMPATIBLE', daemon: { running: true, reachable: true, version: '0.11.2' },
+  configCheck: { ok: false, code: 'CONFIG_INCOMPATIBLE', paths, checkedAt: '2026-11-25T00:00:00Z' } });
+const savedPause = app => JSON.parse(app.storage.get('hermes-paseo:ui:v1') || '{}').paused;
+
+test('an incompatible config lists the offending key paths and where the file is, never a value', async () => {
+  const app = host({ status: refusedBy(['daemon.keepAliveSeconds', 'agents.providers.claude.enabled', '<img src=x onerror=alert(1)>']) });
+  await app.mount('page');
+  const text = content(app.tree());
+  assert.match(text, /不相容的設定項目（只列路徑，不含內容）/);
+  const paths = nodes(app.tree()).filter(row => row.type === 'code').map(row => content(row));
+  assert.deepEqual(paths, ['daemon.keepAliveSeconds', 'agents.providers.claude.enabled', '<img src=x onerror=alert(1)>'], 'shown as text, one element each');
+  assert.match(text, /plugin-data\/hermes-paseo\/daemon\/config\.json/);
+  assert.match(text, /停用與移除不受這項檢查阻擋/);
+  assert.match(text, /修正後本頁會自動重新檢查/);
+  // Without paths (an older backend, or an unreadable check) the notice stays, minus the list.
+  app.status(targeted({ diagnosticCode: 'CONFIG_INCOMPATIBLE', daemon: { running: true, reachable: true, version: '0.11.2' } })); await app.advance(2000);
+  assert.doesNotMatch(content(app.tree()), /不相容的設定項目/);
+  assert.match(content(app.tree()), /新版 Paseo 無法讀取目前的設定/);
+  // Only strings count, at most twenty, control characters removed.
+  app.status(refusedBy(['ok.path', 5, null, '', '   ', 'bad\u0007name', ...Array.from({ length: 30 }, (_, i) => 'key' + i)])); await app.advance(2000);
+  const shown = nodes(app.tree()).filter(row => row.type === 'code').map(row => content(row));
+  assert.equal(shown.length, 20);
+  assert.deepEqual(shown.slice(0, 2), ['ok.path', 'badname']);
+});
+
+test('fixing the file clears the notice at the next read', async () => {
+  const app = host({ status: refusedBy() }); await app.mount('page');
+  assert.match(content(app.tree()), /需要修正設定/);
+  app.status(targeted({ diagnosticCode: 'RESTART_REQUIRED', daemon: { running: true, reachable: true, version: '0.11.2' }, configCheck: { ok: true, code: null, paths: [], checkedAt: 'x' } })); await app.advance(2000);
+  assert.doesNotMatch(content(app.tree()), /需要修正設定|不相容的設定項目/);
+  assert.match(content(app.tree()), /需要重新啟動/);
+});
+
+test('a stop the service refuses is explained, and the page is not left waiting for a stop that will not come', async () => {
+  const storage = new Map();
+  const app = host({ status: refusedBy(), storage }); await app.mount('page');
+  app.handle('/stop', () => ({ httpError: 412 }));
+  await app.click('停止服務');
+  assert.equal(count(app, '/stop', 'POST'), 1);
+  assert.match(content(app.tree()), /停止被拒絕/);
+  assert.equal(savedPause(app), false, 'no pause recorded for a stop that did nothing');
+  assert.doesNotMatch(content(app.tree()), /停止待確認|已手動停止/);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, false, 'the running daemon still pairs');
+  assert.equal(buttonNode(app, '停止服務').props.disabled, false);
+  assert.equal(count(app, '/start'), 0);
+  // A reload keeps nothing paused either.
+  const reload = host({ status: refusedBy(), storage }); await reload.mount('page');
+  assert.doesNotMatch(content(reload.tree()), /停止待確認|已手動停止/);
+  // Any other failure of a stop still keeps the pause: the stop may have happened.
+  const failing = host({ status: targeted({ daemon: { running: true, reachable: true } }) }); await failing.mount('page');
+  failing.handle('/stop', () => ({ httpError: 503 }));
+  await failing.click('停止服務');
+  assert.equal(savedPause(failing), true);
+});
+
+test('a stop that was queued and then refused ends the pause once, and is not announced again after a reload', async () => {
+  const storage = new Map();
+  const app = host({ storage }); await app.mount('page');
+  app.handle('/stop', () => { app.status(snapshot({ enabled: false, phase: 'stopping' })); return { enabled: false, phase: 'stopping' }; });
+  await app.click('停止服務');
+  assert.equal(savedPause(app), true);
+  // The service declined it later: running again, enabled, with the refusal named by time.
+  app.handle('/status', () => snapshot({ stopRefused: { code: 'CONFIG_INCOMPATIBLE', at: '2026-11-25T01:00:00+00:00' } }));
+  await app.advance(2000);
+  assert.equal(savedPause(app), false);
+  assert.match(content(app.tree()), /停止被拒絕/);
+  assert.doesNotMatch(content(app.tree()), /停止待確認|已手動停止/);
+  const reload = host({ status: snapshot({ stopRefused: { code: 'CONFIG_INCOMPATIBLE', at: '2026-11-25T01:00:00+00:00' } }), storage });
+  await reload.mount('page');
+  assert.doesNotMatch(content(reload.tree()), /停止被拒絕/, 'the same refusal is told once per browser session');
+  // A newer refusal is told again.
+  reload.status(snapshot({ stopRefused: { code: 'CONFIG_INCOMPATIBLE', at: '2026-11-25T02:00:00+00:00' } })); await reload.advance(2000);
+  assert.match(content(reload.tree()), /停止被拒絕/);
+});
+
+test('a refusal never overrides a stop that is really pending', async () => {
+  const storage = new Map([['hermes-paseo:ui:v1', JSON.stringify({ started: [], guided: [], paused: true })]]);
+  const app = host({ storage, status: snapshot({ enabled: false, phase: 'stopping', stopRefused: { code: 'CONFIG_INCOMPATIBLE', at: 'old' } }) });
+  await app.mount('page');
+  assert.equal(savedPause(app), true, 'a stale refusal next to a pending stop changes nothing');
+  assert.doesNotMatch(content(app.tree()), /停止被拒絕/);
+});

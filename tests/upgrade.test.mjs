@@ -10,6 +10,7 @@ import { locations, readState, updateState, processIdentity } from '../src/state
 import { activate, deactivate, status, writeDaemonConfig, checkDaemonConfig, saveConnectionSettings } from '../src/runtime.mjs';
 import { RUNTIME_REVISION, PRIOR_RELEASES, pruneUnusedPriorReleases, priorRuntimeDirectory, runtimeDirectory } from '../src/runtime-layout.mjs';
 import { saveSelectedTarget, CONNECTION_TARGETS } from '../src/connection-targets.mjs';
+import { validateInput, publicStatus } from '../src/control.mjs';
 import { fixture, lifecycleModules, seedCurrentRelease, seedPriorRelease, fakeSupervisor, providerlessPath } from './release-fixtures.mjs';
 
 const R2 = PRIOR_RELEASES.find(row => row.generation === 'r2').revision;
@@ -273,4 +274,82 @@ test('any other stop failure, or one that leaves the supervisor running, is stil
   await assert.rejects(deactivate(), { code: 'TERMINAL_CLEANUP_NOT_CONFIRMED' });
   assert.ok(processIdentity(child.pid));
   assert.equal(readState().stopWarning, undefined);
+});
+
+// A refused stop and the host turning the plugin off: the same incompatible config, two different intents.
+async function refusedByConfig(t, config) {
+  const f = fixture(); t.after(() => f.close());
+  const loc = owned();
+  seedPriorRelease(loc, { modules: lifecycleModules('prior') });
+  seedCurrentRelease(loc, { persistedConfig: true, modules: lifecycleModules('current') });
+  const file = path.join(loc.paseoHome, 'config.json');
+  fs.writeFileSync(file, JSON.stringify(config));
+  const { child } = await fakeSupervisor(f, loc.paseoHome, { HERMES_PASEO_RUNTIME_REVISION: R2 });
+  return { f, loc, file, child };
+}
+
+test('the host disabling or removing the plugin stops an older daemon even when its config could not load', async t => {
+  const { loc, file, child } = await refusedByConfig(t, { version: 1, daemon: { keepAliveSeconds: 30 } });
+  await assert.rejects(deactivate(), { code: 'CONFIG_INCOMPATIBLE' });
+  assert.ok(processIdentity(child.pid), 'a user stop to move to the new release is refused');
+  assert.equal(readState().desiredEnabled, true);
+  const result = await deactivate({ reason: 'disable' });
+  assert.equal(result.phase, 'disabled');
+  assert.equal(handled(loc, 'stopped-by'), 'prior', 'still through the release that started it');
+  assert.ok(await gone(child));
+  assert.equal(readState().desiredEnabled, false);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { version: 1, daemon: { keepAliveSeconds: 30 } }, 'nothing was rewritten');
+});
+
+test('only the disable reason skips the check; any other stop input is rejected before it runs', () => {
+  assert.deepEqual(validateInput('stop', {}), {});
+  assert.deepEqual(validateInput('stop', { reason: 'disable' }), { reason: 'disable' });
+  for (const input of [{ reason: 'upgrade' }, { reason: '' }, { reason: true }, { force: true }, { reason: 'disable', extra: 1 }]) {
+    assert.throws(() => validateInput('stop', input), { code: 'INVALID_REQUEST' }, JSON.stringify(input));
+  }
+});
+
+test('a refused config is named by key paths only; no value reaches the state or the status', async t => {
+  const marker = 'hunter2-never-shown-anywhere';
+  const { loc, child } = await refusedByConfig(t, { version: 1, daemon: { keepAliveSeconds: marker, listen: 12345 },
+    agents: { providers: { claude: { enabled: marker, env: { HOME: marker } } } } });
+  await assert.rejects(deactivate(), { code: 'CONFIG_INCOMPATIBLE' });
+  const shown = await status();
+  assert.equal(shown.configCheck.ok, false);
+  assert.deepEqual([...shown.configCheck.paths].sort(), ['agents.providers.claude.enabled', 'daemon.keepAliveSeconds', 'daemon.listen']);
+  const everything = JSON.stringify([readState(), shown, publicStatus(shown)]);
+  assert.equal(everything.includes('hunter2'), false);
+  assert.deepEqual(publicStatus(shown).configCheck.paths, shown.configCheck.paths);
+  assert.ok(processIdentity(child.pid));
+  assert.equal(handled(loc, 'stopped-by'), '');
+});
+
+test('an error in a managed key is named too, and a key that is merely unknown is not mistaken for its parent', async t => {
+  // Valid for the loader, refused once this release adds its own managed settings: the second validation names its path.
+  const { loc } = await refusedByConfig(t, { version: 1 });
+  seedCurrentRelease(loc, { persistedConfig: true });
+  const real = await realLoader(runtimeDirectory(loc));
+  assert.equal(real.PersistedConfigSchema.safeParse({ version: 1, daemon: { a: 1, b: 2 } }).success, false);
+  fs.writeFileSync(path.join(loc.paseoHome, 'config.json'), JSON.stringify({ version: 1, daemon: { a: 1, b: 2 }, extra: 1 }));
+  await assert.rejects(checkDaemonConfig(), { code: 'CONFIG_INCOMPATIBLE' });
+  assert.deepEqual([...readState().upgradeCheck.paths].sort(), ['daemon.a', 'daemon.b', 'extra']);
+});
+
+test('fixing config.json clears the refusal without a stop, and breaking it again brings it back', async t => {
+  const { loc, file, child } = await refusedByConfig(t, { version: 1, daemon: { keepAliveSeconds: 30 } });
+  await assert.rejects(deactivate(), { code: 'CONFIG_INCOMPATIBLE' });
+  assert.equal((await status()).diagnosticCode, 'CONFIG_INCOMPATIBLE');
+  const before = readState().upgradeCheck;
+  assert.equal((await status()).diagnosticCode, 'CONFIG_INCOMPATIBLE');
+  assert.deepEqual(readState().upgradeCheck, before, 'looking again writes nothing while the answer is the same');
+  fs.writeFileSync(file, JSON.stringify(rc9Config()));
+  const fixed = await status();
+  assert.equal(fixed.configCheck.ok, true);
+  assert.deepEqual(fixed.configCheck.paths, []);
+  assert.equal(fixed.diagnosticCode, 'RESTART_REQUIRED');
+  assert.ok(processIdentity(child.pid));
+  fs.writeFileSync(file, JSON.stringify({ version: 1, other: 1 }));
+  await assert.rejects(deactivate(), { code: 'CONFIG_INCOMPATIBLE' });
+  assert.deepEqual((await status()).configCheck.paths, ['other']);
+  assert.equal(handled(loc, 'stopped-by'), '');
 });
