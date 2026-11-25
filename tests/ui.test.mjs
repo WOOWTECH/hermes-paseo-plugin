@@ -553,10 +553,10 @@ test('legacy immediate results survive status polling when acceptanceJob is abse
 
 test('pairing stays as an explicit secure official link and never enters storage, logs or a popup', async () => {
   const app = host(); await app.mount('page');
-  const secretUrl = 'https://app.paseo.sh/pair#token=PRIVATE-PAIR-OFFER';
+  const secretUrl = 'https://app.paseo.sh/#offer=PRIVATE-PAIR-OFFER';
   app.handle('/pair', () => ({ url: secretUrl }));
   await app.click('產生配對連結');
-  const link = nodes(app.tree()).find(node => node.type === 'a' && node.props.target === '_blank');
+  const link = nodes(app.tree()).find(node => node.type === 'a' && content(node) === '使用配對連結開啟 Paseo');
   assert.equal(link.props.href, secretUrl);
   assert.equal(link.props.rel, 'noopener noreferrer');
   assert.equal(link.props.referrerPolicy, 'no-referrer');
@@ -572,7 +572,8 @@ test('pairing stays as an explicit secure official link and never enters storage
 });
 
 test('nonofficial, credentialed or executable pair URLs are rejected without leaking them', async () => {
-  for (const url of ['javascript:alert(1)', 'https://evil.example/?secret=SECRET', 'https://app.paseo.sh.evil.example/pair', 'https://user:SECRET@app.paseo.sh/pair', 'http://app.paseo.sh/pair']) {
+  for (const url of ['javascript:alert(1)', 'https://evil.example/?secret=SECRET', 'https://app.paseo.sh.evil.example/pair', 'https://user:SECRET@app.paseo.sh/pair', 'http://app.paseo.sh/pair',
+    'https://app.paseo.sh/pair#offer=SECRET', 'https://app.paseo.sh/?x=1#offer=SECRET', 'https://app.paseo.sh/#token=SECRET', 'https://smart.woowtech.io/#offer=SECRET']) {
     const app = host(); await app.mount('page');
     app.handle('/pair', () => ({ url })); await app.click('產生配對連結');
     assert.equal(nodes(app.tree()).filter(row => row.type === 'a').length, 0);
@@ -842,4 +843,105 @@ test('explicit Dashboard recovery permits one failed first-start retry without c
     assert.equal(saved.paused, paused);
     assert.equal(count(app, '/start'), 0, 'new initialization waits for the actual refresh');
   }
+});
+
+const targeted = (patch = {}) => snapshot({ selectedTarget: 'paseo', activeTarget: 'paseo', configurationPending: false, ...patch });
+const targetSelect = app => nodes(nodes(app.tree()).find(row => row.type === 'label' && content(row.children[0]) === '連線標的')).find(row => row.type === 'select');
+const linkNamed = (app, name) => nodes(app.tree()).find(row => row.type === 'a' && content(row) === name);
+const offerFor = origin => origin + '/#offer=PRIVATE-' + Buffer.from(origin).toString('base64url');
+
+test('an older backend without targets keeps the Paseo-only page and exact empty POST bodies', async () => {
+  const app = host(); await app.mount('page');
+  assert.equal(targetSelect(app), undefined);
+  assert.equal(linkNamed(app, '開啟 Paseo'), undefined);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, false);
+});
+
+test('targets are offered as Woowtech Smart, Apporo Smart and Paseo, with a link to the saved official app', async () => {
+  const app = host({ status: targeted() }); await app.mount('page');
+  const select = targetSelect(app);
+  assert.deepEqual(select.children.map(option => [option.props.value, content(option)]),
+    [['woowtech', 'Woowtech Smart'], ['apporo', 'Apporo Smart'], ['paseo', 'Paseo']]);
+  assert.equal(select.props.value, 'paseo');
+  const open = linkNamed(app, '開啟 Paseo');
+  assert.equal(open.props.href, 'https://app.paseo.sh/');
+  assert.equal(open.props.target, '_blank');
+  assert.equal(open.props.rel, 'noopener noreferrer');
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, true, 'nothing to save yet');
+  assert.equal(count(app, '/config'), 0);
+});
+
+test('saving a target sends exactly that target, then pairing waits until the daemon restarts with it', async () => {
+  const app = host({ status: targeted() }); await app.mount('page');
+  await app.change('連線標的', 'woowtech');
+  assert.equal(targetSelect(app).props.value, 'woowtech');
+  assert.match(content(app.tree()), /連線標的尚未儲存/);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, true, 'an unsaved target never pairs');
+  assert.equal(linkNamed(app, '開啟 Paseo').props.href, 'https://app.paseo.sh/', 'the link follows the saved target');
+  app.handle('/config', () => { app.status(targeted({ selectedTarget: 'woowtech', configurationPending: true })); return { saved: true, target: 'woowtech', configurationPending: true }; });
+  await app.click('儲存連線標的');
+  const post = app.calls.find(call => call.path.endsWith('/config'));
+  assert.equal(post.init.method, 'POST');
+  assert.equal(post.init.body, '{"target":"woowtech"}');
+  assert.equal(post.init.headers['Content-Type'], 'application/json');
+  assert.match(content(app.tree()), /新的連線標的「Woowtech Smart」等待套用/);
+  assert.match(content(app.tree()), /停止服務」並「恢復服務/);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, true);
+  assert.equal(linkNamed(app, '開啟 Woowtech Smart').props.href, 'https://smart.woowtech.io/');
+  assert.equal(targetSelect(app).props.value, 'woowtech');
+  assert.equal(count(app, '/pair'), 0);
+  // Restarted with the new target: pairing returns its own official app only.
+  app.status(targeted({ selectedTarget: 'woowtech', activeTarget: 'woowtech' })); await app.advance(2000);
+  assert.doesNotMatch(content(app.tree()), /等待套用/);
+  const secret = offerFor('https://smart.woowtech.io');
+  app.handle('/pair', () => ({ url: secret, target: 'woowtech' }));
+  await app.click('產生配對連結');
+  const link = linkNamed(app, '使用配對連結開啟 Woowtech Smart');
+  assert.equal(link.props.href, secret);
+  assert.equal(link.props.referrerPolicy, 'no-referrer');
+  assert.doesNotMatch(content(app.tree()), /PRIVATE/);
+  assert.doesNotMatch(JSON.stringify([...app.storage]), /PRIVATE/);
+  assert.deepEqual(app.logs, []);
+  // Another tab saves a different target: the old link disappears at the next read.
+  app.status(targeted({ selectedTarget: 'apporo', activeTarget: 'woowtech', configurationPending: true })); await app.advance(2000);
+  assert.equal(linkNamed(app, '使用配對連結開啟 Woowtech Smart'), undefined);
+  assert.equal(linkNamed(app, '開啟 Apporo Smart').props.href, 'https://smart.apporo.ai/');
+});
+
+test('a pairing link for another target, or one naming another target, is rejected', async () => {
+  for (const reply of [{ url: offerFor('https://app.paseo.sh') }, { url: offerFor('https://smart.woowtech.io'), target: 'paseo' }, { url: offerFor('https://smart.woowtech.io') + 'x y' }]) {
+    const app = host({ status: targeted({ selectedTarget: 'woowtech', activeTarget: 'woowtech' }) }); await app.mount('page');
+    app.handle('/pair', () => reply); await app.click('產生配對連結');
+    assert.equal(nodes(app.tree()).filter(row => row.type === 'a' && content(row).startsWith('使用配對連結')).length, 0);
+    assert.match(content(app.tree()), /有效的官方連結/);
+    assert.doesNotMatch(content(app.tree()), /PRIVATE/);
+  }
+  const apporo = host({ status: targeted({ selectedTarget: 'apporo', activeTarget: 'apporo' }) }); await apporo.mount('page');
+  apporo.handle('/pair', () => ({ url: offerFor('https://smart.apporo.ai'), target: 'apporo' })); await apporo.click('產生配對連結');
+  assert.equal(linkNamed(apporo, '使用配對連結開啟 Apporo Smart').props.href, offerFor('https://smart.apporo.ai'));
+});
+
+test('a target saved while stopped applies at the next start; choosing the saved target again clears the draft', async () => {
+  const app = host({ status: targeted({ enabled: false, phase: 'disabled', daemon: { running: false, reachable: false }, selectedTarget: 'apporo', activeTarget: null, configurationPending: true }) });
+  await app.mount('page');
+  assert.match(content(app.tree()), /新的連線標的「Apporo Smart」會在下次啟動服務時套用/);
+  await app.change('連線標的', 'paseo');
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, false);
+  await app.change('連線標的', 'apporo');
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, true);
+  assert.doesNotMatch(content(app.tree()), /尚未儲存/);
+  assert.equal(count(app, '/start'), 0, 'saving or choosing never starts the service');
+});
+
+test('an older daemon after a plugin update keeps serving and names the restart; an incompatible config warns before stopping', async () => {
+  const app = host({ status: targeted({ diagnosticCode: 'RESTART_REQUIRED', daemon: { running: true, reachable: true, version: '0.11.2' } }) });
+  await app.mount('page');
+  assert.match(content(app.tree()), /Paseo 執行環境已更新（目前執行 0\.11\.2）/);
+  assert.match(content(app.tree()), /需要重新啟動/);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, false, 'the old daemon still pairs its own target');
+  assert.equal(buttonNode(app, '停止服務').props.disabled, false);
+  assert.equal(count(app, '/start'), 0, 'the page never restarts it by itself');
+  app.status(targeted({ diagnosticCode: 'CONFIG_INCOMPATIBLE', daemon: { running: true, reachable: true, version: '0.11.2' } })); await app.advance(2000);
+  assert.match(content(app.tree()), /新版 Paseo 無法讀取目前的 Paseo 設定/);
+  assert.equal(count(app, '/stop'), 0);
 });
