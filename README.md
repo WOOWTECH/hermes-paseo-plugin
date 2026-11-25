@@ -1,12 +1,14 @@
 # Hermes Paseo plugin
 
-Hermes Agent / Web 插件：啟用後準備固定 Paseo runtime，在受保護的插件頁完成官方加密 relay 配對，於 Paseo 選取 Hermes ACP 模型並建立及接續對話。
+Hermes Agent / Web 插件：啟用後準備固定 Paseo runtime，在受保護的插件頁完成官方加密 relay 配對（可選 Paseo、Woowtech Smart 或 Apporo Smart），於所選的網頁 App 選取 Hermes ACP 模型並建立及接續對話。目前版本 **0.1.5-rc.1**。
 
 公開 repo：<https://github.com/WOOWTECH/hermes-paseo-plugin>。下載不需要 GitHub 帳號或 token。
 
 Gitea 原始碼鏡像：<https://git-prod.woowtech.io/mirror/hermes-paseo-plugin>。每 8 小時從 GitHub 拉取 Git 分支與標籤；Release 說明及附件仍以 GitHub 為準。
 
 完整中文教學：[下載、安裝、部署與測試](docs/install.zh-TW.md)。
+
+**0.1.5-rc.1 新增連線標的**（見下方 [連線標的](#連線標的)）：在插件頁選擇 daemon 使用 Paseo、Woowtech Smart 或 Apporo Smart 的 relay 與網頁 App，預設仍是 Paseo。本版**不更動 daemon，也不更動 runtime 鎖定檔**：受管 daemon 仍是 Paseo 0.11.2，`runtime/package.json` 與 `runtime/package-lock.json` 與 0.1.4-rc.9 位元組相同，已安裝的 runtime 不會重新下載或重新執行 `npm ci`。
 
 目前為公開預覽版本。部署到正式環境前，請在自己的主機完成 Web 安裝／啟用、官方配對及首輪／續聊驗收；各版本的支援範圍與驗收方式見 [實測紀錄](docs/validation.md)。
 
@@ -27,7 +29,7 @@ hermes plugins install WOOWTECH/hermes-paseo-plugin
 hermes plugins enable hermes-paseo
 ```
 
-原生 Agent 插件與 Dashboard 頁面均包含在同一 repo。啟用後開啟 Paseo 頁面，按引導準備服務與產生配對；在新分頁開啟官方 Paseo，按 Connect 完成綁定。全新 Paseo 裝置若顯示 No projects yet，先用 Add project 選擇或建立工作目錄，再於 New workspace 選定 project、Hermes、模型與權限模式。
+原生 Agent 插件與 Dashboard 頁面均包含在同一 repo。啟用後開啟 Paseo 頁面，按引導準備服務；預設標的是 Paseo，也可先選 Woowtech Smart 或 Apporo Smart（見下節）。產生配對連結後，在新分頁開啟該標的的官方網頁 App，按 Connect 完成綁定。全新 Paseo 裝置若顯示 No projects yet，先用 Add project 選擇或建立工作目錄，再於 New workspace 選定 project、Hermes、模型與權限模式。
 
 配置 0.1.4 主機介面時，仍啟用的服務在容器啟動後會準備 runtime，並在 daemon 意外中斷後恢復，不需開啟瀏覽器。手動停止的狀態會保留；Hermes Web 停用／移除插件前也會先確認服務停止。未配置主機介面時，仍使用可見 Web 頁面的恢復流程，CLI 移除前須先停止服務。
 
@@ -38,6 +40,25 @@ hermes plugins enable hermes-paseo
 Hermes 0.19 的 Web 插件列表只在頁面載入時讀取。從插件頁安裝或啟用後，請重新整理一次；插件載入後會自動開啟尚未完成的配對指南。
 
 官方 relay 不需要額外 Paseo 密碼。缺少模型登入時，使用 Hermes 的官方模型／登入設定；不要將密碼、OAuth token 或配對連結貼到聊天中。插件不讀取或複製模型憑證。
+
+## 連線標的
+
+插件頁的 **連線標的** 選擇 daemon 使用哪一組 relay 與網頁 App，做法與 Pi 的 Agent Connect 相同：
+
+| 標的 | 網頁 App | relay |
+|---|---|---|
+| Paseo（預設） | `https://app.paseo.sh` | `relay.paseo.sh:443` |
+| Woowtech Smart | `https://smart.woowtech.io` | `relay.woowtech.io:443` |
+| Apporo Smart | `https://smart.apporo.ai` | `relay.apporo.ai:443` |
+
+- **預設與升級**：沒有人選擇其他標的前，標的是 Paseo。從 0.1.4-rc.9 升級時，仍在執行的舊 daemon 視為 Paseo，不會被重啟、重裝或改設定；它保持原樣直到下一次「停止服務 → 恢復服務」。
+- **儲存只是記錄**：選好後按 **儲存連線標的**，選擇存入 `plugin-data/hermes-paseo/connection.json`；這個動作不會詢問或改動執行中的 daemon，也不取用長時間的 runtime 鎖。頁面顯示「標的已儲存，停止再啟動服務後生效」：先結束使用中的對話，按 **停止服務**，待停止完成再按 **恢復服務**，新標的才套用，之後才能產生它的配對連結。在那之前配對與 relay 驗證都會回報 `CONFIGURATION_PENDING`。
+- **切換保留身分**：切換標的會作廢舊的配對連結與 relay 驗證結果；daemon 的 server ID 與金鑰保留，已配對的裝置在切回同一標的後仍可使用。
+- **套用的內容**：每次啟動 daemon 時，插件依所選標的寫入 `app.baseUrl`、`daemon.relay`（`endpoint`、`publicEndpoint`、`useTls`、`publicUseTls`，TLS 明確寫出）與 `daemon.cors.allowedOrigins`；不屬於這三個標的的 CORS 來源保留。不寫入 `daemon.relay.requireProtectedSecurity`（Paseo 0.11.2 的嚴格設定檔不認得它）。
+- **切換會覆蓋自訂的 relay 與 App 網址**：切換標的（包含切回 Paseo）會經過上表再寫一次設定，所以 `config.json` 裡手動改過的 relay 或 App 網址會被所選標的的值取代。需要自訂值的人，切換前先備份 `plugin-data/hermes-paseo/daemon/config.json`。
+- **品牌識別**：Woowtech／Apporo Smart 的網頁 App 要求 daemon 的握手帶有 `brand: {id, name}`。插件以雜湊釘住的小補丁，在已安裝的 runtime 內就地修改 daemon 的 `websocket-server.js` 一個檔案並放置一個輔助檔，讓握手帶有所選標的的品牌（補丁內容與驗證見[維運文件](docs/operations.zh-TW.md#品牌識別補丁與升級)）。已執行的舊 daemon 不會被補丁影響，補丁在下次啟動前才套用。
+- **配對連結**只會是所選標的的網頁 App（`<網頁 App>/#offer=…`），而且不會寫入任何檔案；舊版留下的 `pairing.private.json` 會在啟用時刪除。
+- **回滾到 0.1.4-rc.9**：先在插件頁切回 **Paseo**，停止再恢復服務，確認配對連結是 `app.paseo.sh`，再降版。rc.9 接受已補丁的 runtime（它只檢查鎖定檔與 CLI 版本），但只放行 `app.paseo.sh` 的配對連結；daemon 仍是 Smart 標的時，rc.9 的 daemon 能啟動，卻會拒絕產生配對連結（`PAIRING_ORIGIN_INVALID`）。
 
 ## 在 Hermes 對話調用插件
 
@@ -57,7 +78,7 @@ Linux、Python 3.11+、Node.js 22.19.0+、npm、util-linux flock；Hermes 須支
 
 每個 Hermes profile 的 plugin-data/hermes-paseo 存放 runtime、Paseo home、狀態與初始化紀錄；不與 Pi plugin 或使用者原來的 Paseo home 混用。停止後保留手動暫停、登入與對話資料。Hermes 0.19 沒有公開卸載 callback，停用／移除插件前請先在 Paseo 頁按「停止服務」，或執行 `/paseo stop`，確認 `/paseo status` 中 `daemon.running=false` 後再停用；此版本不宣稱停用按鈕會自動清理背景 daemon。其他同容器已安裝的 Claude Code、Codex、Pi 會被偵測；缺少或未登入的 provider 不宣稱能對話。
 
-狀態與診斷不等同真正模型回覆；對話驗收會使用帳號額度，完成後歸檔此次測試 agent、保留紀錄。配對 URL 只在受保護設定頁傳遞，API 使用 no-store/no-referrer。
+狀態與診斷不等同真正模型回覆；對話驗收會使用帳號額度，完成後歸檔此次測試 agent、保留紀錄。配對 URL 只在受保護設定頁傳遞，不寫入任何檔案，API 使用 no-store/no-referrer。
 
 入口代理若清空 Origin 或改寫 Host，必須先驗證允許的正式 Origin，並保留／拒絕瀏覽器 cross-site Fetch Metadata；不可只依靠重寫後的後端 Origin 判斷。
 
@@ -74,6 +95,7 @@ python3 ~/.hermes/plugins/hermes-paseo/bin/configure-origin.py https://hermes.ex
 ```bash
 node --test tests/*.test.mjs
 python -m unittest discover -s tests -p 'test_*.py'
+node --check dashboard/dist/index.js
 npm audit --omit=dev --prefix runtime
 ```
 
