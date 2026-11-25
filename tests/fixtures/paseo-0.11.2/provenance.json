@@ -4,7 +4,7 @@
   "version": "0.11.2",
   "source": "registry tarball https://registry.npmjs.org/@getpaseo/server/-/server-0.11.2.tgz; the file is copied unmodified and only gzip-compressed (gzip -9 -n)",
   "tarballIntegrity": "sha512-HNeiGsLrkZOFGHoYXodZ4u3ewlvFHZjm/sqBUkxDjFx6QnxOyRyfQnRDk48mhtR+l+n6+2GPlTY2v0uaObHUDw==",
-  "integrityCheckedAgainst": "runtime/package-lock.json (npm ci installs exactly this tarball), and the sha512 of a freshly packed tarball",
+  "integrityCheckedAgainst": "runtime/package-lock.json (npm ci installs exactly this tarball); the sha512 of the registry tarball this file was taken from equals it",
   "websocketServer": {
     "file": "websocket-server.js.gz",
     "path": "dist/server/server/websocket-server.js",
