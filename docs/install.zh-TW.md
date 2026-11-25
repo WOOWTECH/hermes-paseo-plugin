@@ -118,7 +118,7 @@ python3 ~/.hermes/plugins/hermes-paseo/bin/configure-origin.py https://hermes.ex
 
 1. 開啟 Hermes 側欄的 **Paseo**，或自己的 Hermes 網址加 `/paseo`。尚未完成設定時，插件載入後會自動導向此頁。
 2. 等待 **服務已就緒**。第一次會下載並啟動固定 Paseo runtime；已手動停止時，按 **恢復服務**。
-3. 在 **連線標的** 選擇要連接的平台：**Woowtech Smart**、**Apporo Smart** 或預設的 **Paseo**，按 **儲存連線標的**。已選標的的網頁 App 可用旁邊的 **開啟 <標的名稱>** 開啟。看到「標的已儲存，停止再啟動服務後生效」時，先結束使用中的對話，按 **停止服務**，等停止完成再按 **恢復服務**；之後才能配對。切換標的不會改變 daemon 的 server ID 與金鑰，已配對的裝置在切回同一標的後仍可使用。第一次使用且保持 Paseo 時可略過這一步。
+3. 在 **連線標的** 選擇要連接的平台：**Woowtech Smart**、**Apporo Smart** 或預設的 **Paseo**，按 **儲存連線標的**。已選標的的網頁 App 可用旁邊的 **開啟 <標的名稱>** 開啟。看到「標的已儲存，停止再啟動服務後生效」時，先結束使用中的對話，按 **停止服務**，等停止完成再按 **恢復服務**；之後才能配對。切換標的不會改變 daemon 的 server ID 與金鑰，已配對的裝置在切回同一標的後仍可使用。第一次使用且要用 Paseo 的官方 relay、不想讓插件改動 daemon 設定時可略過這一步：頁面會顯示「尚未選擇連線標的」，插件不會改動 daemon 的 `config.json`，配對照舊可用。**儲存標的（包含 Paseo）之後**，每次啟動 daemon 都會依所選標的寫入 relay、App 網址與 CORS 設定，並在第一次改寫前把原來的 `config.json` 備份為同目錄的 `config.json.pre-agent-connect`（只備份一次；還原方式見 [README](../README.md#連線標的)）。
 4. 按 **產生配對連結**，再按 **使用配對連結開啟 <標的名稱>**，在新分頁按 **Connect**。連結只屬於所選標的，且只顯示在這個頁面，不會存檔。標的尚未儲存或還在等待套用時，產生連結的按鈕會停用。
 5. 全新裝置若顯示 **No projects yet**，先按側欄 **Add project**。可用 **Search for directory** 選擇已有工作目錄；或選 **New directory**，輸入主機上的父目錄，按 **Use this parent**，再填 **Directory name** 並按 Enter。HA 可在 `/opt/data` 下建立自己的專案子目錄，資料會持久保存；這是 Hermes 主機上的路徑。
 6. 按 **New workspace**，確認已選定 project；若仍顯示 **Choose project**，先選取剛建立的專案。再開啟 **Select model**；若先看到供應者清單，按 **Hermes** 再選模型，第一次使用 **Default** 權限模式，填訊息並按 **Create**。

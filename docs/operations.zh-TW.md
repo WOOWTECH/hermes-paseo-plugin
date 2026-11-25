@@ -33,7 +33,7 @@ Paseo 插件資料位於 `$HERMES_HOME/plugin-data/hermes-paseo`。可重建的 
 
 ## 連線標的與切換
 
-0.1.5-rc.1 起，daemon 連線的 relay 與網頁 App 由**連線標的**決定：`paseo`（預設）、`woowtech`（Woowtech Smart）、`apporo`（Apporo Smart）。三組各是固定的網頁 App 加自己的 TLS relay，沒有任何請求能帶入其他網址：
+0.1.5-rc.1 起，daemon 連線的 relay 與網頁 App 可以由**連線標的**決定：`paseo`（預設）、`woowtech`（Woowtech Smart）、`apporo`（Apporo Smart）。三組各是固定的網頁 App 加自己的 TLS relay，沒有任何請求能帶入其他網址：
 
 | id | 網頁 App | relay |
 |---|---|---|
@@ -41,22 +41,32 @@ Paseo 插件資料位於 `$HERMES_HOME/plugin-data/hermes-paseo`。可重建的 
 | `woowtech` | `https://smart.woowtech.io` | `relay.woowtech.io:443` |
 | `apporo` | `https://smart.apporo.ai` | `relay.apporo.ai:443` |
 
-- **保存位置**：`plugin-data/hermes-paseo/connection.json`，內容是 `{"version":1,"target":"<id>"}`，權限 `600`。檔案不存在代表 Paseo；內容無法辨識（壞掉、版本不符、多出欄位、不是三個 id 之一）或路徑經過符號連結時回報 `CONNECTION_STATE_CORRUPT`／`UNSAFE_SYMLINK`，不會被當成預設值；在插件頁重新儲存一次即可取代壞掉的紀錄。這個檔案刻意**不是** `preferences.json`：rc.9 遇到沒有顯示名稱的 `preferences.json` 會拒絕啟動，回滾必須行得通。
+- **舊模式與管理模式（選擇才生效）**：沒有人儲存過標的（`connection.json` 不存在）時是**舊模式**，插件的一切與 0.1.4-rc.9 相同：啟動 daemon 不寫入 `app.baseUrl`、`daemon.relay.*`、CORS，不補丁 runtime、不要求補丁，不備份、不刪除任何檔案，`config.json` 與 runtime 目錄逐位元組不變；狀態回報 `selectedTarget: paseo`、`targetSaved: false`、`configurationPending: false`，沒有記錄標的的 daemon 視為 `paseo`。第一次儲存標的（**包含 Paseo**）進入**管理模式**：從下一次啟動 daemon 起才寫入所選標的的設定。因此從 rc.9 自動更新，在有人儲存標的之前什麼都不會改變。
+- **保存位置**：`plugin-data/hermes-paseo/connection.json`，內容是 `{"version":1,"target":"<id>"}`，權限 `600`。這個檔案刻意**不是** `preferences.json`：rc.9 遇到沒有顯示名稱的 `preferences.json` 會拒絕啟動，回滾必須行得通。檔案不存在代表舊模式；內容無法辨識（壞掉、版本不符、多出欄位、不是三個 id 之一）時，狀態回報 `connectionCode: CONNECTION_STATE_CORRUPT`，Dashboard 暫時顯示 Paseo、說明原因、不產生配對連結，啟動也停在這個代碼，**不會**被當成預設值；在插件頁儲存目前顯示（或重新選擇）的標的即可取代壞掉的紀錄。路徑經過符號連結時回報 `UNSAFE_SYMLINK`：插件不會跟隨或取代它，畫面也不提供儲存，必須由管理者處理該路徑。
 - **儲存**：Dashboard 的 **儲存連線標的** 呼叫 `POST /api/plugins/hermes-paseo/config`，本體只有 `{"target":"<id>"}`；同樣經過 Origin、Fetch Metadata、JSON 與大小檢查。對應的 `control.mjs config` 也只收 `target`。它不是模型工具（沒有 `paseo_config`）。儲存只寫 `connection.json` 與狀態旗標，**不詢問任何 daemon、不取用 runtime 鎖**：啟用中的 `npm ci` 可以持鎖數分鐘，儲存不必等它。
-- **等待套用**：標的改變時，設定標為待套用（`configurationPending`）、清除舊標的的 relay 驗證結果與配對紀錄，並保留 daemon 的 server ID 與金鑰。**只有下一次停止再啟動才會套用**；選回目前執行中的標的則不算待套用。狀態回報 `selectedTarget`（已儲存的）、`activeTarget`（執行中 daemon 啟動時的標的；停止時為 `null`）與 `configurationPending`。0.1.5 之前啟動、環境裡沒有標的紀錄的舊 daemon 視為 `paseo`。
+- **等待套用**：標的改變時，設定標為待套用（`configurationPending`）、清除舊標的的 relay 驗證結果與配對紀錄，並保留 daemon 的 server ID 與金鑰。**只有下一次停止再啟動才會套用**；選回目前執行中的標的則不算待套用。第一次儲存而且選的就是目前顯示的 Paseo 不算變更，不會待套用，但它的設定也要到下一次啟動才寫入。狀態回報 `selectedTarget`（已儲存的）、`targetSaved`（是否有人儲存過）、`activeTarget`（執行中 daemon 啟動時的標的；停止時為 `null`）與 `configurationPending`。環境裡沒有標的紀錄的 daemon（rc.9 或舊模式啟動的）視為 `paseo`。
 - **待套用期間**：`pair` 與 `relay` 在向 daemon 要配對邀請或對外連線之前就回報 `CONFIGURATION_PENDING`（只讀取狀態）；對已在執行的 daemon 再按「啟動」只會回報待套用，不改寫設定、不重載。
-- **套用**：每次啟動 daemon（沒有 daemon 在執行時）才寫入 `app.baseUrl`、`daemon.relay`（`enabled`、`endpoint`、`publicEndpoint`、`useTls`、`publicUseTls`）與 `daemon.cors.allowedOrigins`，並以環境變數 `HERMES_PASEO_CONNECTION_TARGET` 把標的交給 daemon（名稱不以 `PASEO_` 開頭，因為受管的 `daemon start` 會移除那些變數）。不屬於三個標的的 CORS 來源保留；`daemon.relay.requireProtectedSecurity` 不寫入（0.11.2 的嚴格設定檔沒有這個欄位，寫了整份設定會失效）。已在執行的 daemon 的 relay 端點與 TLS 不能即時重載，所以對它們不寫入這些設定。
-- **覆蓋自訂值**：每次啟動 daemon 都用所選標的（沒選過就是 Paseo）的值寫入 relay、App 網址與 CORS 來源，所以切換標的（包含切回 Paseo）時，`config.json` 裡自訂的 relay 與 App 網址會被覆蓋；沒有切換、只是停止再啟動，也會被預設標的 Paseo 的值覆蓋。其他設定保留。
-- **配對連結**：`<網頁 App>/#offer=…`，只放行所選標的的精確網址：Node 端檢查 App 網址、路徑 `/`、`#offer=` 片段，邀請必須是版本 2、帶 server ID 與金鑰、relay 端點是該標的的且為 TLS；Python 端再用 `connection.json` 的標的獨立檢查一次。Smart 標的若收到要求最低安全模式的邀請會回報 `PAIRING_SECURITY_UNSUPPORTED`（0.11.2 不會送出這種邀請，這只是防護）。邀請不寫入任何檔案。
+- **套用（管理模式）**：每次啟動 daemon（沒有 daemon 在執行時）才寫入 `app.baseUrl`、`daemon.relay`（`enabled`、`endpoint`、`publicEndpoint`、`useTls`、`publicUseTls`）與 `daemon.cors.allowedOrigins`，並以環境變數 `HERMES_PASEO_CONNECTION_TARGET` 把標的交給 daemon（名稱不以 `PASEO_` 開頭，因為受管的 `daemon start` 會移除那些變數）。不屬於三個標的的 CORS 來源保留，三個 App 的來源以 `URL.origin` 比對，所以 `HTTPS://smart.apporo.ai`、結尾斜線或預設連接埠的寫法與標準寫法視為同一個而不會重複列出；有路徑、查詢或使用者資訊的項目是別人的設定，保留。`daemon.relay.requireProtectedSecurity` 不寫入（0.11.2 的嚴格設定檔沒有這個欄位，寫了整份設定會失效）。已在執行的 daemon 的 relay 端點與 TLS 不能即時重載，所以對它們不寫入這些設定。
+- **一次性備份**：進入管理模式後，第一次為所選標的改寫 `daemon/config.json` 之前，插件把它複製成同目錄的 `config.json.pre-agent-connect`（權限 `600`、一般檔案，以暫存檔寫完整再用 `link()` 放到位，所以不會留下寫到一半的備份）。只做一次（狀態檔 `configBackup` 記錄）；任何已存在的備份（不論是檔案、目錄或別人放的）都不覆蓋；不經過符號連結；`config.json` 不是一般檔案（目錄、FIFO）時回報 `CONFIG_CORRUPT`，不會卡住啟動。沒有 `config.json`（全新安裝）就沒有可備份的內容。備份失敗（`CONFIG_BACKUP_FAILED`、`UNSAFE_SYMLINK`）時不改寫 `config.json`，daemon 不啟動，修好後再試一次。**還原**：停止服務，確認已停止，再執行 `cp -p config.json.pre-agent-connect config.json`；要回到舊模式（插件不再寫入任何標的設定）還要刪除 `plugin-data/hermes-paseo/connection.json`，然後恢復服務。保留 `connection.json` 的話，下一次啟動又會寫入所選標的的設定。
+- **管理模式會覆蓋自訂值**：管理模式下，每次啟動 daemon 都用所選標的（Paseo 也一樣）的值寫入 relay、App 網址與 CORS 來源，所以 `config.json` 裡自訂的 relay 與 App 網址，在切換標的時、沒有切換只是停止再啟動時，都會被覆蓋。其他設定保留。需要自訂值的服務不要儲存標的。
+- **配對連結**：`<網頁 App>/#offer=…`，只放行所選標的的精確網址：Node 端檢查 App 網址、路徑 `/`、`#offer=` 片段，邀請必須是版本 2、帶 server ID 與金鑰；管理模式再要求 relay 端點是該標的的且為 TLS，舊模式與 rc.9 一樣不核對 relay（租戶可能自己架 relay）。Python 端再用 `connection.json` 的標的獨立檢查一次。Smart 標的若收到要求最低安全模式的邀請會回報 `PAIRING_SECURITY_UNSUPPORTED`（0.11.2 不會送出這種邀請，這只是防護）。邀請不寫入任何檔案；舊版留下的 `pairing.private.json` 在儲存標的與管理模式啟動時刪除，舊模式不刪。
 
 | 代碼 | 意思與處理 |
 |---|---|
 | `CONFIGURATION_PENDING` | 已儲存的標的還沒套用。停止再啟動服務。 |
 | `INVALID_TARGET` | 請求的標的不是三個 id 之一。 |
-| `CONNECTION_STATE_CORRUPT` | `connection.json` 內容無法辨識。在插件頁重新選擇並儲存。 |
-| `PAIRING_ORIGIN_INVALID` | daemon 給的連結不是所選標的的網頁 App。通常是 `config.json` 被手動改過；切換一次標的可重寫。 |
-| `PAIRING_TARGET_MISMATCH` | 邀請的 relay 端點或 TLS 不是所選標的的。同上。 |
+| `CONNECTION_STATE_CORRUPT` | `connection.json` 內容無法辨識。Dashboard 暫時顯示 Paseo、不產生配對連結，啟動也停在這個代碼；在插件頁儲存目前顯示（或重新選擇）的標的即可取代它。 |
+| `UNSAFE_SYMLINK` | 路徑上有符號連結（外掛資料目錄、`connection.json`、`daemon/config.json`、備份檔、runtime 的 `websocket-server.js` 或輔助檔）。插件拒絕跟隨或取代，什麼都沒有被寫入。管理者用 `find plugin-data/hermes-paseo -type l` 找出連結並移除，或還原成一般檔案，再重試；`connection.json` 是連結時畫面不提供儲存。 |
+| `BRAND_IDENTITY_SOURCE_MISMATCH` | 選了 Smart 標的，但 `websocket-server.js` 的 SHA-256 不是已知的原版或補丁版（被改過、被別的版本取代、不存在，或不是一般檔案，例如 FIFO）。沒有改任何檔案，daemon 不啟動。改選 Paseo 即可啟動（Paseo 不需要補丁）；要用 Smart 標的，把檔案還原成 0.11.2 的原版。 |
+| `BRAND_IDENTITY_PATCH_MISMATCH` | 補丁寫入後驗證失敗（雜湊或輔助檔不符）。插件已把原檔放回，daemon 不啟動。多半是檔案系統問題或另一個程式同時改動該目錄；先改選 Paseo 恢復服務，再請管理者檢查 runtime 目錄。 |
+| `RUNTIME_NOT_READABLE`／`RUNTIME_NOT_WRITABLE` | 插件讀不到或寫不了 runtime 目錄裡的 `websocket-server.js` 或輔助檔（權限不足、唯讀檔案系統）。只有選 Smart 標的才會遇到，Paseo 不碰這些檔案。讓服務帳戶對 `plugin-data/hermes-paseo/runtime` 有讀寫權限（或掛成可寫）再重試，或改選 Paseo。 |
+| `CONFIG_BACKUP_FAILED` | 無法備份 `daemon/config.json`（權限不足、磁碟已滿、檔案系統不支援）。`config.json` 沒有被改寫，daemon 不啟動。修好 `plugin-data/hermes-paseo/daemon` 的權限或空間後重試。 |
+| `CONFIG_CORRUPT` | `daemon/config.json` 不是合法 JSON，或不是一般檔案。修好或移走它（先留一份），再啟動。 |
+| `CONFIG_INVALID` | 要寫入的設定不被 Paseo 0.11.2 的嚴格設定檔接受（例如 `daemon.cors.allowedOrigins` 不是字串陣列）。修正 `config.json` 該欄位後再啟動。 |
+| `PAIRING_ORIGIN_INVALID` | daemon 給的連結不是所選標的的網頁 App，通常是 `config.json` 的 `app.baseUrl` 被手動改過。管理模式下**每一次**停止再啟動都會用所選標的的值重寫 `app.baseUrl`、relay 與 CORS（不一定要切換標的），所以停止再恢復服務即可；舊模式不重寫，需要自己修回 `config.json`，或儲存一個標的。 |
+| `PAIRING_TARGET_MISMATCH` | 邀請的 relay 端點或 TLS 不是所選標的的（管理模式），或邀請缺少 server ID／金鑰。處理同上：管理模式下停止再啟動即重寫。 |
 | `PAIRING_OFFER_INVALID` | 邀請無法解碼。 |
+| `PAIRING_SECURITY_UNSUPPORTED` | Smart 標的收到要求最低安全模式的邀請，這些 App 無法回答。改用 Paseo 的網頁 App。 |
 | `INVALID_PAIR_URL` | Python 端的獨立檢查拒絕了連結（網址或標的與 `connection.json` 不符）。 |
 
 ## 品牌識別補丁與升級
@@ -65,8 +75,8 @@ Woowtech Smart 與 Apporo Smart 的網頁 App 要求 daemon 的握手（`server_
 
 - 原檔 SHA-256 `ba8122d01dd17533231a573097ec4e9f91f4fd12caada107adb9f6706f5f8950`，補丁後 `7c4d2a764e2971da9cdcbc8c93cc5f467f632b04d55e1a3a8334abad8cd9abaf`。輔助檔檔名是本插件自己的，所以補丁後的雜湊與 Pi 插件的不同；以 Pi 的檔名做同樣的轉換，得到該插件的補丁雜湊，測試以此證明兩者是同一個轉換。
 - **就地、不換版本**：補丁直接改已安裝的 runtime（`runtime/releases/0.11.2-r2-…`），沒有新的 revision 或目錄；`runtime/package.json` 與 `runtime/package-lock.json` 未動。「runtime 已就緒」仍然只看鎖定檔雜湊與 CLI 版本是 0.11.2，所以缺少補丁絕不會讓程式再執行 `npm ci`。
-- **何時套用**：全新安裝在標記就緒之前就補好；已安裝但未補丁的 runtime（例如 rc.9 留下的）在 daemon 啟動前、持有 runtime 鎖、且確認沒有 daemon 從它執行時才補。執行中的 daemon 絕不會被這件事重啟，它保持沒有品牌的握手直到下一次停止再啟動。
-- **安全**：先寫輔助檔（補丁後的檔案會 import 它），再以「暫存檔加 rename」寫入 `websocket-server.js`，兩個檔案的雜湊寫完後都再驗證，驗證失敗會把原檔放回；原檔雜湊未知、補丁後的檔案被改過、或路徑上任何一層是符號連結時一律拒絕，並且不改任何檔案（`BRAND_IDENTITY_SOURCE_MISMATCH`、`BRAND_IDENTITY_PATCH_MISMATCH`、`UNSAFE_SYMLINK`）。拒絕時 daemon 不會啟動。
+- **何時套用**：只有 Smart 標的（`woowtech`、`apporo`）需要補丁，也只有已儲存這兩個標的的啟動才會補：在 daemon 啟動前、持有 runtime 鎖、確認沒有 daemon 從該 release 目錄執行時，就地補在已安裝的 runtime 上（包括 rc.9 留下的）。**安裝與補丁是兩件事**：補丁不屬於「runtime 已就緒」的判定，所以補丁失敗不會讓下一次嘗試重新執行 `npm ci`。Paseo 與舊模式不補丁、也不要求補丁：`websocket-server.js` 被改過、讀不到或唯讀都不會影響它們啟動；已補丁的 runtime 對 Paseo 原樣保留（沒有環境變數時輔助檔的品牌就是 `paseo`）。執行中的 daemon 絕不會被這件事重啟，它保持沒有品牌的握手直到下一次停止再啟動。
+- **安全**：先寫輔助檔（補丁後的檔案會 import 它），再以「暫存檔加 rename」寫入 `websocket-server.js`，兩個檔案的雜湊寫完後都再驗證，驗證失敗會把原檔放回；原檔雜湊未知、補丁後的檔案被改過、路徑上任何一層是符號連結、或該路徑不是一般檔案（FIFO 等以非阻塞方式開啟後判定，不會卡住啟動）時一律拒絕，並且不改任何檔案（`BRAND_IDENTITY_SOURCE_MISMATCH`、`BRAND_IDENTITY_PATCH_MISMATCH`、`UNSAFE_SYMLINK`）；權限不足或唯讀檔案系統回報 `RUNTIME_NOT_READABLE`／`RUNTIME_NOT_WRITABLE`。拒絕時 daemon 不會啟動，各代碼的處理見上節的表。
 - **檢查**：`sha256sum node_modules/@getpaseo/server/dist/server/server/websocket-server.js`（在該 release 目錄下）等於補丁後雜湊，且同目錄有輔助檔，表示已補丁。
 - **相容 rc.9**：rc.9 判定 runtime 就緒只看鎖定檔雜湊與 CLI 版本，所以接受已補丁的 runtime。以 rc.9 啟動的 daemon 沒有 `HERMES_PASEO_CONNECTION_TARGET`，握手品牌是 `paseo`。
 
@@ -96,7 +106,8 @@ hermes plugins install WOOWTECH/hermes-paseo-plugin --ref <commit-sha> --force -
 
 ## 回滾到 0.1.4-rc.9
 
-1. **先在插件頁切回 Paseo**：選 **Paseo**、儲存，按 **停止服務** 再 **恢復服務**，確認畫面沒有「標的已儲存…」的提示，產生的配對連結是 `app.paseo.sh`。
+0. **從沒儲存過標的的服務（舊模式）不需要做任何準備**，直接降版：`config.json` 與 runtime 都是 rc.9 的。以下是儲存過標的的服務：
+1. **先在插件頁切回 Paseo**：選 **Paseo**、儲存，按 **停止服務** 再 **恢復服務**，確認畫面沒有「標的已儲存…」的提示，產生的配對連結是 `app.paseo.sh`。要連 relay 與 App 網址的自訂值也一併拿回，再依上節「一次性備份」的步驟還原 `config.json.pre-agent-connect`。
 2. 再降到 0.1.4-rc.9（Git 切換或更新器回滾）。rc.9 接受已補丁的 runtime、不會重新安裝；新版寫下的 `config.json`（app、relay、CORS）rc.9 照原樣保留，且是 0.11.2 設定檔接受的內容。
 3. 若沒有先切回 Paseo：rc.9 的 daemon 仍會啟動，但 rc.9 只放行 `app.paseo.sh` 的配對連結，所以在 Smart 標的下它會拒絕產生配對連結（`PAIRING_ORIGIN_INVALID`）。補救方式是重新升到 0.1.5-rc.1、切回 Paseo、停止再啟動，然後再降版。
 4. 已配對的裝置不受影響：server ID 與金鑰在整個切換與回滾期間都沒有改變。
