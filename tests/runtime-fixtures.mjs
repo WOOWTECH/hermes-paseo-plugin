@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { gunzipSync } from 'node:zlib';
 
 const KEYS = ['HOME', 'HERMES_HOME', 'HERMES_PASEO_STATE_DIR', 'HERMES_PASEO_RUNTIME_DIR', 'HERMES_PASEO_PORT', 'PASEO_HOME',
   'HERMES_PASEO_CONNECTION_TARGET'];
@@ -21,3 +22,7 @@ export function fixture() {
     },
   };
 }
+
+/** The exact upstream Paseo 0.11.2 websocket server (dist/server/server/websocket-server.js), as published. */
+export const websocketServerSource = () => gunzipSync(fs.readFileSync(new URL('./fixtures/paseo-0.11.2/websocket-server.js.gz', import.meta.url))).toString('utf8');
+export const fixtureProvenance = () => JSON.parse(fs.readFileSync(new URL('./fixtures/paseo-0.11.2/provenance.json', import.meta.url), 'utf8'));

@@ -1,0 +1,18 @@
+{
+  "purpose": "Offline tests against the exact upstream Paseo 0.11.2 websocket server; never loaded by the plugin at runtime and not part of any install",
+  "package": "@getpaseo/server",
+  "version": "0.11.2",
+  "source": "registry tarball https://registry.npmjs.org/@getpaseo/server/-/server-0.11.2.tgz; the file is copied unmodified and only gzip-compressed (gzip -9 -n)",
+  "tarballIntegrity": "sha512-HNeiGsLrkZOFGHoYXodZ4u3ewlvFHZjm/sqBUkxDjFx6QnxOyRyfQnRDk48mhtR+l+n6+2GPlTY2v0uaObHUDw==",
+  "integrityCheckedAgainst": "runtime/package-lock.json (npm ci installs exactly this tarball), and the sha512 of a freshly packed tarball",
+  "websocketServer": {
+    "file": "websocket-server.js.gz",
+    "path": "dist/server/server/websocket-server.js",
+    "bytes": 100612,
+    "sha256": "ba8122d01dd17533231a573097ec4e9f91f4fd12caada107adb9f6706f5f8950"
+  },
+  "license": {
+    "declared": "MIT (README of the 0.11.2 package; the tarball has no LICENSE file and no license field)",
+    "later releases": "0.16.x and 0.17.x declare Apache-2.0 and ship its text; nothing from them is vendored here"
+  }
+}
