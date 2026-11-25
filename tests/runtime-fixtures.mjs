@@ -5,7 +5,7 @@ import os from 'node:os';
 import { gunzipSync } from 'node:zlib';
 
 const KEYS = ['HOME', 'HERMES_HOME', 'HERMES_PASEO_STATE_DIR', 'HERMES_PASEO_RUNTIME_DIR', 'HERMES_PASEO_PORT', 'PASEO_HOME',
-  'HERMES_PASEO_CONNECTION_TARGET'];
+  'HERMES_PASEO_CONNECTION_TARGET', 'HERMES_PASEO_HERMES_COMMAND', 'PATH', 'FAKE_PASEO_SERVER_FILE', 'FAKE_PASEO_TRACE'];
 
 /** An isolated profile (HOME, HERMES_HOME, state and runtime directories) removed again by close(). */
 export function fixture() {

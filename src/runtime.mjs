@@ -12,10 +12,10 @@ import { sendVerifiedHermesMessage } from './model-selection.mjs';
 import { assistantEntries, latestAssistantCursor, chatResult } from './chat-result.mjs';
 import {singleFlight,daemonStatusWindow} from './single-flight.mjs';
 import {usingAcceptanceAgent,usingAcceptanceWorkspace} from './acceptance-agent.mjs';
-import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,RUNTIME_REVISION} from './runtime-layout.mjs';
+import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,patchInstalledRuntime,RUNTIME_REVISION} from './runtime-layout.mjs';
 import {demonstrablyReusedPid,linuxContainerIdentity,instanceFromPreviousContainer} from './daemon-identity.mjs';
 import {managedFeatures} from './daemon-config.mjs';
-import {connectionTarget,selectedTarget,saveSelectedTarget} from './connection-targets.mjs';
+import {connectionTarget,selectedTarget,saveSelectedTarget,targetConfiguration} from './connection-targets.mjs';
 export { locations, readState, updateState } from './state.mjs';
 export const PASEO_VERSION = '0.11.2';
 const PROVIDERS = ['hermes', 'claude', 'codex', 'pi'];
@@ -23,7 +23,7 @@ const safeCode = error => /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code || '') ? err
 function packageRoot(pkg = 'cli') { return path.join(runtimeDirectory(locations()), 'node_modules/@getpaseo', pkg); }
 function cliPath() { return path.join(packageRoot(), 'bin/paseo'); }
 function runtimeVersion() { try { return JSON.parse(fs.readFileSync(path.join(packageRoot(), 'package.json'), 'utf8')).version; } catch { return null; } }
-export function inheritedEnv() {
+export function inheritedEnv(target) {
   const loc = locations(); const env = { ...process.env, HOME: loc.home, HERMES_HOME: loc.agentDir, PASEO_HOME: loc.paseoHome, NO_COLOR: '1' };
   delete env.PASEO_HOST; delete env.PASEO_AGENT_ID; delete env.PASEO_WORKSPACE_ID; delete env.PASEO_PASSWORD;
   // Web login protects the host UI; provider children do not need this credential.
@@ -36,6 +36,11 @@ export function inheritedEnv() {
   delete env.HERMES_DASHBOARD_BASIC_AUTH_SECRET;
   delete env.API_SERVER_KEY;
   env.HERMES_PASEO_RUNTIME_REVISION=RUNTIME_REVISION;
+  // The target a daemon starts with names its brand in the hello (see brand-identity.mjs). Only a start passes
+  // one; a stray value inherited from the host is never handed on. Not a PASEO_ name: a managed `daemon start`
+  // strips those, and the relay, app and CORS settings reach the daemon through its config.json instead.
+  delete env.HERMES_PASEO_CONNECTION_TARGET;
+  if (target !== undefined) env.HERMES_PASEO_CONNECTION_TARGET = connectionTarget(target).id;
   return env;
 }
 async function cli(args, options = {}) {
@@ -99,7 +104,8 @@ async function releaseReusedPid(instance) {
 }
 async function installRuntime() {
   privateDirectory(locations().runtimeDir);
-  if (!runtimeReady(locations())) {
+  const fresh = !runtimeReady(locations());
+  if (fresh) {
     const npm = findExecutable('npm'); if (!npm) throw new RuntimeError('NPM_UNAVAILABLE');
     const root=prepareRuntimeManifest(locations());
     await runProcess(npm, ['ci', '--prefix', root, '--omit=dev', '--no-audit', '--no-fund'], { timeoutMs: 300000, env: inheritedEnv() });
@@ -107,7 +113,7 @@ async function installRuntime() {
   const version = await runProcess(process.execPath, [cliPath(), '--version'], { env: inheritedEnv() });
   if (version.trim() !== PASEO_VERSION || runtimeVersion() !== PASEO_VERSION) throw new RuntimeError('VERSION_MISMATCH');
   if (!fs.existsSync(path.join(packageRoot('server'), 'dist/server/web-ui/index.html'))) throw new RuntimeError('WEB_UI_MISSING');
-  markRuntimeReady(locations());
+  markRuntimeReady(locations(), { patch: fresh });
   updateState({ installedVersion: PASEO_VERSION,installedRuntimeRevision:RUNTIME_REVISION });
 }
 async function choosePort(preferred) {
@@ -120,7 +126,9 @@ async function choosePort(preferred) {
 async function detectLaunchers({ installMissing = false } = {}) {
   return resolveProviderLaunchers(locations(), { installMissing, env: inheritedEnv() });
 }
-async function writeConfig(port, launchers) {
+// `target` is given only when no daemon is running: it is applied at a start. A running daemon keeps the relay,
+// app and CORS settings it started with (they are not live-reloadable), so they are left as they are.
+async function writeConfig(port, launchers, target) {
   const loc = locations(); const file = path.join(loc.paseoHome, 'config.json');
   let config = {};
   if (fs.existsSync(file)) { try { config = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { throw new RuntimeError('CONFIG_CORRUPT'); } }
@@ -139,6 +147,7 @@ async function writeConfig(port, launchers) {
     features: managedFeatures(config.features),
     log: { ...config.log, console: { level: 'warn' }, file: { level: 'warn', path: 'daemon.log', rotate: { maxSize: '5m', maxFiles: 2 } } },
   };
+  if (target !== undefined) config = targetConfiguration(config, target);
   const { savePersistedConfig } = await serverModule('dist/server/server/config.js');
   try { savePersistedConfig(loc.paseoHome, config); fs.chmodSync(file, 0o600); } catch { throw new RuntimeError('CONFIG_INVALID'); }
   updateState({ port, providerLaunchers: launchers });
@@ -184,11 +193,15 @@ export async function activate(options = {}) {
         } catch { throw new RuntimeError('RESTART_REQUIRED'); }
         updateState({ phase: 'running', providerReloadPending: null, daemonPid: existing.pid, daemonStartedAt: existing.startedAt, daemonContainerIdentity: linuxContainerIdentity() });
       } else {
-        const port = await choosePort(locations().port); await writeConfig(port, launchers);
+        // The selected target is applied here and only here: its relay, app and CORS settings go into config.json,
+        // its brand into the daemon's environment, and the runtime is patched while no daemon runs from it.
+        const target = selectedTarget(locations());
+        const port = await choosePort(locations().port); await writeConfig(port, launchers, target);
         updateState({ phase: 'starting' });
-        await cli(['daemon', 'start', '--timeout', '90'], { timeoutMs: 105000 });
+        patchInstalledRuntime(locations());
+        await cli(['daemon', 'start', '--timeout', '90'], { timeoutMs: 105000, env: inheritedEnv(target) });
         const instance = await currentInstance(); await verifyInstanceOwnership(instance);
-        updateState({ phase: 'running', providerReloadPending: null, daemonPid: instance.pid, daemonStartedAt: instance.startedAt, daemonContainerIdentity: linuxContainerIdentity() });
+        updateState({ phase: 'running', providerReloadPending: null, daemonPid: instance.pid, daemonStartedAt: instance.startedAt, daemonContainerIdentity: linuxContainerIdentity(), activeTarget: target, configurationPending: false });
       }
       const result = await status();
       if (!result.daemon.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');

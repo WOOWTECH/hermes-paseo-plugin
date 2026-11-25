@@ -48,3 +48,29 @@ export function selectedTarget(loc) {
 export function saveSelectedTarget(loc, target) {
   atomicJson(connectionFile(loc), { version: 1, target: connectionTarget(target).id });
 }
+
+const managedOrigins = new Set(CONNECTION_TARGETS.map(row => row.appUrl));
+const managed = origin => managedOrigins.has(origin.trim().replace(/\/+$/, ''));
+
+/**
+ * The daemon configuration for one target: its web app, its relay (the endpoint and the public endpoint
+ * alike, with TLS stated explicitly) and its web app's origin among the CORS origins. Everything else is
+ * kept as it is, including origins that no target manages. Switching a Smart target therefore passes
+ * through this table again and overwrites a custom relay or app URL; that is documented in the README.
+ * `daemon.relay.requireProtectedSecurity` is deliberately never written: Paseo 0.11.2's strict schema does
+ * not know it and would reject the whole file.
+ */
+export function targetConfiguration(config, target) {
+  const profile = connectionTarget(target);
+  const origins = config.daemon?.cors?.allowedOrigins ?? [];
+  if (!Array.isArray(origins) || origins.some(origin => typeof origin !== 'string')) throw new RuntimeError('CONFIG_INVALID');
+  return {
+    ...config,
+    app: { ...config.app, baseUrl: profile.appUrl },
+    daemon: {
+      ...config.daemon,
+      relay: { ...config.daemon?.relay, enabled: true, endpoint: profile.relayEndpoint, publicEndpoint: profile.relayEndpoint, useTls: true, publicUseTls: true },
+      cors: { ...config.daemon?.cors, allowedOrigins: [...origins.filter(origin => !managed(origin)), profile.appUrl] },
+    },
+  };
+}

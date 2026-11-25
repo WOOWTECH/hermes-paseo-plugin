@@ -360,7 +360,8 @@ class BridgeTests(unittest.TestCase):
     def test_config_answers_only_with_public_fields(self):
         shown = b.redact({'saved': True, 'target': 'apporo', 'configurationPending': True, 'appUrl': 'x', 'relayEndpoint': 'y', 'password': 'z'})
         self.assertEqual(shown, {'saved': True, 'target': 'apporo', 'configurationPending': True})
-        for code in ('INVALID_TARGET', 'CONFIGURATION_PENDING', 'CONNECTION_STATE_CORRUPT', 'CONFIG_INVALID'):
+        for code in ('INVALID_TARGET', 'CONFIGURATION_PENDING', 'CONNECTION_STATE_CORRUPT', 'CONFIG_INVALID', 'CONFIG_CORRUPT',
+                     'BRAND_IDENTITY_SOURCE_MISMATCH', 'BRAND_IDENTITY_PATCH_MISMATCH', 'UNSAFE_SYMLINK'):
             with self.subTest(code=code):
                 self.assertEqual(b.BridgeError(code).code, code)
                 self.assertEqual(b.redact({'diagnosticCode': code})['diagnosticCode'], code)

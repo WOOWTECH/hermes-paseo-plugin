@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { CONNECTION_TARGETS, DEFAULT_TARGET, connectionTarget, selectedTarget, saveSelectedTarget } from '../src/connection-targets.mjs';
+import { CONNECTION_TARGETS, DEFAULT_TARGET, connectionTarget, selectedTarget, saveSelectedTarget, targetConfiguration } from '../src/connection-targets.mjs';
 import { locations, readState, updateState } from '../src/state.mjs';
 import { runtimeDirectory } from '../src/runtime-layout.mjs';
 import { saveConnectionSettings } from '../src/runtime.mjs';
@@ -204,4 +204,48 @@ test('saving is not held up by the runtime lock an activation holds', async t =>
   assert.ok(Date.now() - started < 2000, 'an activation can hold the lock for minutes while npm runs; the choice is only recorded');
   assert.equal(selectedTarget(locations()), 'apporo');
   release(); await operation;
+});
+
+// The keys Paseo 0.11.2's strict schema accepts for what a target writes (persisted-config.js: daemon.relay, daemon.cors, app).
+const RELAY_KEYS = ['enabled', 'endpoint', 'publicEndpoint', 'useTls', 'publicUseTls'];
+
+test('daemon config for a target: its app, relay and origin, TLS stated, everything else kept', () => {
+  const base = { daemon: { listen: 'localhost:6779', hostnames: ['localhost'], relay: { endpoint: 'wrong:443', enabled: false },
+    cors: { allowedOrigins: ['https://local.example', 'https://smart.apporo.ai/', 'https://app.paseo.sh', ' https://smart.woowtech.io//'] }, mcp: { enabled: true } },
+    app: { baseUrl: 'https://wrong.example' }, agents: { providers: { claude: { enabled: false } } }, features: { webUi: { enabled: true } } };
+  const before = structuredClone(base);
+  for (const target of CONNECTION_TARGETS) {
+    const config = targetConfiguration(base, target.id);
+    assert.deepEqual(config.app, { baseUrl: target.appUrl });
+    assert.deepEqual(config.daemon.relay, { enabled: true, endpoint: target.relayEndpoint, publicEndpoint: target.relayEndpoint, useTls: true, publicUseTls: true });
+    assert.deepEqual(Object.keys(config.daemon.relay).filter(key => !RELAY_KEYS.includes(key)), [], 'only keys the 0.11.2 schema knows');
+    assert.equal('requireProtectedSecurity' in config.daemon.relay, false, 'not in 0.11.2\'s strict schema: it would make the file invalid');
+    assert.deepEqual(config.daemon.cors.allowedOrigins, ['https://local.example', target.appUrl], 'an unmanaged origin stays; the other apps and slash variants go');
+    assert.deepEqual([config.daemon.listen, config.daemon.hostnames, config.daemon.mcp], ['localhost:6779', ['localhost'], { enabled: true }]);
+    assert.deepEqual([config.agents, config.features], [base.agents, base.features]);
+  }
+  assert.deepEqual(base, before, 'the caller config is not mutated');
+});
+
+test('daemon config for a target also works from nothing, and refuses origins it cannot read', () => {
+  for (const target of CONNECTION_TARGETS) {
+    const config = targetConfiguration({}, target.id);
+    assert.deepEqual(config.daemon.cors.allowedOrigins, [target.appUrl]);
+    assert.equal(config.daemon.relay.publicEndpoint, target.relayEndpoint);
+    assert.equal(config.daemon.relay.publicUseTls, true);
+  }
+  for (const allowedOrigins of ['https://x', { 0: 'https://x' }, [1], [null], ['https://ok.example', {}]]) {
+    assert.throws(() => targetConfiguration({ daemon: { cors: { allowedOrigins } } }, 'paseo'), { code: 'CONFIG_INVALID' }, JSON.stringify(allowedOrigins));
+  }
+  assert.throws(() => targetConfiguration({}, 'custom'), { code: 'INVALID_TARGET' });
+  assert.throws(() => targetConfiguration({}), { code: 'INVALID_TARGET' });
+});
+
+test('switching from one target to another overwrites a custom relay and app URL of the earlier one', () => {
+  const custom = { app: { baseUrl: 'https://my.app.example' }, daemon: { relay: { enabled: true, endpoint: 'relay.my.example:443', publicEndpoint: 'relay.my.example:443', useTls: false, publicUseTls: false } } };
+  for (const target of CONNECTION_TARGETS) {
+    const config = targetConfiguration(custom, target.id);
+    assert.equal(config.app.baseUrl, target.appUrl);
+    assert.deepEqual([config.daemon.relay.endpoint, config.daemon.relay.useTls], [target.relayEndpoint, true]);
+  }
 });

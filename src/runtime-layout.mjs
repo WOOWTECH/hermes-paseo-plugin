@@ -3,6 +3,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {privateDirectory,atomicJson,RuntimeError,assertSafePath} from './state.mjs';
+import {applyBrandIdentityPatch} from './brand-identity-patch.mjs';
 const template=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../runtime');
 const lock=fs.readFileSync(path.join(template,'package-lock.json'));
 const lockSha256=createHash('sha256').update(lock).digest('hex');
@@ -25,4 +26,14 @@ export function prepareRuntimeManifest(loc) {
  }
  return root;
 }
-export function markRuntimeReady(loc) {atomicJson(path.join(runtimeDirectory(loc),'.hermes-paseo-runtime.json'),{lockSha256,revision:RUNTIME_REVISION});}
+// Readiness stays "the lock matches and the CLI is 0.11.2": the brand patch is applied to the files in place and
+// never decides whether a release is installed, so a runtime without it is never installed again.
+// A fresh install is patched before it is declared ready; one that is already installed is patched right
+// before a daemon starts from it (patchInstalledRuntime).
+export function markRuntimeReady(loc,{patch=true}={}) {
+ const root=runtimeDirectory(loc);
+ if(patch)applyBrandIdentityPatch(root);
+ atomicJson(path.join(root,'.hermes-paseo-runtime.json'),{lockSha256,revision:RUNTIME_REVISION});
+}
+/** Caller holds the runtime lock and has found no daemon running from this release. Idempotent. */
+export function patchInstalledRuntime(loc) {applyBrandIdentityPatch(runtimeDirectory(loc));}
