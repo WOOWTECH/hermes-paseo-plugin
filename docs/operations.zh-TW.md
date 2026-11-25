@@ -72,9 +72,23 @@ Woowtech Smart 與 Apporo Smart 的網頁 App 要求 daemon 的握手（`server_
 
 ## PaaS 自動更新器與本版
 
-本版不改 `host/` 的轉接檔（`dashboard_control.py`、`profile_lifecycle.py`、`resource_limits.py`、`hermes` 與其餘），`plugin.yaml` 只改 `version` 行，`package.json` 沒有相依套件，`runtime/package.json` 與 `runtime/package-lock.json` 與 0.1.4-rc.9 位元組相同；`git diff 1101a5d HEAD --stat -- host runtime bin` 沒有輸出可以重現這一點。daemon 與 runtime 鎖定檔不變，所以更新器的相依套件檢查不會擋；這個 release 走一般流程：先在專用測試服務（canary），通過後再逐台更新整批服務，**沒有**需要凍結整批服務的 runtime 變更。Hermes 原生安全掃描以本機的 Hermes v0.22.5 plugin-guard 對 rc.9 比對，沒有新增項目（見[驗收紀錄](validation.md)）；這是比對方式的模擬，不是更新器本身的執行結果。
+本版不改 `host/` 的轉接檔（`dashboard_control.py`、`profile_lifecycle.py`、`resource_limits.py`、`hermes` 與其餘），`plugin.yaml` 只改 `version` 行，`package.json` 沒有相依套件，`runtime/package.json` 與 `runtime/package-lock.json` 與 0.1.4-rc.9 位元組相同；`git diff 1101a5d HEAD --stat -- host runtime bin` 沒有輸出可以重現這一點。所以更新器的 `host_adapter_changed`、`plugin_capabilities_changed` 與 `dependency_manifest_changed` 檢查不會擋這個版本。Hermes 原生安全掃描以本機的 Hermes v0.22.5 plugin-guard 對 rc.9 比對，沒有新增項目（見[驗收紀錄](validation.md)）；這是比對方式的模擬，不是更新器本身的執行結果。
 
-**CI 的 `Locked dependency audit` 要另外看。** 更新器要求這項檢查在 release 的 commit 上為綠燈，而它不看檔案是否改動，只看稽核結果。2026-11-25 對這份鎖定檔（與 rc.9 位元組相同）執行 `npm audit --omit=dev --prefix runtime`，回報 2 項 moderate：`hono` 與 `@hono/node-server`（上游新公告；對 rc.9 的檔案樹執行得到相同結果）。本版依規定不改 `runtime/`，所以這項檢查的結果與 rc.9 相同、不由本版造成；它若為紅燈，更新器會拒絕這個 release，要處理須另行更新鎖定檔，那是 runtime 變更，會走另一條發版流程（需要凍結整批服務的流程），不在本版範圍。
+**把 `v0.1.5-rc.1` 發佈成 Release 之前請先讀這一段：就目前的 CI 狀態，它會讓所有啟用自動更新的服務每天失敗一次。** 以下依 Hermes chart 0.4.9 的 `paseo-auto-update.py` 逐項核對：
+
+- **哪一版會被選中。** 更新器的 `latest_release()` 取**版本最高的已發布 Release**：只排除 draft，**不看 pre-release 旗標**，以 `(主, 次, 修, 非 rc 為 1／rc 為 0, rc 編號)` 比較。`v0.1.5-rc.1` 是 `(0,1,5,0,1)`，高於 rc.9 的 `(0,1,4,0,9)`，所以一發佈成 Release（勾了 pre-release 也一樣），它就是每台服務下一個要評估的版本。
+- **一定要五項檢查全綠。** `verify_release` 要求該 commit 上兩組 Unit tests、兩組 Browser 與 `Locked dependency audit` 各自最新一輪都成功。`Locked dependency audit` 目前是紅燈：`runtime/package-lock.json` 釘住 `hono` 4.13.13 與 `@hono/node-server` 2.1.4，`npm audit --omit=dev --prefix runtime` 回報 2 項 moderate（上游新公告；對 rc.9 的檔案樹結果相同），`main` 最近兩次的每週排程稽核也以同樣原因失敗。
+- **失敗不計次數，所以不會停。** 檢查沒有全綠時更新器丟出 `release_checks_not_green`，這發生在 `record_failure` 之前，沒有重試上限：每台服務的每日更新 Job 與 `probe` **每天都會失敗**，而且什麼都不會安裝、daemon 也不會被重啟，直到有更高的版本出現。
+- **用較低的 tag 救不了。** 版本較低的 tag 贏不了它；熱修補需要更高的版本號，而且那一版也必須通過稽核。把稽核修綠需要更新 `runtime/` 的鎖定檔，但鎖定檔與已安裝的那份不同時，`validate_candidate` 會以 `dependency_manifest_changed` 拒絕，所以那是 runtime 變更，要走另一條需要 chart 配合、凍結整批服務的發版流程。
+- **只推 tag 更新器看不到。** 更新器只列出 Release，不列 tag。
+
+**結論：在稽核轉綠、而且 chart 允許新的鎖定檔之前，只推 tag，不要發佈 Release。** 要在專用服務試用時，直接指定 commit 安裝（canary，不經更新器）：
+
+```bash
+hermes plugins install WOOWTECH/hermes-paseo-plugin --ref <commit-sha> --force --enable
+```
+
+要發佈 Release，必須先修好 runtime 鎖定檔，並讓 chart 接受它，再讓五項檢查全綠。
 
 更新前後 daemon 的行為：更新（Git pull 與 Dashboard 重載）不會重啟仍在執行的 daemon，連線標的與品牌補丁在下一次停止再啟動才套用。若更新器因 Dashboard 或 daemon 不健康而自動裝回上一版，上一版（rc.9）接受已補丁的 runtime 與新版寫下的 `config.json`，見下節。
 
@@ -106,7 +120,7 @@ node "$HERMES_HOME/plugins/hermes-paseo/bin/control.mjs" relay <<< '{}'
 發 release 時請注意：
 
 1. **tag 一推就會再跑一輪 CI**（約 1–2 分鐘；Chromium 安裝偶爾卡住，要重跑）。這段時間排程剛好執行，會因為檢查還沒全綠而拒絕，不計入失敗次數，隔天再試。要立刻更新時，先等這一輪綠燈。
-2. 變更 `host/`、`plugin.yaml` 能力或新增相依套件的版本不會被自動安裝，需要另外發 chart／HA 映像。0.1.5-rc.1 不屬於這一類，見下面[本版的說明](#paas-自動更新器與本版)。
+2. 變更 `host/`、`plugin.yaml` 能力或新增相依套件的版本不會被自動安裝，需要另外發 chart／HA 映像。0.1.5-rc.1 的檔案不屬於這一類，但發佈成 Release 會被稽核紅燈擋下並每天失敗，見下面[本版的說明](#paas-自動更新器與本版)。
 3. 更新後若重載的 Dashboard、daemon 或 Plugin Doctor 不健康，更新器會自動裝回上一版、重啟 daemon 並再重載一次，Job 仍標示失敗以便察覺；失敗的版本只重試一次，之後要等更新的 release。
 4. 多台服務各自排程、互不把關。要先在專用服務驗證時：暫停其他服務的 CronJob（`spec.suspend: true`），在專用服務以 `kubectl create job --from=cronjob/<名稱>` 手動執行並驗證，通過後再逐台執行並恢復排程。rc.6 就是這樣發佈的。
 

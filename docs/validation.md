@@ -21,7 +21,7 @@ Hermes 原生安全掃描：以 Hermes v0.22.5 的 plugin-guard v11（含 `.mjs`
 - **沒有做真實 Hermes 0.22.5 的對話回歸**（`chat`／`continue` 經插件到真實 `hermes acp`）。那需要從 PyPI 安裝 Hermes，而這次的網路只准用於 npm 與各 relay 主機；改用本機 uv 快取離線安裝 Hermes v0.22.5（`uv sync --frozen --offline --extra acp`）也失敗，快取沒有它鎖定的 wheel（`nemo-relay`、`pillow` 等），所以沒有做。補丁只在握手多加一個欄位，daemon 其餘檔案、ACP 供應者設定與對話程式碼都與 rc.9 相同，但這是推論，不是對話測試。
 - 沒有從真實瀏覽器用 Woowtech／Apporo Smart 的網頁 App 完成配對與對話；已驗證的是 daemon 握手帶品牌、配對連結的形狀，以及經各標的真實 relay 的端到端連線（官方 CLI 用戶端）。
 - 沒有執行 PaaS 更新器本身、HA add-on 映像或正式 Dashboard 的原生更新。
-- `npm audit --omit=dev --prefix runtime` 目前回報 2 項 moderate（`hono`、`@hono/node-server` 的上游新公告）；對 rc.9 的檔案樹得到相同結果，鎖定檔位元組相同。更新器要求 CI 的 `Locked dependency audit` 為綠燈，這項檢查的結果與本版無關，詳見[維運文件](operations.zh-TW.md#paas-自動更新器與本版)。
+- **本版不能發佈成 Release。** `npm audit --omit=dev --prefix runtime` 目前回報 2 項 moderate（`hono` 4.13.13、`@hono/node-server` 2.1.4 的上游新公告；對 rc.9 的檔案樹結果相同，鎖定檔位元組相同），CI 的 `Locked dependency audit` 因此是紅燈，`main` 最近兩次每週排程也一樣。PaaS 更新器（chart 0.4.9）取版本最高的已發布 Release，不看 pre-release 旗標，`v0.1.5-rc.1` 高於 rc.9；它要求五項檢查全綠，否則在 `record_failure` 之前就以 `release_checks_not_green` 失敗，沒有重試上限，所以每台服務的每日 Job 與 `probe` 每天失敗，什麼都不安裝。較低的 tag 贏不了它，修稽核需要更新鎖定檔（會被 `dependency_manifest_changed` 擋下，要走 chart 配合的另一條流程），只推 tag 更新器看不到。因此在稽核轉綠且 chart 允許新鎖定檔之前只推 tag、不發佈 Release，用 `hermes plugins install … --ref <sha> --force --enable` 在專用服務試用；細節見[維運文件](operations.zh-TW.md#paas-自動更新器與本版)。
 - 只在 Linux 測試。
 
 ## 0.1.4-rc.6：官方 relay 迴路自我驗證
