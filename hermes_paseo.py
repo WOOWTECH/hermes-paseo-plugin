@@ -81,7 +81,12 @@ reachable relayEnabled relayVerified relayVerifiedAt providers provider label st
 isDefault defaultModeId models defaultThinkingOptionId thinkingOptions chatVerified chatVerifiedAt
 checkedAt passed firstReply followup model modeId thinking agentId message reply errorCode
 available authentication loginHint chatErrorCode cleanup archived workspaceArchived'''.split())
-PAIR_TEXT = re.compile(r'https?://(?:[^\s/]*@)?app\.paseo\.sh[^\s<>\"\']*', re.I)
+# Free text hides any official app link and the pairing offer of any other URL (the `#offer=` or
+# `#connect=` fragment onward). Every alternative starts at a fixed token, so no scan runs forward
+# from each character: an earlier form began with an unbounded run before the `#` and took
+# quadratic time on a long reply that had no `#`.
+PAIR_TEXT = re.compile(r'(?:https?://(?:[^\s/]*@)?(?:app\.paseo\.sh|smart\.woowtech\.io|smart\.apporo\.ai)'
+                       r'|#(?:offer|connect)=)[^\s<>\"\']*', re.I)
 SECRET_TEXT = re.compile(r'(?i)(?:bearer\s+[a-z0-9._~+/-]+|(?:sk|ghp|github_pat|xoxb|xoxp)[-_][a-z0-9_-]{8,}|(?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]\s*[^\s,;]+)')
 
 

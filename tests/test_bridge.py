@@ -277,6 +277,47 @@ class BridgeTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(b.BridgeError):
                 b.public_pair({'url': url})
 
+    def test_offers_for_every_official_app_are_hidden_in_free_text(self):
+        for text in ['open https://smart.woowtech.io/#offer=PRIVATE now', 'https://smart.apporo.ai/#offer=PRIVATE',
+                     'https://app.paseo.sh/#offer=PRIVATE', 'mirror https://elsewhere.example/#offer=PRIVATE']:
+            with self.subTest(text=text):
+                self.assertNotIn('PRIVATE', b.redact({'reply': text})['reply'])
+
+    def test_a_pairing_offer_is_hidden_wherever_its_url_points(self):
+        hidden = b.redact({'reply': 'mirror https://elsewhere.example/#offer=PRIVATE-1 and x#connect=PRIVATE-2, end'})['reply']
+        self.assertNotIn('PRIVATE', hidden)
+        self.assertEqual(hidden.count('[pairing hidden]'), 2)
+        self.assertTrue(hidden.endswith(', end') or hidden.endswith(' end'))
+        self.assertEqual(b.redact({'reply': 'a plain https://elsewhere.example/page link'})['reply'],
+                         'a plain https://elsewhere.example/page link')
+
+    def test_redaction_takes_linear_time_on_the_longest_replies(self):
+        """`reply` comes from a model and may be as long as the process output limit, and `re` holds the GIL,
+        so a pattern that scans forward from every character stalls the whole Hermes web process. The offer
+        pattern once began with an unbounded run before the `#`: 80 KB without one took about 22 seconds."""
+        cases = {
+            'one unbroken run': 'a' * 80000,
+            'a near miss at every position': '#offer' * 13000,
+            'an unbroken run of offers': '#offer=' * 11000,
+            'spaced offers': '#offer=x ' * 9000,
+            'official links': 'https://smart.woowtech.io/#offer=SECRET-1 ' * 2000,
+            'foreign links': 'https://elsewhere.example/#offer=SECRET-2 ' * 2000,
+            'a scheme at every position': 'https://' * 10000,
+            'userinfo without an app host': 'https://' + 'a@' * 40000,
+            'a key with endless spacing': 'password' + ' ' * 80000 + 'x',
+            'a bearer word with endless spacing': 'bearer' + ' ' * 80000,
+            'an assignment then spacing': 'secret=' + ' ' * 80000 + ',',
+            'repeated key names': 'api_key ' * 10000,
+            'repeated assignments': 'password=x ' * 7000,
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                started = time.perf_counter()
+                result = b.redact({'reply': text})['reply']
+                elapsed = time.perf_counter() - started
+                self.assertLess(elapsed, 1.0, f'{name} took {elapsed:.2f}s')
+                self.assertNotIn('SECRET', result)
+
 
 class ProcessTests(unittest.TestCase):
     def run_python(self, code, timeout=2, limit=b.MAX_OUTPUT):
