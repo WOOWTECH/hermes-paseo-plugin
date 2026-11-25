@@ -372,6 +372,22 @@ export async function deactivate() {
     return status();
   });
 }
+// The longest a prepare waits for the runtime lock: a start or another prepare may be installing, after
+// which this release is ready and there is nothing left to do.
+const PREPARE_LOCK_TIMEOUT_MS = 120000;
+/**
+ * Installs and verifies this release beside whatever daemon is running, then checks the current
+ * config.json with this release's own reader. It never starts, stops, reloads or reconfigures a daemon
+ * and never rewrites config.json, so an earlier release can keep serving through it. Idempotent: an
+ * installed release is not touched. The runtime lock is held only while installing.
+ * A config this release cannot load is a result, not a failure: it is reported by the status.
+ */
+export async function prepare() {
+  if (Number(process.versions.node.split('.')[0]) < 22) throw new RuntimeError('NODE_VERSION_UNSUPPORTED');
+  if (!runtimeReady(locations())) await withRuntimeLock(() => installRuntime(), { timeoutMs: PREPARE_LOCK_TIMEOUT_MS });
+  try { await checkDaemonConfig(); } catch (error) { if (!['CONFIG_CORRUPT', 'CONFIG_INCOMPATIBLE'].includes(error.code)) throw error; }
+  return status();
+}
 export async function status() {
   return singleFlight(`status:${locations().paseoHome}`,readStatus);
 }
@@ -414,7 +430,10 @@ async function readStatus() {
   const stalled = ['running', 'installing', 'starting'].includes(state.phase);
   const phase = stalled && !daemon.running ? 'stopped' : state.phase || 'not_installed';
   const configurationPending = state.configurationPending === true || (daemon.running && activeTarget !== target);
-  return { installed, version: installed ? PASEO_VERSION : null, enabled: state.desiredEnabled === true, phase, daemon, providers, chatVerified: state.acceptance?.passed === true, pairingAvailable: fs.existsSync(path.join(loc.stateDir, 'pairing.private.json')), diagnosticCode, selectedTarget: target, activeTarget: daemon.running ? activeTarget : null, configurationPending, state };
+  // What this release made of config.json the last time it was checked (an upgrade stop or a prepare).
+  const check = state.upgradeCheck?.revision === RUNTIME_REVISION ? state.upgradeCheck : null;
+  const configCheck = check ? { ok: check.ok === true, code: check.ok === true ? null : check.code || 'CONFIG_INCOMPATIBLE', checkedAt: check.checkedAt || null } : null;
+  return { installed, version: installed ? PASEO_VERSION : null, enabled: state.desiredEnabled === true, phase, daemon, providers, chatVerified: state.acceptance?.passed === true, pairingAvailable: fs.existsSync(path.join(loc.stateDir, 'pairing.private.json')), diagnosticCode, selectedTarget: target, activeTarget: daemon.running ? activeTarget : null, configurationPending, configCheck, state };
 }
 export async function diagnose() {
   const snapshot = await status(); const launchers = await detectLaunchers();

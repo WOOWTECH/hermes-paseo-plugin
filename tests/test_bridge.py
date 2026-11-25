@@ -341,6 +341,22 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual([action for action, _ in calls], ['status', 'config', 'status'])
         self.assertEqual(b.redact({'saved': True, 'url': 'https://smart.woowtech.io/#offer=x'}), {'saved': True})
 
+    def test_prepare_is_a_runtime_action_with_its_own_time_budget(self):
+        self.assertEqual(b.validate_input('prepare', {}), {})
+        for body in ({'target': 'paseo'}, {'force': True}, {'provider': 'hermes'}, []):
+            with self.subTest(body=body), self.assertRaises(b.BridgeError) as caught:
+                b.validate_input('prepare', body)
+            self.assertEqual(caught.exception.code, 'INVALID_REQUEST')
+        self.assertGreaterEqual(b.TIMEOUTS['prepare'], 480, 'npm may take 300 s after up to 120 s waiting for the runtime lock')
+        answer = {'installed': True, 'daemon': {'running': True}, 'state': {'password': 'raw-state-never-leaves'},
+                  'configCheck': {'ok': False, 'code': 'CONFIG_INCOMPATIBLE', 'checkedAt': 'now'}}
+        with patch.object(b, 'run_process', return_value=answer) as run, patch.object(b, 'resolve_executable', return_value=sys.executable):
+            result = self.bridge.call('prepare')
+        self.assertEqual(run.call_args.args[0][1:], [str(self.bridge.root / 'bin' / 'control.mjs'), 'prepare'])
+        self.assertEqual(run.call_args.args[3], b.TIMEOUTS['prepare'])
+        self.assertEqual(result['configCheck'], {'ok': False, 'code': 'CONFIG_INCOMPATIBLE', 'checkedAt': 'now'})
+        self.assertNotIn('state', result)
+
     def test_status_always_names_a_known_target_and_a_boolean_pending_flag(self):
         decorated = self.bridge._decorate({'selectedTarget': 'evil', 'activeTarget': 'other', 'configurationPending': 'yes'})
         self.assertEqual((decorated['selectedTarget'], decorated['activeTarget'], decorated['configurationPending']), ('paseo', None, False))

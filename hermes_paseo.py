@@ -56,9 +56,11 @@ HOST_CREDENTIALS = (
     'HERMES_DASHBOARD_BASIC_AUTH_SECRET',
     'API_SERVER_KEY',
 )
-TIMEOUTS = {'status': 20, 'start': 480, 'stop': 120, 'models': 165,
+# `prepare` installs the new runtime beside a running daemon: npm may take up to 300 s, and another
+# install can hold the runtime lock for up to 120 s before it. Callers of `prepare` allow 480 s.
+TIMEOUTS = {'status': 20, 'start': 480, 'stop': 120, 'prepare': 480, 'models': 165,
             'pair': 40, 'relay': 75, 'config': 45, 'acceptance': 480, 'chat': 240, 'continue': 240}
-FIELDS = {'status': (), 'start': (), 'stop': (), 'models': ('provider',),
+FIELDS = {'status': (), 'start': (), 'stop': (), 'prepare': (), 'models': ('provider',),
           'pair': (), 'relay': (), 'config': ('target',), 'acceptance': ('providers',),
           'chat': ('provider', 'model', 'mode', 'thinking', 'message'),
           'continue': ('agentId', 'message')}
@@ -90,7 +92,7 @@ reachable relayEnabled relayVerified relayVerifiedAt providers provider label st
 isDefault defaultModeId models defaultThinkingOptionId thinkingOptions chatVerified chatVerifiedAt
 checkedAt passed firstReply followup model modeId thinking agentId message reply errorCode
 available authentication loginHint chatErrorCode cleanup archived workspaceArchived
-selectedTarget activeTarget configurationPending target saved'''.split())
+selectedTarget activeTarget configurationPending target saved configCheck'''.split())
 # Free text hides any official app link and the pairing offer of any other URL (the `#offer=` or
 # `#connect=` fragment onward). Every alternative starts at a fixed token, so no scan runs forward
 # from each character: an earlier form began with an unbounded run before the `#` and took

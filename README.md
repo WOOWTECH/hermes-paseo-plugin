@@ -30,7 +30,7 @@ Gitea 原始碼鏡像：<https://git-prod.woowtech.io/mirror/hermes-paseo-plugin
 
 受管 daemon 由 `@getpaseo/cli` 0.11.2 升到 **0.17.4**（runtime revision `0.17.4-r1-09cdbfab2022`，依賴與 Agent Connect 0.1.24 相同的 lockfile，`npm audit` 0 項）。下載約 400 MB，版本目錄約 1.1 GB。
 
-**升級採「需要重新啟動」的可見步驟，不自動重啟。** 插件更新後，仍在執行的 0.11.2 daemon 繼續服務：狀態、配對、設定重新載入與停止都交給它自己的 0.11.2 版本目錄（`0.11.2-r2-71709cd7872f`），頁面顯示「需要重新啟動」。插件同時在背景安裝 0.17.4，並以 0.17.4 自己的讀取器檢查目前的 `config.json`。結束使用中的對話後按「停止服務」再按「恢復服務」，同一個 `PASEO_HOME` 改由 0.17.4 執行；設定、對話資料、server ID 與 daemon 金鑰保留。理由：
+**升級採「需要重新啟動」的可見步驟，不自動重啟。** 插件更新後，仍在執行的 0.11.2 daemon 繼續服務：狀態、配對、設定重新載入與停止都交給它自己的 0.11.2 版本目錄（`0.11.2-r2-71709cd7872f`），頁面顯示「需要重新啟動」。插件同時在背景安裝 0.17.4，並以 0.17.4 自己的讀取器檢查目前的 `config.json`（等同 `bin/control.mjs prepare`：不啟動、不停止任何 daemon，見[維運](docs/operations.zh-TW.md#預先準備新版prepare)）。結束使用中的對話後按「停止服務」再按「恢復服務」，同一個 `PASEO_HOME` 改由 0.17.4 執行；設定、對話資料、server ID 與 daemon 金鑰保留。理由：
 
 - PaaS 自動更新器本身就是「舊版程式停止 → 安裝 → 新版程式啟動」，插件不需要也不應該再自行重啟。
 - HA 從 Hermes Plugins 以 Git pull 更新，Dashboard 重載不會停止獨立的 daemon；自動重啟會中斷進行中的代理回合。重啟附加元件時容器內所有程序重開，daemon 會直接以新版啟動。

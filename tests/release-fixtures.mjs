@@ -7,6 +7,7 @@ import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { runtimeDirectory, markRuntimeReady, PASEO_VERSION, LEGACY_PASEO_VERSION, PRIOR_RELEASES } from '../src/runtime-layout.mjs';
+import { locations, updateState } from '../src/state.mjs';
 
 const fixtures = new URL('./fixtures/paseo-0.17.4/', import.meta.url);
 export const websocketServerSource = () => gunzipSync(fs.readFileSync(new URL('websocket-server.js.gz', fixtures))).toString();
@@ -20,11 +21,14 @@ export function fixture(prefix = 'hermes-paseo-release-') {
   process.env.HOME = path.join(dir, 'home'); process.env.HERMES_HOME = path.join(dir, 'agent');
   process.env.HERMES_PASEO_STATE_DIR = path.join(dir, 'state'); process.env.HERMES_PASEO_RUNTIME_DIR = path.join(dir, 'runtime');
   delete process.env.HERMES_PASEO_PORT; delete process.env.PASEO_HOME;
-  const children = [];
+  const children = [], cleanups = [];
   return {
     dir, children,
+    /** Runs `fn` when the fixture closes (before its directory is removed). */
+    onClose(fn) { cleanups.push(fn); },
     close() {
       for (const child of children) { try { child.kill('SIGKILL'); } catch {} }
+      for (const fn of cleanups.splice(0).reverse()) { try { fn(); } catch {} }
       for (const [key, value] of Object.entries(saved)) value === undefined ? delete process.env[key] : process.env[key] = value;
       fs.rmSync(dir, { recursive: true, force: true });
     },
@@ -71,9 +75,8 @@ export async function connectToDaemon(options) {
   };
 }
 
-/** This release, ready: original upstream server source patched by markRuntimeReady. */
-export function seedCurrentRelease(loc, { persistedConfig = false, modules = {} } = {}) {
-  const root = runtimeDirectory(loc);
+/** The files `npm ci` leaves for this release (original upstream server source), without a receipt. */
+export function writeCurrentTree(root, { persistedConfig = false, modules = {} } = {}) {
   fs.mkdirSync(root, { recursive: true });
   if (persistedConfig) {
     const result = spawnSync('tar', ['-xzf', new URL('persisted-config.tar.gz', fixtures).pathname, '-C', root], { stdio: 'ignore' });
@@ -90,6 +93,13 @@ fs.appendFileSync(process.env.PASEO_HOME + "/cli-calls", process.argv.slice(2).j
 process.exit(3);
 `);
   for (const [relative, source] of Object.entries(modules)) write(root, relative, source);
+  return root;
+}
+
+/** This release, ready: original upstream server source patched by markRuntimeReady. */
+export function seedCurrentRelease(loc, options = {}) {
+  const root = runtimeDirectory(loc);
+  writeCurrentTree(root, options);
   markRuntimeReady(loc);
   return root;
 }
@@ -129,4 +139,54 @@ export async function fakeSupervisor(f, home, env = {}) {
   const record = { pid: child.pid, uid: process.getuid(), hostname: 'fixture', startedAt: new Date().toISOString(), heartbeat: true, listen: '127.0.0.1:1' };
   fs.writeFileSync(path.join(home, 'paseo.pid'), JSON.stringify(record));
   return { child, record };
+}
+
+/** An installation that owns its (empty) Paseo home, as after a first start. */
+export function ownedHome() {
+  const loc = locations(), state = updateState({ desiredEnabled: true, phase: 'running' });
+  fs.mkdirSync(loc.paseoHome, { recursive: true });
+  fs.writeFileSync(path.join(loc.paseoHome, '.hermes-paseo-owner.json'), JSON.stringify({ installationId: state.installationId, home: loc.paseoHome }));
+  return loc;
+}
+/** What a stand-in recorded in PASEO_HOME (empty when it was never called). */
+export const handled = (loc, name) => { try { return fs.readFileSync(path.join(loc.paseoHome, name), 'utf8'); } catch { return ''; } };
+
+// A stand-in `npm` for the install. `ci` copies a ready-made 0.17.4 tree into <prefix>/node_modules and
+// writes about 1 MiB into the cache directory it was given (or HOME/.npm without one), so a test sees
+// where the cache went. Modes: ok | fail (partial tree, exit 1) | hang (never finishes).
+const FAKE_NPM = `#!${process.execPath}
+const fs = require('fs'), path = require('path');
+const argv = process.argv.slice(2);
+const value = flag => { const i = argv.indexOf(flag); return i >= 0 ? argv[i + 1] : null; };
+const prefix = value('--prefix'), cache = value('--cache') || path.join(process.env.HOME, '.npm');
+const mode = process.env.FAKE_NPM_MODE || 'ok';
+fs.appendFileSync(process.env.FAKE_NPM_LOG, JSON.stringify({ argv, mode, cache, defaultCache: !value('--cache'),
+  existedBefore: fs.existsSync(path.join(prefix, 'node_modules')) }) + '\\n');
+fs.mkdirSync(path.join(cache, '_cacache'), { recursive: true });
+fs.writeFileSync(path.join(cache, '_cacache', 'blob'), Buffer.alloc(1 << 20, 7));
+if (mode === 'hang') { setInterval(() => {}, 1000); return; }
+fs.cpSync(path.join(process.env.FAKE_NPM_TREE, 'node_modules'), path.join(prefix, 'node_modules'), { recursive: true });
+if (mode === 'fail') { fs.rmSync(path.join(prefix, 'node_modules/@getpaseo/cli/bin'), { recursive: true, force: true }); process.exit(1); }
+`;
+/**
+ * Puts a stand-in `npm` first on PATH for this fixture. `tree` is passed to writeCurrentTree;
+ * the tree also carries glibc and musl stand-ins for the Claude SDK's native binary.
+ */
+export function fakeNpm(f, { tree = {} } = {}) {
+  const bin = path.join(f.dir, 'npm-bin'), source = path.join(f.dir, 'npm-tree'), log = path.join(f.dir, 'npm-calls.jsonl');
+  fs.mkdirSync(bin, { recursive: true });
+  writeCurrentTree(source, tree);
+  for (const name of ['claude-agent-sdk-linux-x64', 'claude-agent-sdk-linux-x64-musl', 'claude-agent-sdk-linux-arm64-musl']) {
+    write(source, `node_modules/@anthropic-ai/${name}/claude`, Buffer.alloc(1 << 18, 3));
+  }
+  write(source, 'node_modules/@anthropic-ai/claude-agent-sdk/package.json', '{"name":"@anthropic-ai/claude-agent-sdk"}');
+  fs.writeFileSync(path.join(bin, 'npm'), FAKE_NPM, { mode: 0o755 });
+  const saved = Object.fromEntries(['PATH', 'FAKE_NPM_LOG', 'FAKE_NPM_TREE', 'FAKE_NPM_MODE'].map(key => [key, process.env[key]]));
+  process.env.PATH = [bin, process.env.PATH].join(path.delimiter);
+  Object.assign(process.env, { FAKE_NPM_LOG: log, FAKE_NPM_TREE: source, FAKE_NPM_MODE: 'ok' });
+  f.onClose(() => { for (const [key, value] of Object.entries(saved)) value === undefined ? delete process.env[key] : process.env[key] = value; });
+  return {
+    mode(value) { process.env.FAKE_NPM_MODE = value; },
+    calls() { try { return fs.readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)); } catch { return []; } },
+  };
 }
