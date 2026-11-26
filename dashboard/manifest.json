@@ -1,9 +1,9 @@
 {
   "name": "hermes-paseo",
-  "label": "Paseo",
-  "description": "在 Paseo、Woowtech Smart 或 Apporo Smart 連接 Hermes、探索模型並驗證對話。",
+  "label": "Agent Connect",
+  "description": "透過 Agent Connect 選擇 Woowtech Smart、Apporo Smart 或 Paseo，配對 Hermes 並接續對話。",
   "icon": "MessageSquare",
-  "version": "0.1.5-rc.2",
+  "version": "0.1.5-rc.3",
   "tab": { "path": "/paseo", "position": "end" },
   "slots": ["header-right"],
   "entry": "dist/index.js",

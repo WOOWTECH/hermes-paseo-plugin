@@ -7,6 +7,8 @@
   const { useState, useEffect } = SDK.hooks || React;
   const h = React.createElement;
   const BASE = "/api/plugins/hermes-paseo";
+  const PLUGIN_VERSION = "0.1.5-rc.3";
+  const PAIRING_GUIDE = "https://hermes-agent-connect-pairing.elmolin47.chatgpt.site/";
   const STORAGE = "hermes-paseo:ui:v1";
   const PAUSED = new Set(["disabled", "paused", "stopped", "stopping"]);
   const COMPANIONS = new Set(["claude", "codex", "pi"]);
@@ -83,7 +85,7 @@
       PAIR: "配對服務沒有傳回有效的官方連結，請重新產生。",
       DATA: "服務傳回的狀態格式不完整，請重新檢查。",
       SDK: "此 Dashboard 缺少外掛 API SDK，請由管理者檢查 Hermes Dashboard 版本。",
-      REQUEST: "無法完成操作。請確認 Dashboard 與 Paseo 服務可連線，再重試。"
+      REQUEST: "無法完成操作。請確認 Dashboard 與 Agent Connect 服務可連線，再重試。"
     })[error && error.code] || "無法完成操作，請稍後重試。";
   }
   // authedFetch keeps host authentication without logging response bodies (pairing secrets).
@@ -145,6 +147,7 @@
         typeof value.onboarding.completed !== "boolean") throw fault("DATA");
     return {
       enabled: value.enabled, phase: value.phase,
+      runtimeVersion: typeof value.version === "string" ? text(value.version, "") : null,
       installed: typeof value.installed === "boolean" ? value.installed : null,
       prepare: normalizePrepare(value.prepare),
       acceptanceJob: Object.prototype.hasOwnProperty.call(value, "acceptanceJob") ? normalizeJob(value.acceptanceJob) : undefined,
@@ -406,7 +409,7 @@
       return status.prepare && status.prepare.stage === "failed" ? "新版準備失敗" : "準備新版中";
     }
     if (status.phase === "running" && status.daemon.running && status.diagnosticCode === "RESTART_REQUIRED") return "需要重新啟動";
-    return ({ not_installed: "等待初始化", installing: "正在安裝 Paseo", starting: "正在啟動服務",
+    return ({ not_installed: "等待初始化", installing: "正在準備連線環境", starting: "正在啟動服務",
       running: status.daemon.reachable ? "服務已就緒" : "等待服務連線", ready: "服務已就緒",
       stopped: "服務已中斷", restart_required: "需要重新啟動", error: "啟動失敗" })[status.phase] || "正在確認服務";
   }
@@ -417,9 +420,9 @@
     const snapshot = useSnapshot("header");
     return h("div", { className: "hermes-paseo hp-header", lang: "zh-Hant" },
       h("a", { href: basePath() + "/paseo", onClick: navigate, className: "hp-guide",
-        title: snapshot.readError || "開啟 Paseo 配對與啟用指南" },
+        title: snapshot.readError || "開啟 Agent Connect 配對與啟用指南" },
       h("span", { className: "hp-dot", "data-ready": !!(snapshot.status && snapshot.status.enabled && snapshot.status.daemon.reachable && !markers.paused && !snapshot.readError) }),
-      h("span", null, "Paseo"),
+      h("span", null, "Agent Connect"),
       h("span", { className: "hp-header-status" }, snapshot.readError ? "需要檢查" : phaseCopy(snapshot))));
   }
   function ModelSelectors({ status, blocked }) {
@@ -462,7 +465,7 @@
     }
     return h("section", { className: "hp-card", "aria-label": "模型與模式" },
       h("h2", null, "3. 探索模型與模式"),
-      h("p", { className: "hp-muted" }, "模型與模式由 ACP 即時探索；清單代表可選項，仍須以實際模型切換與回覆確認可用性。選擇後請在 Paseo 建立對話時使用相同設定。"),
+      h("p", { className: "hp-muted" }, "模型與模式由 ACP 即時探索；清單代表可選項，仍須以實際模型切換與回覆確認可用性。請在所選平台建立對話時使用相同設定。"),
       h("div", { className: "hp-fields" },
         select("代理", provider, setProvider, providers.map(row => ({ id: row.provider, label: row.label })), !ready),
         select("模型", model, setModel, catalog ? catalog.models : [], !ready || !catalog || !catalog.models.length),
@@ -621,8 +624,10 @@
     // names no target: none of them pairs.
     const pairBlocked = pending || targetDirty || unreadable;
     return h("div", { className: "hermes-paseo hp-page", lang: "zh-Hant" },
-      h("header", { className: "hp-title" }, h("div", null, h("p", { className: "hp-eyebrow" }, "HERMES × PASEO"),
-        h("h1", null, "把 Hermes 帶到 Paseo"), h("p", { className: "hp-muted" }, "完成服務啟動與官方配對，再從其他裝置繼續對話。")),
+      h("header", { className: "hp-title" }, h("div", null, h("p", { className: "hp-eyebrow" }, "HERMES × AGENT CONNECT"),
+        h("h1", null, "Agent Connect"), h("p", { className: "hp-muted" }, "選擇 Woowtech Smart、Apporo Smart 或 Paseo，配對這台 Hermes，從其他裝置繼續對話。"),
+        h("p", { className: "hp-small hp-version" }, "Agent Connect 外掛 " + PLUGIN_VERSION + (status && status.runtimeVersion ? " · Paseo 底層執行環境 " + status.runtimeVersion : "")),
+        h("a", { className: "hp-button hp-secondary hp-manual", href: PAIRING_GUIDE, target: "_blank", rel: "noopener noreferrer", referrerPolicy: "no-referrer" }, "三平台配對與實測教學")),
         h("span", { className: "hp-badge", role: "status", "aria-live": "polite" }, phaseCopy(snapshot))),
       errors.map(message => h("div", { key: message, className: "hp-error", role: "alert" }, message)),
       h(DashboardReload, { blocked: !!snapshot.busy || snapshot.stopping ||
@@ -632,7 +637,7 @@
         h("p", null, !status ? "正在檢查已啟用外掛的狀態。" : !enabled ? "請在 Hermes 外掛頁啟用 hermes-paseo，再回來開始設定。" :
           paused ? status.daemon.running ? "已要求停止，但服務仍在執行。請等候停止完成，或再次按「停止服務」重試。重新整理不會自動啟動。" : "你已停止服務。重新整理或切換頁面會保留停止狀態；按「恢復服務」才會再啟動。" :
           status.phase === "not_installed" || status.phase === "installing" ? "首次啟用會自動安裝所需的 Paseo 執行環境，可能需要數分鐘。配對精靈已在下方顯示。" :
-          reachable ? "Paseo 已可連線。服務就緒與模型清單不代表已完成真實對話驗證。" : "等待安裝或服務連線完成；你隨時可以停止。"),
+          reachable ? "Agent Connect 已可連線。服務就緒與模型清單不代表已完成真實對話驗證。" : "等待安裝或服務連線完成；你隨時可以停止。"),
         h("ol", { className: "hp-progress" },
           h("li", { "data-done": !!(status && (status.daemon.running || ["starting", "running", "ready", "restart_required"].includes(status.phase))) }, "安裝執行環境"),
           h("li", { "data-done": !!(status && status.daemon.running) }, "啟動服務"),

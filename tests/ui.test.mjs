@@ -6,6 +6,7 @@ import test from 'node:test';
 const source = fs.readFileSync(new URL('../dashboard/dist/index.js', import.meta.url), 'utf8');
 const manifest = JSON.parse(fs.readFileSync(new URL('../dashboard/manifest.json', import.meta.url), 'utf8'));
 const css = fs.readFileSync(new URL('../dashboard/dist/style.css', import.meta.url), 'utf8');
+const pairingGuide = 'https://hermes-agent-connect-pairing.elmolin47.chatgpt.site/';
 const snapshot = (patch = {}) => ({
   enabled: true, phase: 'running', daemon: { running: true, reachable: true },
   providers: [{ provider: 'hermes', label: 'Hermes ACP', status: 'ready' }],
@@ -564,11 +565,11 @@ test('pairing stays as an explicit secure official link and never enters storage
   assert.doesNotMatch(JSON.stringify([...app.storage]), /PRIVATE-PAIR-OFFER/);
   assert.deepEqual(app.logs, []);
   await app.hidden(true);
-  assert.equal(nodes(app.tree()).filter(row => row.type === 'a').length, 0);
+  assert.deepEqual(nodes(app.tree()).filter(row => row.type === 'a').map(row => row.props.href), [pairingGuide]);
   await app.hidden(false);
   await app.click('產生配對連結');
   await app.unmount('page'); await app.mount('page');
-  assert.equal(nodes(app.tree()).filter(row => row.type === 'a').length, 0);
+  assert.deepEqual(nodes(app.tree()).filter(row => row.type === 'a').map(row => row.props.href), [pairingGuide]);
 });
 
 test('nonofficial, credentialed or executable pair URLs are rejected without leaking them', async () => {
@@ -576,7 +577,7 @@ test('nonofficial, credentialed or executable pair URLs are rejected without lea
     'https://app.paseo.sh/pair#offer=SECRET', 'https://app.paseo.sh/?x=1#offer=SECRET', 'https://app.paseo.sh/#token=SECRET', 'https://app.paseo.sh/#offer=', 'https://smart.woowtech.io/#offer=SECRET']) {
     const app = host(); await app.mount('page');
     app.handle('/pair', () => ({ url })); await app.click('產生配對連結');
-    assert.equal(nodes(app.tree()).filter(row => row.type === 'a').length, 0);
+    assert.deepEqual(nodes(app.tree()).filter(row => row.type === 'a').map(row => row.props.href), [pairingGuide]);
     assert.match(content(app.tree()), /有效的官方連結/);
     assert.doesNotMatch(content(app.tree()), /SECRET|evil\.example|javascript:/);
   }
@@ -999,7 +1000,7 @@ test('an unknown or hostile target in the status falls back to Paseo by name and
   for (const bad of ['javascript:alert(1)', '__proto__', 'https://evil.example', '', 7, null, ['apporo']]) {
     const app = host({ status: targeted({ selectedTarget: bad, activeTarget: bad }) }); await app.mount('page');
     const anchors = nodes(app.tree()).filter(row => row.type === 'a').map(row => row.props.href);
-    assert.deepEqual(anchors.filter(Boolean), typeof bad === 'string' ? ['https://app.paseo.sh/'] : [], String(bad));
+    assert.deepEqual(anchors.filter(Boolean), typeof bad === 'string' ? [pairingGuide, 'https://app.paseo.sh/'] : [pairingGuide], String(bad));
     if (typeof bad === 'string') assert.equal(targetSelect(app).props.value, 'paseo');
   }
 });
