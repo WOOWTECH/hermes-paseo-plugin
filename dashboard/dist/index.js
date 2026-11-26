@@ -132,6 +132,12 @@
     return { acceptanceJob: job, acceptanceUncertain: false,
       acceptance: !jobPending(job) && job.phase === "completed" ? job.result : null };
   }
+  function normalizePrepare(value) {
+    if (!value || typeof value !== "object" || !["ready", "pending", "running", "failed"].includes(value.stage)) return null;
+    const count = number => Number.isSafeInteger(number) && number >= 0 ? number : null;
+    return { stage: value.stage, code: typeof value.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.code) ? value.code : "",
+      retryIn: count(value.retryInSeconds), required: count(value.requiredMiB), available: count(value.availableMiB) };
+  }
   function normalize(value) {
     if (!value || typeof value.enabled !== "boolean" || typeof value.phase !== "string" ||
         !value.daemon || typeof value.daemon.running !== "boolean" || typeof value.daemon.reachable !== "boolean" ||
@@ -139,6 +145,8 @@
         typeof value.onboarding.completed !== "boolean") throw fault("DATA");
     return {
       enabled: value.enabled, phase: value.phase,
+      installed: typeof value.installed === "boolean" ? value.installed : null,
+      prepare: normalizePrepare(value.prepare),
       acceptanceJob: Object.prototype.hasOwnProperty.call(value, "acceptanceJob") ? normalizeJob(value.acceptanceJob) : undefined,
       diagnosticCode: typeof value.diagnosticCode === "string" ? value.diagnosticCode : null,
       daemon: { running: value.daemon.running, reachable: value.daemon.reachable },
@@ -394,6 +402,10 @@
     if (!activated(status)) return "外掛尚未啟用";
     if (markers.paused || pausedStatus(status)) return snapshot.busy === "start" ? "正在恢復" : status.daemon.running ? "停止待確認" : "已手動停止";
     if (status.phase === "stopped" && snapshot.busy === "start") return "正在恢復服務";
+    if (status.daemon.running && status.diagnosticCode === "RESTART_REQUIRED" && status.installed === false) {
+      return status.prepare && status.prepare.stage === "failed" ? "新版準備失敗" : "準備新版中";
+    }
+    if (status.phase === "running" && status.daemon.running && status.diagnosticCode === "RESTART_REQUIRED") return "需要重新啟動";
     return ({ not_installed: "等待初始化", installing: "正在安裝 Paseo", starting: "正在啟動服務",
       running: status.daemon.reachable ? "服務已就緒" : "等待服務連線", ready: "服務已就緒",
       stopped: "服務已中斷", restart_required: "需要重新啟動", error: "啟動失敗" })[status.phase] || "正在確認服務";
@@ -600,6 +612,8 @@
     const saved = targetOf(status && status.selectedTarget);
     const draft = snapshot.targetDraft && knownTarget(snapshot.targetDraft) ? snapshot.targetDraft : saved.id;
     const targetDirty = draft !== saved.id;
+    const preparing = !!(status && status.daemon.running && status.diagnosticCode === "RESTART_REQUIRED" && status.installed === false);
+    const prepareFailed = preparing && status.prepare && status.prepare.stage === "failed";
     const pending = !!(status && status.configurationPending);
     const legacy = !!(status && status.targetSupported && !status.targetSaved && !status.connectionCode);
     const unreadable = !!(status && status.targetSupported && status.connectionCode);
@@ -623,13 +637,25 @@
           h("li", { "data-done": !!(status && (status.daemon.running || ["starting", "running", "ready", "restart_required"].includes(status.phase))) }, "安裝執行環境"),
           h("li", { "data-done": !!(status && status.daemon.running) }, "啟動服務"),
           h("li", { "data-done": reachable }, "確認連線")),
-        status && status.phase === "restart_required" && !pending && h("p", { className: "hp-error" }, "Paseo 執行環境需要重啟。請先停止，再恢復服務。"),
+        preparing && h("div", { className: prepareFailed ? "hp-error" : "hp-notice", role: prepareFailed ? "alert" : "status" },
+          h("p", null, prepareFailed
+            ? "新版 Paseo 執行環境準備失敗（原因代碼 " + (status.prepare.code || "未知") + "）。目前服務照常可用，不需要停止或重啟。" +
+              (status.prepare.retryIn !== null ? "約 " + status.prepare.retryIn + " 秒後自動重試；" : "自動重試已停止，可按「立即重試準備」；") +
+              "準備完成後才會提示重啟；仍可按「停止服務」手動停止。"
+            : "正在準備新版 Paseo 執行環境（目前的服務照常可用，不需要任何操作）。準備完成後這裡才會提示重新啟動；仍可按「停止服務」手動停止。"),
+          prepareFailed && status.prepare.code === "INSUFFICIENT_DISK" && status.prepare.required !== null && status.prepare.available !== null &&
+            h("p", null, "磁碟空間不足：安裝需要約 " + status.prepare.required + " MiB 可用，目前只有 " + status.prepare.available + " MiB。清出空間後會自動重試。")),
+        status && !preparing && !pending && (status.phase === "restart_required" || status.diagnosticCode === "RESTART_REQUIRED") && h("p", { className: "hp-error" }, status.installed === true
+          ? "Paseo 執行環境已更新" +
+            "，需要停止再恢復服務才會換成新版本。目前的服務照常可用；請先結束使用中的對話。"
+          : "Paseo 執行環境需要重啟。請先停止，再恢復服務。"),
+
         status && status.phase === "error" && startFailure(status.diagnosticCode) && h("p", { className: "hp-error", role: "alert" },
           startFailure(status.diagnosticCode), "（代碼 " + status.diagnosticCode + "）"),
         h("div", { className: "hp-actions" },
           button(snapshot.stopping ? "正在停止…" : "停止服務", () => void action("stop"), !enabled || snapshot.stopping || dashboardReloading || (paused && !status.daemon.running), true),
-          button(snapshot.busy === "start" ? "正在啟動…" : paused ? "恢復服務" : "重新啟動／重試", () => void action("start"),
-            !enabled || busy || !!snapshot.readError || (!paused && reachable), false),
+          button(snapshot.busy === "start" ? "正在啟動…" : paused ? "恢復服務" : prepareFailed ? "立即重試準備" : "重新啟動／重試", () => void action("start"),
+            !enabled || busy || !!snapshot.readError || (!paused && reachable && !prepareFailed), false),
           button(snapshot.reading ? "檢查中…" : "重新檢查", () => void readStatus(), snapshot.reading || dashboardReloading, true)),
         h("p", { className: "hp-muted hp-small" }, "頁面約每 2 秒檢查一次，頁首約每 5 秒檢查。分頁隱藏時暫停讀取；已送出的操作仍由服務處理。")),
       h("section", { className: "hp-card hp-pair", "aria-label": "配對精靈" },
@@ -648,7 +674,7 @@
           h("p", { className: "hp-small" }, "儲存連線標的（Paseo 也可以）之後，下次啟動服務才會依所選標的寫入 relay、App 網址與 CORS 設定，並先把原來的 config.json 備份為 config.json.pre-agent-connect。")),
         unreadable && h("p", { className: "hp-error", role: "alert" }, connectionIssue(status.connectionCode)),
         targetDirty && h("p", { className: "hp-muted", role: "status" }, "連線標的尚未儲存；儲存後才能產生 " + targetOf(draft).label + " 的配對連結。"),
-        pending && h("div", { className: "hp-notice", role: "status" },
+        pending && !preparing && h("div", { className: "hp-notice", role: "status" },
           h("p", null, "標的已儲存，停止再啟動服務後生效。"),
           h("p", { className: "hp-small" }, status.daemon.running
             ? "目前的服務仍是舊標的：請先結束使用中的對話，按「停止服務」，待停止完成再按「恢復服務」，之後重新產生「" + saved.label + "」的配對連結。已配對的裝置不會被撤銷，切回原標的後仍可使用。"

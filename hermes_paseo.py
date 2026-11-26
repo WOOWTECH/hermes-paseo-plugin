@@ -56,9 +56,9 @@ HOST_CREDENTIALS = (
     'HERMES_DASHBOARD_BASIC_AUTH_SECRET',
     'API_SERVER_KEY',
 )
-TIMEOUTS = {'status': 20, 'start': 480, 'stop': 60, 'models': 165,
+TIMEOUTS = {'status': 20, 'start': 480, 'prepare': 480, 'stop': 60, 'models': 165,
             'pair': 40, 'relay': 75, 'config': 30, 'acceptance': 480, 'chat': 240, 'continue': 240}
-FIELDS = {'status': (), 'start': (), 'stop': (), 'models': ('provider',),
+FIELDS = {'status': (), 'start': (), 'prepare': (), 'stop': (), 'models': ('provider',),
           'pair': (), 'relay': (), 'config': ('target',), 'acceptance': ('providers',),
           'chat': ('provider', 'model', 'mode', 'thinking', 'message'),
           'continue': ('agentId', 'message')}
@@ -88,11 +88,13 @@ CODES = CODES | {'ACCEPTANCE_INTERRUPTED', 'PROVIDER_QUOTA_EXHAUSTED'}
 CODES = CODES | {'INVALID_TARGET', 'CONFIGURATION_PENDING', 'CONNECTION_STATE_CORRUPT', 'CONFIG_INVALID', 'CONFIG_CORRUPT',
                  'BRAND_IDENTITY_SOURCE_MISMATCH', 'BRAND_IDENTITY_PATCH_MISMATCH', 'RUNTIME_NOT_READABLE', 'RUNTIME_NOT_WRITABLE',
                  'CONFIG_BACKUP_FAILED', 'PAIRING_TARGET_MISMATCH', 'PAIRING_OFFER_INVALID', 'PAIRING_SECURITY_UNSUPPORTED'}
+CODES = CODES | {'INSUFFICIENT_DISK', 'RUNTIME_INSTALL_FAILED', 'RUNTIME_INSTALL_TIMEOUT', 'RUNTIME_IN_USE', 'RUNTIME_NOT_READY'}
 PUBLIC_KEYS = frozenset('''ok code installed version enabled phase diagnosticCode daemon running
 reachable relayEnabled relayVerified relayVerifiedAt providers provider label status modes id
 isDefault defaultModeId models defaultThinkingOptionId thinkingOptions chatVerified chatVerifiedAt
 checkedAt passed firstReply followup model modeId thinking agentId message reply errorCode
 available authentication loginHint chatErrorCode cleanup archived workspaceArchived
+prepare stage retryInSeconds requiredMiB availableMiB
 saved target selectedTarget targetSaved connectionCode activeTarget configurationPending'''.split())
 # Free text hides any official app link and the pairing offer of any other URL (the `#offer=` or
 # `#connect=` fragment onward). Every alternative starts at a fixed token, so no scan runs forward
@@ -406,6 +408,11 @@ class Bridge:
         self._error = None
         self._retry_at = None
         self._retry_count = 0
+        self._preparing = False
+        self._prepare_failures = 0
+        self._prepare_retry_at = None
+        self._prepare_given_up = False
+        self._prepare_error = None
         self._operation_lock = threading.Lock()
 
     def dashboard_origin(self):
@@ -655,7 +662,7 @@ class Bridge:
 
     def _decorate(self, result):
         result = copy.deepcopy(result)
-        result.setdefault('installed', False)
+        result['installed'] = result.get('installed') is True
         result.setdefault('version', None)
         result.setdefault('diagnosticCode', None)
         result.setdefault('chatVerified', False)
@@ -678,6 +685,8 @@ class Bridge:
                                if isinstance(row, dict) and row.get('provider') in PROVIDERS]
         result['onboarding'] = self.onboarding()
         result['acceptanceJob'] = self.acceptance_status()
+        if 'prepare' in result or self._preparing or self._prepare_failures:
+            result['prepare'] = self._prepare_view(result.get('prepare'))
         with self._condition:
             if self._phase:
                 result['phase'] = self._phase
@@ -723,14 +732,96 @@ class Bridge:
                 if generation == self._generation and not result.get('diagnosticCode'):
                     self._cache = copy.deepcopy(result)
                     self._cached_at = time.monotonic()
-            return self._decorate(result)
+            decorated = self._decorate(result)
+            self._maybe_prepare(result)
+            return decorated
         finally:
             with self._condition:
                 self._checking = False
                 self._condition.notify_all()
 
+    def _maybe_prepare(self, result):
+        """Install the new release beside an older daemon that keeps serving, without touching configuration.
+
+        A plugin update leaves the previous release's daemon running until the user stops and starts it.
+        Preparing now keeps that restart short and shows, before anything is stopped, whether the new release
+        can take over. `prepare` never starts or stops a daemon. A failed attempt is tried again after the
+        same growing delays as a failed start (RETRY_BACKOFF, RETRY_LIMIT attempts); an explicit start
+        tries at once. Explicit stop remains available even if preparation fails.
+        """
+        daemon = result.get('daemon') or {}
+        if (result.get('diagnosticCode') != 'RESTART_REQUIRED' or result.get('installed') is not False
+                or daemon.get('running') is not True or result.get('enabled') is not True):
+            return
+        with self._condition:
+            if (self._preparing or self._pause_requested
+                    or (self._worker is not None and self._worker.is_alive())
+                    or (self._stop_worker is not None and self._stop_worker.is_alive())):
+                return
+            if self._prepare_given_up or (self._prepare_retry_at is not None and time.monotonic() < self._prepare_retry_at):
+                return  # waiting out the delay, or the attempts are used up
+            try:
+                if (_read_json(self.state_dir / 'onboarding.json') or {}).get('paused'):
+                    return
+            except (BridgeError, OSError):
+                return
+            self._preparing = True
+            context = contextvars.copy_context()
+            self._worker = threading.Thread(target=lambda: context.run(self._prepare),
+                                            name='hermes-paseo-prepare', daemon=True)
+            self._worker.start()
+
+    def _prepare(self):
+        failure = None
+        try:
+            with self._operation_lock:
+                with self._condition:
+                    if self._pause_requested:
+                        return
+                if self._invoke('prepare').get('installed') is not True:
+                    raise BridgeError('RUNTIME_NOT_READY')
+        except Exception as error:
+            failure = error.code if isinstance(error, BridgeError) else 'RUNTIME_INSTALL_FAILED'
+        finally:
+            self._record_prepare(failure)
+
+    def _record_prepare(self, failure):
+        with self._condition:
+            self._preparing = False
+            if failure is None:
+                # Ready. A short pause keeps a status that still disagrees from starting npm checks in a loop.
+                self._prepare_failures, self._prepare_error, self._prepare_given_up = 0, None, False
+                self._prepare_retry_at = time.monotonic() + RETRY_BACKOFF[0]
+            else:
+                self._prepare_failures += 1
+                self._prepare_error = failure
+                self._prepare_given_up = self._prepare_failures >= RETRY_LIMIT
+                self._prepare_retry_at = (None if self._prepare_given_up else
+                                          time.monotonic() + RETRY_BACKOFF[min(self._prepare_failures - 1, len(RETRY_BACKOFF) - 1)])
+        self.invalidate()
+
+    def _prepare_view(self, runtime):
+        """Where the new release stands, for the page: ready, being installed, or why not and when it tries again.
+
+        `runtime` is what the runtime recorded (it survives a Dashboard restart); this process adds that an
+        attempt is running now and when the next one is due."""
+        runtime = runtime if isinstance(runtime, dict) else {}
+        with self._condition:
+            if self._preparing:
+                return {'stage': 'running'}
+            if self._prepare_failures:
+                due = None if self._prepare_given_up else max(0, int(self._prepare_retry_at - time.monotonic() + 0.999))
+                view = {'stage': 'failed', 'code': self._prepare_error if self._prepare_error in CODES else 'OPERATION_FAILED',
+                        'retryInSeconds': due}
+                if runtime.get('code') == view['code']:
+                    view.update({key: runtime[key] for key in ('requiredMiB', 'availableMiB') if isinstance(runtime.get(key), int)})
+                return view
+        stage = runtime.get('stage')
+        return {key: value for key, value in runtime.items() if key != 'retryInSeconds'} if stage in ('ready', 'pending', 'failed') else {'stage': 'pending'}
+
     def _initialize(self):
         verify = False
+        preparing = False
         try:
             with self._operation_lock:
                 with self._condition:
@@ -740,7 +831,17 @@ class Bridge:
                 with self._condition:
                     if self._pause_requested:
                         return
-                result = snapshot if snapshot.get('enabled') and snapshot.get('daemon', {}).get('reachable') and snapshot.get('phase') == 'running' else self._invoke('start')
+                preparing = (snapshot.get('diagnosticCode') == 'RESTART_REQUIRED'
+                             and snapshot.get('installed') is False and snapshot.get('daemon', {}).get('running') is True)
+                if preparing:
+                    with self._condition:
+                        self._preparing, self._phase = True, None
+                    result = self._invoke('prepare')
+                    if result.get('installed') is not True:
+                        raise BridgeError('RUNTIME_NOT_READY')
+                    self._record_prepare(None)
+                else:
+                    result = snapshot if snapshot.get('enabled') and snapshot.get('daemon', {}).get('reachable') and snapshot.get('phase') == 'running' else self._invoke('start')
                 with self._condition:
                     self._phase = 'stopping' if self._pause_requested else None
                     self._error = result.get('diagnosticCode')
@@ -751,6 +852,11 @@ class Bridge:
                 daemon = result.get('daemon') or {}
                 verify = not self._pause_requested and daemon.get('reachable') is True and relay_check_due(daemon)
         except Exception as error:
+            if preparing:
+                with self._condition:
+                    self._phase = self._error = None
+                self._record_prepare(error.code if isinstance(error, BridgeError) else 'RUNTIME_INSTALL_FAILED')
+                return
             with self._condition:
                 self._phase = 'error'
                 self._error = error.code if isinstance(error, BridgeError) else 'START_FAILED'
@@ -781,10 +887,11 @@ class Bridge:
         with self._condition:
             if self._stop_worker is not None and self._stop_worker.is_alive():
                 return self._decorate({'enabled': False, 'phase': 'stopping'})
-            if self._cache and self._cache.get('enabled') and self._cache.get('phase') == 'running' and time.monotonic() - self._cached_at < 3:
+            if self._cache and not self._prepare_failures and self._cache.get('installed') is True and self._cache.get('enabled') and self._cache.get('phase') == 'running' and time.monotonic() - self._cached_at < 3:
                 return self._decorate(self._cache)
             if self._worker is None or not self._worker.is_alive():
                 self._pause_requested = False
+                self._prepare_failures, self._prepare_retry_at, self._prepare_given_up = 0, None, False
                 with _state_lock(self.state_dir):
                     record = _read_json(self.state_dir / 'onboarding.json')
                     record['paused'] = False

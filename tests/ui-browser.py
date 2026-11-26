@@ -100,6 +100,8 @@ class Fixture:
         self.active = None
         self.pending = False
         self.legacy_backend = False
+        self.preparation = None
+        self.prepared = False
 
     def status(self):
         if self.ready_at and time.monotonic() >= self.ready_at:
@@ -118,6 +120,8 @@ class Fixture:
         if not self.legacy_backend:
             value.update(selectedTarget=self.target, targetSaved=self.saved, connectionCode=self.connection_code,
                          activeTarget=self.active if running else None, configurationPending=self.pending)
+        if self.preparation is not None:
+            value.update(installed=self.prepared, prepare=self.preparation, diagnosticCode='RESTART_REQUIRED')
         if self.acceptance_job is not None:
             value['acceptanceJob'] = self.acceptance_job
         return value
@@ -691,6 +695,31 @@ def run(args):
                 assert fixture.count('/reload', 'POST') == 0
                 context.close()
             print('PASS: active installer/start/stop phases disable Dashboard reload.')
+            # The new release could not be installed beside the older daemon: the page says why and when it
+            # tries again instead of advising a stop, and the retry button is the ordinary start request.
+            current = Fixture.reloadable()
+            current.preparation = dict(stage='failed', code='INSUFFICIENT_DISK', retryInSeconds=60, requiredMiB=1536, availableMiB=812)
+            fixture = current
+            context = browser.new_context(viewport=dict(width=390, height=844))
+            context.route('**/*', route)
+            page = context.new_page()
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(origin + '/paseo')
+            expect(page.get_by_text('新版 Paseo 執行環境準備失敗（原因代碼 INSUFFICIENT_DISK）', exact=False)).to_be_visible()
+            expect(page.get_by_text('磁碟空間不足：安裝需要約 1536 MiB 可用，目前只有 812 MiB', exact=False)).to_be_visible()
+            expect(page.get_by_text('約 60 秒後自動重試', exact=False)).to_be_visible()
+            assert page.get_by_text('需要停止再恢復服務', exact=False).count() == 0
+            assert page.get_by_text('啟動失敗', exact=False).count() == 0
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_enabled()
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            retry = page.get_by_role('button', name='立即重試準備', exact=True)
+            expect(retry).to_be_enabled()
+            retry.click()
+            wait_for_calls(page, fixture, '/start', 1)
+            assert fixture.count('/start', 'POST') == 1 and fixture.count('/stop', 'POST') == 0
+            assert_posts(fixture, origin)
+            context.close()
+            print('PASS: a failed preparation shows its code and next try, advises no stop, and retries through the ordinary start request.')
             browser.close()
         assert not errors, f'Browser React errors: {errors}'
         assert not blocked_requests, blocked_requests
