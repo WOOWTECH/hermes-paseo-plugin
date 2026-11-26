@@ -12,7 +12,9 @@ import { sendVerifiedHermesMessage } from './model-selection.mjs';
 import { assistantEntries, latestAssistantCursor, chatResult } from './chat-result.mjs';
 import {singleFlight,daemonStatusWindow} from './single-flight.mjs';
 import {usingAcceptanceAgent,usingAcceptanceWorkspace} from './acceptance-agent.mjs';
-import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,patchInstalledRuntime,RUNTIME_REVISION} from './runtime-layout.mjs';
+import {runtimeDirectory,runtimeReady,prepareRuntimeManifest,markRuntimeReady,patchInstalledRuntime,priorRuntimeDirectory,pruneUnusedPriorReleases,discardPartialRuntime,removeUnusedLibcVariants,RUNTIME_REVISION} from './runtime-layout.mjs';
+import {hostCapacity,INSTALL_PEAK_MIB,OUT_OF_SPACE_MIB} from './host-capacity.mjs';
+import {daemonRevision} from './runtime-processes.mjs';
 import {demonstrablyReusedPid,linuxContainerIdentity,instanceFromPreviousContainer} from './daemon-identity.mjs';
 import {managedFeatures} from './daemon-config.mjs';
 import {CONNECTION_TARGETS,DEFAULT_TARGET,connectionTarget,savedConnection,saveSelectedTarget,requiresBrand,targetConfiguration,targetPairUrl} from './connection-targets.mjs';
@@ -21,9 +23,9 @@ export { locations, readState, updateState } from './state.mjs';
 export const PASEO_VERSION = '0.11.2';
 const PROVIDERS = ['hermes', 'claude', 'codex', 'pi'];
 const safeCode = error => /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code || '') ? error.code : 'RUNTIME_FAILED';
-function packageRoot(pkg = 'cli') { return path.join(runtimeDirectory(locations()), 'node_modules/@getpaseo', pkg); }
-function cliPath() { return path.join(packageRoot(), 'bin/paseo'); }
-function runtimeVersion() { try { return JSON.parse(fs.readFileSync(path.join(packageRoot(), 'package.json'), 'utf8')).version; } catch { return null; } }
+function packageRoot(pkg = 'cli', root = controlRoot()) { return path.join(root, 'node_modules/@getpaseo', pkg); }
+function cliPath(root) { const file=path.join(packageRoot('cli',root),'bin/paseo');assertSafePath(file);return file; }
+function packageVersion(root, pkg) { try { return JSON.parse(fs.readFileSync(path.join(packageRoot(pkg, root), 'package.json'), 'utf8')).version; } catch { return null; } }
 export function inheritedEnv(target) {
   const loc = locations(); const env = { ...process.env, HOME: loc.home, HERMES_HOME: loc.agentDir, PASEO_HOME: loc.paseoHome, NO_COLOR: '1' };
   delete env.PASEO_HOST; delete env.PASEO_AGENT_ID; delete env.PASEO_WORKSPACE_ID; delete env.PASEO_PASSWORD;
@@ -44,8 +46,8 @@ export function inheritedEnv(target) {
   if (target !== undefined) env.HERMES_PASEO_CONNECTION_TARGET = connectionTarget(target).id;
   return env;
 }
-async function cli(args, options = {}) {
-  const result = await runProcess(process.execPath, [cliPath(), '--home', locations().paseoHome, '--json', ...args], { env: inheritedEnv(), ...options });
+async function cli(args, options = {}, root = controlRoot()) {
+  const result = await runProcess(process.execPath, [cliPath(root), '--home', locations().paseoHome, '--json', ...args], { env: inheritedEnv(), ...options });
   try { return JSON.parse(result); } catch { throw new RuntimeError('INVALID_COMMAND_OUTPUT'); }
 }
 function ownerFile() { return path.join(locations().paseoHome, '.hermes-paseo-owner.json'); }
@@ -63,12 +65,26 @@ function ensureOwnedHome() {
 function ownsHome() {
   try { const marker = JSON.parse(fs.readFileSync(ownerFile(), 'utf8')); return marker.installationId === readState().installationId && marker.home === locations().paseoHome; } catch { return false; }
 }
-function legacyVersion() {try{return JSON.parse(fs.readFileSync(path.join(locations().runtimeDir,'node_modules/@getpaseo/cli/package.json'))).version;}catch{return null;}}
-async function serverModule(relative) { const root=fs.existsSync(packageRoot('server'))?packageRoot('server'):path.join(locations().runtimeDir,'node_modules/@getpaseo/server');return import(pathToFileURL(path.join(root, relative)).href); }
-async function controlModule() { return serverModule('dist/server/server/daemon-instance.js'); }
-async function currentInstance() { if ((runtimeVersion() !== PASEO_VERSION&&legacyVersion()!==PASEO_VERSION) || !ownsHome()) return null; return (await controlModule()).readDaemonInstance(locations().paseoHome); }
+/** Resolve only the exact live revision. Sharing a Paseo version does not make releases interchangeable. */
+function controlRuntimeDirectory() {
+ const loc=locations(), revision=daemonRevision(loc);
+ if(revision&&revision!==RUNTIME_REVISION) {
+  const prior=priorRuntimeDirectory(loc,revision);
+  if(!prior)throw new RuntimeError('DAEMON_NOT_OWNED');
+  return prior;
+ }
+ if(revision&&!runtimeReady(loc))throw new RuntimeError('RUNTIME_NOT_READY');
+ return runtimeReady(loc)?runtimeDirectory(loc):null;
+}
+const controlRoot=()=>{const root=controlRuntimeDirectory();if(!root)throw new RuntimeError('RUNTIME_NOT_READY');return root;};
+async function serverModule(relative, root = controlRoot()) {
+ const file=path.join(packageRoot('server',root),relative);assertSafePath(file);
+ return import(pathToFileURL(file).href);
+}
+async function controlModule(root = controlRoot()) { return serverModule('dist/server/server/daemon-instance.js',root); }
+async function currentInstance(root = controlRuntimeDirectory()) { if(!root||!ownsHome())return null; return (await controlModule(root)).readDaemonInstance(locations().paseoHome); }
 function instanceNeedsRuntimeRestart(instance) {
- if(process.platform!=='linux')return false;
+ if(process.platform!=='linux')return readState().daemonRuntimeRevision!==RUNTIME_REVISION;
  try{return !fs.readFileSync(`/proc/${instance.pid}/environ`,'utf8').split('\0').includes(`HERMES_PASEO_RUNTIME_REVISION=${RUNTIME_REVISION}`);}catch{return true;}
 }
 const TARGET_ENTRY = 'HERMES_PASEO_CONNECTION_TARGET=';
@@ -103,7 +119,7 @@ async function runningTarget() {
 const configurationPending = (state, running, target) => running === undefined ? state.configurationPending === true : running !== target;
 // A start leaves nothing pending. The flag is cleared only where it exists, so a profile that never saved a target keeps the state file it had.
 const settledPending = () => readState().configurationPending === undefined ? {} : { configurationPending: false };
-async function verifyInstanceOwnership(instance) {
+async function verifyInstanceOwnership(instance, root = controlRoot()) {
   if (!ownsHome() || !instance || !processIdentity(instance.pid)) throw new RuntimeError('DAEMON_NOT_OWNED');
   if (instance.uid !== (process.getuid?.() ?? instance.uid)) throw new RuntimeError('DAEMON_NOT_OWNED');
   // Linux metadata additionally checks argv and the home actually inherited by this PID.
@@ -111,12 +127,12 @@ async function verifyInstanceOwnership(instance) {
     try {
       const args = fs.readFileSync(`/proc/${instance.pid}/cmdline`, 'utf8').split('\0');
       const env = fs.readFileSync(`/proc/${instance.pid}/environ`, 'utf8').split('\0');
-      const entry = path.join(packageRoot('server'), 'dist/scripts/supervisor-entrypoint.js');
+      const entry = path.join(packageRoot('server',root), 'dist/scripts/supervisor-entrypoint.js');
       const executable = fs.realpathSync(`/proc/${instance.pid}/exe`);
       const expectedNode = fs.realpathSync(process.execPath);
       // Paseo sets process.title, which replaces its original argv on Linux.
       const supervisor = args.includes(entry) || args[0] === 'Paseo Supervisor';
-      if (!supervisor || executable !== expectedNode || instance.heartbeat !== true || !env.includes(`PASEO_HOME=${locations().paseoHome}`)) throw new RuntimeError('DAEMON_NOT_OWNED');
+      if (!supervisor || executable !== expectedNode || instance.heartbeat !== true || !env.includes(`PASEO_HOME=${locations().paseoHome}`) || !env.includes(`HERMES_PASEO_RUNTIME_REVISION=${path.basename(root)}`)) throw new RuntimeError('DAEMON_NOT_OWNED');
     } catch { throw new RuntimeError('DAEMON_NOT_OWNED'); }
   }
 }
@@ -135,18 +151,75 @@ async function releaseReusedPid(instance) {
   await locks.releasePidLock(locations().paseoHome, { ownerPid: current.pid, startedAt: current.startedAt });
   return (await locks.getPidLockInfo(locations().paseoHome)) === null;
 }
-async function installRuntime() {
-  privateDirectory(locations().runtimeDir);
-  if (!runtimeReady(locations())) {
-    const npm = findExecutable('npm'); if (!npm) throw new RuntimeError('NPM_UNAVAILABLE');
-    const root=prepareRuntimeManifest(locations());
-    await runProcess(npm, ['ci', '--prefix', root, '--omit=dev', '--no-audit', '--no-fund'], { timeoutMs: 300000, env: inheritedEnv() });
+// How long `npm ci` may run. A setting, not a constant, so a test can shorten it.
+export const installSettings = { npmTimeoutMs: 300000 };
+// npm's cache lives inside the release directory being installed and goes with the attempt: about 0.4 GB
+// that would otherwise stay in the persistent HOME for good.
+const NPM_CACHE_DIRECTORY = '.npm-cache';
+const INSTALL_FAILURES = new Set(['COMMAND_FAILED', 'COMMAND_OUTPUT_LIMIT', 'COMMAND_UNAVAILABLE', 'COMMAND_ABORTED']);
+/** The version and files of an installed release, which a ready one is also checked against on every start. */
+async function verifyRuntime(root) {
+  const version = await runProcess(process.execPath, [cliPath(root), '--version'], { env: inheritedEnv() });
+  if (version.trim() !== PASEO_VERSION || packageVersion(root, 'cli') !== PASEO_VERSION || packageVersion(root, 'server') !== PASEO_VERSION) throw new RuntimeError('VERSION_MISMATCH');
+  if (!fs.existsSync(path.join(packageRoot('server', root), 'dist/server/web-ui/index.html'))) throw new RuntimeError('WEB_UI_MISSING');
+}
+/** What a failed install is called: the caller sees a stable code, never npm's output. */
+function installFailure(error, availableMiB) {
+  if (error?.code === 'COMMAND_TIMEOUT') return new RuntimeError('RUNTIME_INSTALL_TIMEOUT');
+  if (!INSTALL_FAILURES.has(error?.code)) return error;
+  if (typeof availableMiB === 'number' && availableMiB < OUT_OF_SPACE_MIB) {
+    return new RuntimeError('INSUFFICIENT_DISK', 'INSUFFICIENT_DISK', { requiredMiB: INSTALL_PEAK_MIB, availableMiB });
   }
-  const version = await runProcess(process.execPath, [cliPath(), '--version'], { env: inheritedEnv() });
-  if (version.trim() !== PASEO_VERSION || runtimeVersion() !== PASEO_VERSION) throw new RuntimeError('VERSION_MISMATCH');
-  if (!fs.existsSync(path.join(packageRoot('server'), 'dist/server/web-ui/index.html'))) throw new RuntimeError('WEB_UI_MISSING');
-  markRuntimeReady(locations());
-  updateState({ installedVersion: PASEO_VERSION,installedRuntimeRevision:RUNTIME_REVISION });
+  return new RuntimeError('RUNTIME_INSTALL_FAILED');
+}
+/**
+ * A new install of this release, from nothing. Whatever an earlier attempt left is discarded first (it
+ * carries no receipt, so it never counted as a release), unless a running daemon claims this very
+ * directory. The volume must hold the install's peak before anything is created. A failed attempt
+ * removes everything it made, so the next one starts clean and nothing that looks ready is left behind.
+ */
+async function installFresh(loc) {
+  const npm = findExecutable('npm'); if (!npm) throw new RuntimeError('NPM_UNAVAILABLE');
+  const root = runtimeDirectory(loc);
+  if (daemonRevision(loc) === RUNTIME_REVISION) throw new RuntimeError('RUNTIME_IN_USE');
+  discardPartialRuntime(loc);
+  const available = hostCapacity.availableMiB(loc.runtimeDir);
+  if (typeof available === 'number' && available < INSTALL_PEAK_MIB) {
+    throw new RuntimeError('INSUFFICIENT_DISK', 'INSUFFICIENT_DISK', { requiredMiB: INSTALL_PEAK_MIB, availableMiB: available });
+  }
+  privateDirectory(loc.runtimeDir);
+  prepareRuntimeManifest(loc);
+  const cache = path.join(root, NPM_CACHE_DIRECTORY);
+  try {
+    await runProcess(npm, ['ci', '--prefix', root, '--omit=dev', '--no-audit', '--no-fund', '--cache', cache], { timeoutMs: installSettings.npmTimeoutMs, env: inheritedEnv() });
+    assertSafePath(cache);fs.rmSync(cache, { recursive: true, force: true });
+    removeUnusedLibcVariants(root);
+    await verifyRuntime(root);
+    markRuntimeReady(loc);
+  } catch (error) {
+    const left = hostCapacity.availableMiB(loc.runtimeDir); // measured with the partial tree still on the volume
+    try { discardPartialRuntime(loc); } catch { /* the next attempt discards it */ }
+    throw installFailure(error, left);
+  }
+}
+/**
+ * Installs this release beside any earlier one; an earlier release is never modified. The outcome of
+ * an install is kept in the state so the status can say why a release is not ready.
+ */
+async function installRuntime() {
+  const loc = locations();
+  if (!runtimeReady(loc)) {
+    try { await installFresh(loc); }
+    catch (error) {
+      try { updateState({ runtimeInstall: { revision: RUNTIME_REVISION, ok: false, code: safeCode(error), at: new Date().toISOString(), ...error.details } }); } catch { /* the original failure is the one to report */ }
+      throw error;
+    }
+  } else {
+    // An installed release is verified again, never reinstalled or removed here: a daemon may run from it.
+    try { await verifyRuntime(runtimeDirectory(loc)); }
+    catch(error) {updateState({runtimeInstall:{revision:RUNTIME_REVISION,ok:false,code:safeCode(error),at:new Date().toISOString()}});throw error;}
+  }
+  updateState({ installedVersion: PASEO_VERSION, installedRuntimeRevision: RUNTIME_REVISION, runtimeInstall: null });
 }
 async function choosePort(preferred) {
   for (let port = preferred; port <= Math.min(65535, preferred + 50); port++) {
@@ -194,7 +267,10 @@ function safeProvider(entry) {
   return { provider: entry.provider, label: entry.label || entry.provider, status: entry.status || (entry.available === true ? 'ready' : entry.available === false ? 'unavailable' : 'unknown'), enabled: entry.enabled !== false, defaultModeId: entry.defaultModeId || null, modes: (entry.modes || []).map(mode => ({ id: mode.id, label: mode.label || mode.id })), chatVerified: readState().acceptance?.providers?.some(row => row.provider === entry.provider && row.passed) || false };
 }
 async function withClient(fn, timeoutMs = 30000) {
-  const { connectToDaemon } = await import(pathToFileURL(path.join(packageRoot(), 'dist/utils/client.js')).href);
+  const root=controlRoot();
+  await verifyInstanceOwnership(await currentInstance(root),root);
+  const file=path.join(packageRoot('cli',root),'dist/utils/client.js');assertSafePath(file);
+  const { connectToDaemon } = await import(pathToFileURL(file).href);
   const client = await connectToDaemon({ target: { kind: 'instance', home: locations().paseoHome }, timeout: 5000 });
   let timer;
   try {
@@ -202,9 +278,23 @@ async function withClient(fn, timeoutMs = 30000) {
   } catch (error) { throw new RuntimeError(safeCode(error)); }
   finally { clearTimeout(timer); await client.close().catch(() => {}); }
 }
+/** Install/verify only: no ownership marker, config, target patch, daemon start/stop or enabled intent changes. */
+export async function prepare() {
+ if(runtimeReady(locations()))await installRuntime();
+ else await withRuntimeLock(installRuntime,{timeoutMs:120000});
+ return status();
+}
 export async function activate(options = {}) {
   return withRuntimeLock(async () => {
-    ensureOwnedHome(); updateState({ desiredEnabled: true, phase: 'installing', lastError: null });
+    ensureOwnedHome();
+    let before=await currentInstance();
+    if(before) {
+      try {await verifyInstanceOwnership(before);} catch(error) {if(await releaseReusedPid(before))before=null;else throw error;}
+    }
+    if(before) {
+      if(instanceNeedsRuntimeRestart(before)) {await installRuntime();return status();}
+    }
+    updateState({ desiredEnabled: true, phase: 'installing', lastError: null });
     try {
       if (Number(process.versions.node.split('.')[0]) < 22) throw new RuntimeError('NODE_VERSION_UNSUPPORTED');
       // A damaged choice stops here, before minutes of npm; the choice is read again where it is applied. Until a target
@@ -252,12 +342,13 @@ export async function activate(options = {}) {
         if (target !== undefined && requiresBrand(target)) patchInstalledRuntime(locations());
         await writeConfig(port, launchers, target);
         updateState({ phase: 'starting' });
-        await cli(['daemon', 'start', '--timeout', '90'], target === undefined ? { timeoutMs: 105000 } : { timeoutMs: 105000, env: inheritedEnv(target) });
+        await cli(['daemon', 'start', '--timeout', '90'], target === undefined ? { timeoutMs: 105000 } : { timeoutMs: 105000, env: inheritedEnv(target) },runtimeDirectory(locations()));
         const instance = await currentInstance(); await verifyInstanceOwnership(instance);
-        updateState({ phase: 'running', providerReloadPending: null, daemonPid: instance.pid, daemonStartedAt: instance.startedAt, daemonContainerIdentity: linuxContainerIdentity(), ...(target === undefined ? {} : { activeTarget: target }), ...settledPending() });
+        updateState({ phase: 'running', providerReloadPending: null, daemonPid: instance.pid, daemonStartedAt: instance.startedAt, daemonRuntimeRevision:RUNTIME_REVISION, daemonContainerIdentity: linuxContainerIdentity(), ...(target === undefined ? {} : { activeTarget: target }), ...settledPending() });
       }
       const result = await status();
       if (!result.daemon.reachable) throw new RuntimeError('DAEMON_UNREACHABLE');
+      pruneUnusedPriorReleases(locations());
       updateState({ lastDiagnostic: { checkedAt: new Date().toISOString(), daemonReachable: true, providers: result.providers.map(row => ({ provider: row.provider, status: row.status })) } });
       return status();
     } catch (error) { updateState({ phase: error.code === 'RESTART_REQUIRED' ? 'restart_required' : 'error', lastError: { code: safeCode(error), at: new Date().toISOString() } }); throw new RuntimeError(safeCode(error)); }
@@ -265,7 +356,6 @@ export async function activate(options = {}) {
 }
 export async function deactivate() {
   return withRuntimeLock(async () => {
-    updateState({ desiredEnabled: false });
     let instance = await currentInstance();
     if (instance) {
       try { await verifyInstanceOwnership(instance); }
@@ -278,7 +368,7 @@ export async function deactivate() {
       try { await control.stopDaemonInstance(locations().paseoHome, { instance, timeoutMs: 20000, force: false }); }
       catch (error) { throw new RuntimeError(safeCode(error)); }
     }
-    updateState({ phase: 'disabled', daemonPid: null, daemonStartedAt: null, daemonContainerIdentity: null });
+    updateState({ desiredEnabled:false, phase: 'disabled', daemonRuntimeRevision:null, daemonPid: null, daemonStartedAt: null, daemonContainerIdentity: null });
     return status();
   });
 }
@@ -295,11 +385,11 @@ async function readStatus() {
   // Relay evidence counts only for the target it was taken on; a record from before targets existed was Paseo's.
   const verified = state.relayVerification?.verified === true && (state.relayVerification.target ?? DEFAULT_TARGET) === target;
   const daemon = { running: false, reachable: false, owned, pid: null, listen: null, relayEnabled: false, relayConnected: null, relayVerified: verified, relayVerifiedAt: verified ? state.relayVerification.checkedAt || null : null };
-  if ((installed||legacyVersion()===PASEO_VERSION) && owned) {
+  if (owned) {
     try {
       const instance = await currentInstance();
       if (instance) {
-        await verifyInstanceOwnership(instance); daemon.running = true; daemon.pid = instance.pid; daemon.listen = instance.listen;
+        await verifyInstanceOwnership(instance); daemon.running = true; daemon.version=PASEO_VERSION; daemon.runtimeRevision=path.basename(controlRoot()); daemon.pid = instance.pid; daemon.listen = instance.listen;
         activeTarget = daemonTarget(instance);
         if(instanceNeedsRuntimeRestart(instance))diagnosticCode='RESTART_REQUIRED';
         const key=JSON.stringify([locations().paseoHome,instance.pid,instance.startedAt,state.updatedAt]);
@@ -316,7 +406,8 @@ async function readStatus() {
   // unattended recovery accepts only 'not_installed' / 'stopped'.
   const stalled = ['running', 'installing', 'starting'].includes(state.phase);
   const phase = stalled && !daemon.running ? 'stopped' : state.phase || 'not_installed';
-  return { installed, version: installed ? PASEO_VERSION : null, enabled: state.desiredEnabled === true, phase, daemon, providers, chatVerified: state.acceptance?.passed === true, pairingAvailable: typeof state.pairingCreatedAt === 'string', diagnosticCode,
+  const failure=state.runtimeInstall?.revision===RUNTIME_REVISION&&state.runtimeInstall.ok===false?state.runtimeInstall:null;
+  return { installed: installed&&!failure, prepare:{stage:failure?'failed':installed?'ready':'pending',code:failure?.code||null,...(failure?{at:failure.at}:{}),...(failure?.requiredMiB===undefined?{}:{requiredMiB:failure.requiredMiB,availableMiB:failure.availableMiB})}, version: installed ? PASEO_VERSION : null, enabled: state.desiredEnabled === true, phase, daemon, providers, chatVerified: state.acceptance?.passed === true, pairingAvailable: typeof state.pairingCreatedAt === 'string', diagnosticCode,
     selectedTarget: target, targetSaved, connectionCode, activeTarget: daemon.running ? activeTarget : null, configurationPending: configurationPending(state, daemon.running ? activeTarget : undefined, target), state };
 }
 export async function diagnose() {
@@ -405,7 +496,9 @@ export async function saveConnectionSettings(input) {
   return { saved: true, target, configurationPending: configurationPending(readState(), running, target) };
 }
 async function connectViaOffer(url, work, timeoutMs = 30000) {
-  const { connectToDaemon } = await import(pathToFileURL(path.join(packageRoot(), 'dist/utils/client.js')).href);
+  const root=controlRoot();
+  const file=path.join(packageRoot('cli',root),'dist/utils/client.js');assertSafePath(file);
+  const { connectToDaemon } = await import(pathToFileURL(file).href);
   // An endpoint target keeps its client id under $PASEO_HOME; use the managed home, never ~/.paseo.
   const saved = process.env.PASEO_HOME; process.env.PASEO_HOME = locations().paseoHome;
   let client;

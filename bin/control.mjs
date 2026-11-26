@@ -15,5 +15,5 @@ try {
  respond(result);
 } catch(e) {
  const code=/^[A-Z][A-Z0-9_]{0,63}$/.test(e?.code||'')?e.code:'OPERATION_FAILED';
- respond({ok:false,code},1);
+ respond({ok:false,code,...(action==='prepare'?{installed:false,prepare:{stage:'failed',code,...(Number.isFinite(e?.details?.availableMiB)?{availableMiB:e.details.availableMiB,requiredMiB:e.details.requiredMiB}:{})}}:{})},1);
 }
