@@ -6,7 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { spawnSync } from 'child_process';
 
 export class RuntimeError extends Error {
-  constructor(code, message = code) { super(message); this.name = 'RuntimeError'; this.code = code; }
+  constructor(code, message = code, details) { super(message); this.name = 'RuntimeError'; this.code = code; if(details)this.details=details; }
 }
 export function locations() {
   const home = path.resolve(process.env.HOME || os.homedir());

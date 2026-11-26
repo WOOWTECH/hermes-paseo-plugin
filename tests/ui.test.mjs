@@ -1115,3 +1115,66 @@ test('the Dashboard zh-TW wording for targets stays Traditional Chinese', () => 
   // Characters that exist only in Simplified Chinese (the Dashboard's other copy is Traditional).
   assert.doesNotMatch(copy, /[连线标储务启动开关态选择码链对话测试验证设绑]/);
 });
+
+const unprepared = (prepare, patch = {}) => targeted({ diagnosticCode: 'RESTART_REQUIRED', installed: false, prepare,
+  daemon: { running: true, reachable: true, version: '0.11.2' }, ...patch });
+
+test('while the new release is being installed beside an older daemon the page says so and advises nothing the service would refuse', async () => {
+  const app = host({ status: unprepared({ stage: 'running' }) }); await app.mount('page');
+  const text = content(app.tree());
+  assert.match(text, /正在準備新版 Paseo 執行環境/);
+  assert.match(text, /準備新版中/);
+  assert.doesNotMatch(text, /需要停止再恢復服務才會換成新版本|需要重新啟動|執行環境已更新/);
+  assert.equal(buttonNode(app, '停止服務').props.disabled, false, 'an explicit stop remains possible');
+  assert.equal(buttonNode(app, '重新啟動／重試').props.disabled, true, 'nothing to retry while it runs');
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, false, 'the older daemon still pairs');
+  assert.equal(count(app, '/start'), 0);
+  // Ready: only now is the restart advised.
+  app.status(targeted({ diagnosticCode: 'RESTART_REQUIRED', installed: true, prepare: { stage: 'ready' }, daemon: { running: true, reachable: true, version: '0.11.2' } })); await app.advance(2000);
+  assert.match(content(app.tree()), /Paseo 執行環境已更新/);
+  assert.doesNotMatch(content(app.tree()), /正在準備新版|準備失敗/);
+});
+
+test('a failed preparation shows its code and the next try, never the stop-and-restart advice, and can be retried by hand', async () => {
+  const app = host({ status: unprepared({ stage: 'failed', code: 'RUNTIME_INSTALL_FAILED', retryInSeconds: 60 }, { phase: 'running' }) });
+  await app.mount('header'); await app.mount('page');
+  const text = content(app.tree());
+  assert.match(text, /新版 Paseo 執行環境準備失敗（原因代碼 RUNTIME_INSTALL_FAILED）/);
+  assert.match(text, /目前服務照常可用，不需要停止或重啟/);
+  assert.match(text, /約 60 秒後自動重試/);
+  assert.match(text, /仍可按「停止服務」手動停止/);
+  assert.match(text, /新版準備失敗/);
+  assert.doesNotMatch(text, /需要停止再恢復服務才會換成新版本|啟動失敗|需要重新啟動/);
+  assert.match(content(app.tree('header')), /新版準備失敗/);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, false);
+  // The retry button posts the ordinary start request: the service retries the preparation at once.
+  app.handle('/start', () => { app.status(unprepared({ stage: 'running' })); return {}; });
+  await app.click('立即重試準備');
+  assert.equal(count(app, '/start', 'POST'), 1);
+  assert.equal(app.calls.find(call => call.path.endsWith('/start')).init.body, '{}');
+  assert.match(content(app.tree()), /正在準備新版/);
+  assert.equal(count(app, '/stop'), 0);
+});
+
+test('a preparation that ran out of space or attempts says exactly that', async () => {
+  const app = host({ status: unprepared({ stage: 'failed', code: 'INSUFFICIENT_DISK', retryInSeconds: 30, requiredMiB: 1536, availableMiB: 812 }) });
+  await app.mount('page');
+  assert.match(content(app.tree()), /磁碟空間不足：安裝需要約 1536 MiB 可用，目前只有 812 MiB/);
+  app.status(unprepared({ stage: 'failed', code: 'RUNTIME_INSTALL_TIMEOUT', retryInSeconds: null })); await app.advance(2000);
+  assert.match(content(app.tree()), /自動重試已停止，可按「立即重試準備」/);
+  assert.doesNotMatch(content(app.tree()), /磁碟空間不足|秒後自動重試/);
+  assert.equal(buttonNode(app, '立即重試準備').props.disabled, false);
+});
+
+test('preparation data from the service is validated: unknown stages, odd codes and bad numbers are not trusted', async () => {
+  for (const prepare of [{ stage: 'exploded', code: 'X' }, 'failed', null, { stage: 'failed', code: 'lowercase/path', retryInSeconds: -5, requiredMiB: 'many', availableMiB: 1.5 }]) {
+    const app = host({ status: unprepared(prepare) }); await app.mount('page');
+    const text = content(app.tree());
+    assert.doesNotMatch(text, /lowercase|\/path|many|-5/);
+    assert.match(text, /準備新版|新版 Paseo 執行環境準備失敗/);
+    assert.doesNotMatch(text, /磁碟空間不足/);
+  }
+  const odd = host({ status: unprepared({ stage: 'failed', code: 'lowercase/path', retryInSeconds: -5 }) }); await odd.mount('page');
+  assert.match(content(odd.tree()), /原因代碼 未知）/);
+  assert.match(content(odd.tree()), /自動重試已停止/);
+});

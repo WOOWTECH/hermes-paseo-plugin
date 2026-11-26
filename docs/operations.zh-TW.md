@@ -41,7 +41,7 @@ Paseo 插件資料位於 `$HERMES_HOME/plugin-data/hermes-paseo`。可重建的 
 | `woowtech` | `https://smart.woowtech.io` | `relay.woowtech.io:443` |
 | `apporo` | `https://smart.apporo.ai` | `relay.apporo.ai:443` |
 
-- **舊模式與管理模式（選擇才生效）**：沒有人儲存過標的（`connection.json` 不存在）時是**舊模式**，插件的一切與 0.1.4-rc.9 相同：啟動 daemon 不寫入 `app.baseUrl`、`daemon.relay.*`、CORS，不補丁 runtime、不要求補丁，不備份、不刪除任何檔案，`config.json` 與 runtime 目錄逐位元組不變；狀態回報 `selectedTarget: paseo`、`targetSaved: false`、`configurationPending: false`，沒有記錄標的的 daemon 視為 `paseo`。第一次儲存標的（**包含 Paseo**）進入**管理模式**：從下一次啟動 daemon 起才寫入所選標的的設定。因此從 rc.9 自動更新，在有人儲存標的之前什麼都不會改變。
+- **舊模式與管理模式（選擇才生效）**：`connection.json` 不存在時，沿用 rc.9 的 App／relay／CORS 行為，不新增標的設定覆寫、不要求品牌補丁、不做標的設定備份。安全 runtime 仍會安裝至獨立 r3 目錄。狀態為 `selectedTarget: paseo`、`targetSaved: false`；第一次儲存標的（包含 Paseo）後，下一次 daemon 啟動才套用其設定。
 - **保存位置**：`plugin-data/hermes-paseo/connection.json`，內容是 `{"version":1,"target":"<id>"}`，權限 `600`。這個檔案刻意**不是** `preferences.json`：rc.9 遇到沒有顯示名稱的 `preferences.json` 會拒絕啟動，回滾必須行得通。檔案不存在代表舊模式；內容無法辨識（壞掉、版本不符、多出欄位、不是三個 id 之一）時，狀態回報 `connectionCode: CONNECTION_STATE_CORRUPT`，Dashboard 暫時顯示 Paseo、說明原因、不產生配對連結，啟動也停在這個代碼，**不會**被當成預設值；在插件頁儲存目前顯示（或重新選擇）的標的即可取代壞掉的紀錄。路徑經過符號連結時回報 `UNSAFE_SYMLINK`：插件不會跟隨或取代它，畫面也不提供儲存，必須由管理者處理該路徑。
 - **儲存**：Dashboard 的 **儲存連線標的** 呼叫 `POST /api/plugins/hermes-paseo/config`，本體只有 `{"target":"<id>"}`；同樣經過 Origin、Fetch Metadata、JSON 與大小檢查。對應的 `control.mjs config` 也只收 `target`。它不是模型工具（沒有 `paseo_config`）。儲存只寫 `connection.json` 與狀態旗標，**不詢問任何 daemon、不取用 runtime 鎖**：啟用中的 `npm ci` 可以持鎖數分鐘，儲存不必等它。
 - **等待套用**：標的改變時，設定標為待套用（`configurationPending`）、清除舊標的的 relay 驗證結果與配對紀錄，並保留 daemon 的 server ID 與金鑰。**只有下一次停止再啟動才會套用**；選回目前執行中的標的則不算待套用。第一次儲存而且選的就是目前顯示的 Paseo 不算變更，不會待套用，但它的設定也要到下一次啟動才寫入。狀態回報 `selectedTarget`（已儲存的）、`targetSaved`（是否有人儲存過）、`activeTarget`（執行中 daemon 啟動時的標的；停止時為 `null`）與 `configurationPending`。環境裡沒有標的紀錄的 daemon（rc.9 或舊模式啟動的）視為 `paseo`。
@@ -74,42 +74,52 @@ Paseo 插件資料位於 `$HERMES_HOME/plugin-data/hermes-paseo`。可重建的 
 Woowtech Smart 與 Apporo Smart 的網頁 App 要求 daemon 的握手（`server_info`）帶有 `brand: {id, name}`；上游 Paseo 0.11.2 不送。作法與 Pi 的 Agent Connect 相同：以雜湊釘住的補丁在 `node_modules/@getpaseo/server/dist/server/server/websocket-server.js` 的 `status: "server_info",` 之後加一行 `brand: agentConnectBrand,`，檔首加一行 import，並在同一目錄放輔助檔 `hermes-paseo-brand-identity.mjs`。輔助檔讀取環境變數 `HERMES_PASEO_CONNECTION_TARGET`（未設定即 `paseo`，其他非三個 id 的值使 daemon 無法載入該檔而啟動失敗，這是故意的封閉式失敗）。
 
 - 原檔 SHA-256 `ba8122d01dd17533231a573097ec4e9f91f4fd12caada107adb9f6706f5f8950`，補丁後 `7c4d2a764e2971da9cdcbc8c93cc5f467f632b04d55e1a3a8334abad8cd9abaf`。輔助檔檔名是本插件自己的，所以補丁後的雜湊與 Pi 插件的不同；以 Pi 的檔名做同樣的轉換，得到該插件的補丁雜湊，測試以此證明兩者是同一個轉換。
-- **就地、不換版本**：補丁直接改已安裝的 runtime（`runtime/releases/0.11.2-r2-…`），沒有新的 revision 或目錄；`runtime/package.json` 與 `runtime/package-lock.json` 未動。「runtime 已就緒」仍然只看鎖定檔雜湊與 CLI 版本是 0.11.2，所以缺少補丁絕不會讓程式再執行 `npm ci`。
-- **何時套用**：只有 Smart 標的（`woowtech`、`apporo`）需要補丁，也只有已儲存這兩個標的的啟動才會補：在 daemon 啟動前、持有 runtime 鎖、確認沒有 daemon 從該 release 目錄執行時，就地補在已安裝的 runtime 上（包括 rc.9 留下的）。**安裝與補丁是兩件事**：補丁不屬於「runtime 已就緒」的判定，所以補丁失敗不會讓下一次嘗試重新執行 `npm ci`。Paseo 與舊模式不補丁、也不要求補丁：`websocket-server.js` 被改過、讀不到或唯讀都不會影響它們啟動；已補丁的 runtime 對 Paseo 原樣保留（沒有環境變數時輔助檔的品牌就是 `paseo`）。執行中的 daemon 絕不會被這件事重啟，它保持沒有品牌的握手直到下一次停止再啟動。
+- **補丁與安全 runtime 分開**：rc.2 的 runtime 位於 `runtime/releases/0.11.2-r3-523d451cc096`。就緒收據僅包含確切 revision 與鎖定檔 SHA-256，另核對 CLI／server 都是 0.11.2；品牌補丁不在就緒條件內。`prepare` 絕不套補丁，補丁失敗也不觸發重新安裝。
+- **何時套用**：只有 Smart 標的（`woowtech`、`apporo`）需要補丁，也只有已儲存這兩個標的的啟動才會補：在 daemon 啟動前、持有 runtime 鎖、確認沒有 daemon 從該 release 目錄執行時，就地補在已安裝的 runtime 上（本版只啟動 r3，保留的 r2 不改動）。**安裝與補丁是兩件事**：補丁不屬於「runtime 已就緒」的判定，所以補丁失敗不會讓下一次嘗試重新執行 `npm ci`。Paseo 與舊模式不補丁、也不要求補丁：`websocket-server.js` 被改過、讀不到或唯讀都不會影響它們啟動；已補丁的 runtime 對 Paseo 原樣保留（沒有環境變數時輔助檔的品牌就是 `paseo`）。執行中的 daemon 絕不會被這件事重啟，它保持沒有品牌的握手直到下一次停止再啟動。
 - **安全**：先寫輔助檔（補丁後的檔案會 import 它），再以「暫存檔加 rename」寫入 `websocket-server.js`，兩個檔案的雜湊寫完後都再驗證，驗證失敗會把原檔放回；原檔雜湊未知、補丁後的檔案被改過、路徑上任何一層是符號連結、或該路徑不是一般檔案（FIFO 等以非阻塞方式開啟後判定，不會卡住啟動）時一律拒絕，並且不改任何檔案（`BRAND_IDENTITY_SOURCE_MISMATCH`、`BRAND_IDENTITY_PATCH_MISMATCH`、`UNSAFE_SYMLINK`）；權限不足或唯讀檔案系統回報 `RUNTIME_NOT_READABLE`／`RUNTIME_NOT_WRITABLE`。拒絕時 daemon 不會啟動，各代碼的處理見上節的表。
 - **檢查**：`sha256sum node_modules/@getpaseo/server/dist/server/server/websocket-server.js`（在該 release 目錄下）等於補丁後雜湊，且同目錄有輔助檔，表示已補丁。
-- **相容 rc.9**：rc.9 判定 runtime 就緒只看鎖定檔雜湊與 CLI 版本，所以接受已補丁的 runtime。以 rc.9 啟動的 daemon 沒有 `HERMES_PASEO_CONNECTION_TARGET`，握手品牌是 `paseo`。
+- **回滾**：rc.9 使用自己保留的 r2 runtime，不把 r3 當成 rc.9 的安裝。r2 即使曾被 rc.1 加過 Smart 補丁，rc.9 的就緒條件仍接受它；沒有標的環境變數時品牌是 `paseo`。
 
 ## PaaS 自動更新器與本版
 
-本版不改 `host/` 的轉接檔（`dashboard_control.py`、`profile_lifecycle.py`、`resource_limits.py`、`hermes` 與其餘），`plugin.yaml` 只改 `version` 行，`package.json` 沒有相依套件，`runtime/package.json` 與 `runtime/package-lock.json` 與 0.1.4-rc.9 位元組相同；`git diff 1101a5d HEAD --stat -- host runtime bin` 沒有輸出可以重現這一點。所以更新器的 `host_adapter_changed`、`plugin_capabilities_changed` 與 `dependency_manifest_changed` 檢查不會擋這個版本。Hermes 原生安全掃描以本機的 Hermes v0.22.5 plugin-guard 對 rc.9 比對，沒有新增項目（見[驗收紀錄](validation.md)）；這是比對方式的模擬，不是更新器本身的執行結果。
+0.1.5-rc.2 保持 `host/` 與 rc.9 位元組相同，`plugin.yaml` 只有版本行不同。`runtime/package*.json` **已改變**；chart 0.4.9 的 `dependency_manifest_changed` 閘門會拒絕，必須搭配 chart **0.4.10** 審核與部署。以下是外掛對 rollout 的契約，不是已完成的叢集驗收。
 
-**把 `v0.1.5-rc.1` 發佈成 Release 之前請先讀這一段：就目前的 CI 狀態，它會讓所有啟用自動更新的服務每天失敗一次。** 以下依 Hermes chart 0.4.9 的 `paseo-auto-update.py` 逐項核對：
+允許清單須同時匹配兩個完整 SHA-256（不可只按 Paseo 版本放行）：
 
-- **哪一版會被選中。** 更新器的 `latest_release()` 取**版本最高的已發布 Release**：只排除 draft，**不看 pre-release 旗標**，以 `(主, 次, 修, 非 rc 為 1／rc 為 0, rc 編號)` 比較。`v0.1.5-rc.1` 是 `(0,1,5,0,1)`，高於 rc.9 的 `(0,1,4,0,9)`，所以一發佈成 Release（勾了 pre-release 也一樣），它就是每台服務下一個要評估的版本。
-- **一定要五項檢查全綠。** `verify_release` 要求該 commit 上兩組 Unit tests、兩組 Browser 與 `Locked dependency audit` 各自最新一輪都成功。`Locked dependency audit` 目前是紅燈：`runtime/package-lock.json` 釘住 `hono` 4.13.13 與 `@hono/node-server` 2.1.4，`npm audit --omit=dev --prefix runtime` 回報 2 項 moderate（上游新公告；對 rc.9 的檔案樹結果相同），`main` 最近兩次的每週排程稽核也以同樣原因失敗。
-- **失敗不計次數，所以不會停。** 檢查沒有全綠時更新器丟出 `release_checks_not_green`，這發生在 `record_failure` 之前，沒有重試上限：每台服務的每日更新 Job 與 `probe` **每天都會失敗**，而且什麼都不會安裝、daemon 也不會被重啟，直到有更高的版本出現。
-- **用較低的 tag 救不了。** 版本較低的 tag 贏不了它；熱修補需要更高的版本號，而且那一版也必須通過稽核。把稽核修綠需要更新 `runtime/` 的鎖定檔，但鎖定檔與已安裝的那份不同時，`validate_candidate` 會以 `dependency_manifest_changed` 拒絕，所以那是 runtime 變更，要走另一條需要 chart 配合、凍結整批服務的發版流程。
-- **只推 tag 更新器看不到。** 更新器只列出 Release，不列 tag。
+| 檔案 | SHA-256 |
+|---|---|
+| `runtime/package.json` | `42a34afe83cb3d2733277d1251df8164dd22bf5874aaceac01dbc991602f067b` |
+| `runtime/package-lock.json` | `523d451cc096c7ded2e8a92c3107021d48fc6768cdfc543e94b68a134649f240` |
 
-**結論：在稽核轉綠、而且 chart 允許新的鎖定檔之前，只推 tag，不要發佈 Release。** 要在專用服務試用時，直接指定 commit 安裝（canary，不經更新器）：
+1. 以相同服務 UID／profile 環境，在已審核的候選版目錄執行 `node bin/control.mjs prepare`，stdin 為 `{}`。預算 **480 秒**（鎖等待上限 120 秒、npm 上限 300 秒及驗證／狀態時間）。正在服務的舊 daemon 保持運作。
+2. **只有退出碼 0 且 JSON 的 `installed` 是布林值 `true` 才能繼續**。沒有 `configCheck` 契約，也不做 0.17.4 的設定正規化或內建 Hermes provider 遷移。失敗為非零退出碼、`installed: false`、安全的 `code`／`prepare` 資訊；不回傳 npm 原始輸出、秘密或私人路徑。
+3. 成功後才停止舊 daemon、安裝候選插件並啟動。啟動仍需獨立健康檢查；`prepare` 只保證 runtime 安裝與版本驗證，不證明模型、relay 或應用服務健康。
+4. 回滾時先以新版停止新 daemon，再還原插件並啟動保留的 r2。chart 的 start 預算不應拿來重新下載 runtime。
 
-```bash
-hermes plugins install WOOWTECH/hermes-paseo-plugin --ref <commit-sha> --force --enable
-```
+`prepare` 可重複呼叫：已就緒時只重新驗證，不再 npm、不改收據、不等待 runtime 安裝鎖。它不建立 daemon home、不修改 `desiredEnabled`／服務 phase、不改 config、server ID、金鑰或選擇的標的。對執行中的 r2，status／配對／對話／停止只載入那份確切 r2 的模組；即使同樣是 Paseo 0.11.2，也不以版本號推測 revision。未知、缺收據或被替換的 runtime 不會轉用任意目錄控制 daemon。
 
-要發佈 Release，必須先修好 runtime 鎖定檔，並讓 chart 接受它，再讓五項檢查全綠。
+Dashboard／主機輪詢發現執行中的舊版時會背景準備。失敗使用 30、60、120、300、600、900 秒（之後維持 900）退避，本 Dashboard 程序最多 8 次；用完後由使用者按「立即重試準備」。準備失敗不會永久標記已嘗試、不會把正在服務的 daemon 顯示為啟動失敗、不會自動暫停。明確停止仍可使用，若準備尚在執行，停止會排在後面；準備失敗不阻止已要求的停止。
 
-更新前後 daemon 的行為：**自動更新器會重啟執行中的 daemon。** 在啟用 `paseoAutoUpdate` 的服務上，更新器對執行中的 daemon 依序做 `control stop`、`hermes plugins install … --ref <sha> --force --enable`、`control start`，所以 daemon 會以新版程式碼啟動一次；更新後 Dashboard 重載與 Plugin Doctor 檢查若不健康，它會裝回上一版並再 `control stop`、`control start`（以舊程式碼）。手動更新（Web／CLI 安裝、Git pull 並重載 Dashboard）才不會重啟仍在執行的 daemon。
+### 容量與清理
 
-這次由更新器發起的重啟，在本版**什麼都不會改變**：沒有人儲存過連線標的（沒有 `connection.json`）時，啟動與 0.1.4-rc.9 的啟動完全相同，不寫入 relay、App 網址或 CORS，不補丁 runtime，不備份，不刪檔，daemon 視為 Paseo，`config.json` 與 runtime 目錄位元組不變。連線標的與品牌補丁要等有人在插件頁儲存標的（Paseo 也算）之後的**下一次**停止再啟動才套用。若更新器因 Dashboard 或 daemon 不健康而自動裝回上一版，上一版（rc.9）接受已補丁的 runtime 與新版寫下的 `config.json`，見下節。
+- 安裝前使用檔案系統的可用空間檢查，至少 **1536 MiB**；不足回報 `INSUFFICIENT_DISK`（`requiredMiB`／`availableMiB`），不停止或刪除舊服務。無法讀取 statfs 時沿用 npm 安裝及失敗處理，不能視為容量已保證。
+- npm cache 位於本次新 runtime 的 `.npm-cache`，成功後刪除；失敗則安全丟棄整份部分安裝，重試從乾淨目錄開始。只有空目錄或本外掛 manifest、當前 UID 擁有且非符號連結的目錄可丟棄；執行中 runtime 不刪。
+- 只有確認 glibc 時，移除未使用的 `@anthropic-ai/claude-agent-sdk-*-musl` 原生 SDK 目錄；musl 與其他主機保留。
+- 只有新版 daemon 成功啟動且可連線後才清理已知 r1。**最新前版 r2 一律保留，即使空間偏低**：這刻意不同於暫緩 0.17.4 分支的低空間政策，確保回滾不需下載。若容量不夠，寧可準備失敗並保留舊服務。
+- 清理檢查確切 receipt／manifest／套件版本、目錄擁有者，以及整張同 UID 程序表（含其他 profile 的 worker）。先檢查 `/proc/<pid>` 擁有者，跳過其他 UID 的 root／s6 程序；同 UID metadata 不可讀即保留。殭屍程序無執行映像，不算使用中。未知／未來 revision、連結或仍被使用的 runtime 一律不動；無可用 Linux 程序證據時保留。
+
+`RUNTIME_INSTALL_FAILED`／`RUNTIME_INSTALL_TIMEOUT` 可在修好網路後重試；`INSUFFICIENT_DISK` 先清出空間；`RUNTIME_IN_USE` 表示 runtime 仍被程序使用或無法安全確認；`RUNTIME_NOT_OWNED`／`UNSAFE_SYMLINK` 需檢查路徑，不能強制刪除。
+
+若主機限制讀取同 UID 程序的 `/proc` 資料（例如受保護的 systemd 使用者管理程序），失敗安裝的殘留也會保留，後續準備可能回報 `RUNTIME_IN_USE`；這時不會強行清理或停止舊服務。安裝前的 manifest 先在 release 目錄外完整寫入，再原子發布；中斷不會在 release 留下無法辨識的空 manifest。SIGKILL 仍可能留下小型 `.manifest-*` 暫存目錄，不會作為 runtime 使用。
+
+Release 仍需等 chart 0.4.10 部署、沙盒與回滾驗收，以及五項 GitHub 檢查全綠。pre-release 仍會被更新器選中，不能用 pre-release 旗標替代 rollout 閘門。
 
 ## 回滾到 0.1.4-rc.9
 
-0. **從沒儲存過標的的服務（舊模式）不需要做任何準備**，直接降版：`config.json` 與 runtime 都是 rc.9 的。以下是儲存過標的的服務：
+0. 先確認 r2 runtime 保留，並用 rc.2 停止 r3 daemon 後才切換舊版程式碼。從沒儲存標的時連線設定仍是 rc.9 的；已儲存 Smart 標的時，先做下一步切回 Paseo，再停止及降版。
 1. **先在插件頁切回 Paseo**：選 **Paseo**、儲存，按 **停止服務** 再 **恢復服務**，確認畫面沒有「標的已儲存…」的提示，產生的配對連結是 `app.paseo.sh`。要連 relay 與 App 網址的自訂值也一併拿回，再依上節「一次性備份」的步驟還原 `config.json.pre-agent-connect`。
-2. 再降到 0.1.4-rc.9（Git 切換或更新器回滾）。rc.9 接受已補丁的 runtime、不會重新安裝；新版寫下的 `config.json`（app、relay、CORS）rc.9 照原樣保留，且是 0.11.2 設定檔接受的內容。
-3. 若沒有先切回 Paseo：rc.9 的 daemon 仍會啟動，但 rc.9 只放行 `app.paseo.sh` 的配對連結，所以在 Smart 標的下它會拒絕產生配對連結（`PAIRING_ORIGIN_INVALID`）。補救方式是重新升到 0.1.5-rc.1、切回 Paseo、停止再啟動，然後再降版。
+2. 再降到 0.1.4-rc.9（Git 切換或更新器回滾）。rc.9 使用保留的 r2 runtime、不需重新安裝；新版寫下的 `config.json`（app、relay、CORS）rc.9 照原樣保留，且是 0.11.2 設定檔接受的內容。
+3. 若沒有先切回 Paseo：rc.9 的 daemon 仍會啟動，但 rc.9 只放行 `app.paseo.sh` 的配對連結，所以在 Smart 標的下它會拒絕產生配對連結（`PAIRING_ORIGIN_INVALID`）。補救方式是重新升到 0.1.5-rc.2、切回 Paseo、停止再啟動，然後再降版。
 4. 已配對的裝置不受影響：server ID 與金鑰在整個切換與回滾期間都沒有改變。
 
 ## 驗證官方 relay 迴路
@@ -133,7 +143,7 @@ node "$HERMES_HOME/plugins/hermes-paseo/bin/control.mjs" relay <<< '{}'
 發 release 時請注意：
 
 1. **tag 一推就會再跑一輪 CI**（約 1–2 分鐘；Chromium 安裝偶爾卡住，要重跑）。這段時間排程剛好執行，會因為檢查還沒全綠而拒絕，不計入失敗次數，隔天再試。要立刻更新時，先等這一輪綠燈。
-2. 變更 `host/`、`plugin.yaml` 能力或新增相依套件的版本不會被自動安裝，需要另外發 chart／HA 映像。0.1.5-rc.1 的檔案不屬於這一類，但發佈成 Release 會被稽核紅燈擋下並每天失敗，見下面[本版的說明](#paas-自動更新器與本版)。
+2. 變更 `host/`、`plugin.yaml` 能力或新增相依套件的版本不會被自動安裝，需要另外發 chart／HA 映像。0.1.5-rc.2 保留原有 host 與能力，修復 rc.1 的兩項相依套件弱點；新 runtime manifest pair 及停止前準備流程需要 **chart 0.4.10** 配合，見下面[本版的說明](#paas-自動更新器與本版)。
 3. 更新後若重載的 Dashboard、daemon 或 Plugin Doctor 不健康，更新器會自動裝回上一版、重啟 daemon 並再重載一次，Job 仍標示失敗以便察覺；失敗的版本只重試一次，之後要等更新的 release。
 4. 多台服務各自排程、互不把關。要先在專用服務驗證時：暫停其他服務的 CronJob（`spec.suspend: true`），在專用服務以 `kubectl create job --from=cronjob/<名稱>` 手動執行並驗證，通過後再逐台執行並恢復排程。rc.6 就是這樣發佈的。
 

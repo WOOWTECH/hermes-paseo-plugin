@@ -169,28 +169,22 @@ test('a stale or damaged helper beside a patched server is rewritten, a damaged 
   assert.equal(brandIdentityPatchReady(root), false);
 });
 
-test('readiness stays the lock and the CLI version: an unpatched install is ready, and a patched one is ready to rc.9 as well', t => {
+test('r3 readiness verifies the receipt and CLI/server versions independently of Smart branding', t => {
   const { root, server, loc } = release(t);
   const cli = path.join(root, 'node_modules/@getpaseo/cli/package.json');
   fs.mkdirSync(path.dirname(cli), { recursive: true });
   fs.writeFileSync(cli, JSON.stringify({ version: '0.11.2' }));
+  fs.writeFileSync(path.join(root,'node_modules/@getpaseo/server/package.json'),JSON.stringify({version:'0.11.2'}));
   // What rc.9 left behind: installed, ready, not patched. It must never be installed again for lack of a patch.
   markRuntimeReady(loc);
   assert.equal(runtimeReady(loc), true);
   assert.equal(brandIdentityPatchReady(root), false);
   assert.equal(sha(fs.readFileSync(server)), ORIGINAL_BRAND_SERVER_SHA256);
-  // rc.9's own predicate, verbatim from its src/runtime-layout.mjs: the lock hash in the receipt and the CLI version, nothing else.
   const lockSha256 = sha(fs.readFileSync(new URL('../runtime/package-lock.json', import.meta.url)));
-  const rc9Ready = () => { try {
-    const receipt = JSON.parse(fs.readFileSync(path.join(root, '.hermes-paseo-runtime.json')));
-    return receipt.lockSha256 === lockSha256 && JSON.parse(fs.readFileSync(path.join(root, 'node_modules/@getpaseo/cli/package.json'))).version === '0.11.2';
-  } catch { return false; } };
-  assert.equal(rc9Ready(), true);
-  assert.equal(RUNTIME_REVISION, '0.11.2-r2-' + lockSha256.slice(0, 12), 'the revision, and so the release directory, is the one rc.9 installed');
+  assert.equal(RUNTIME_REVISION,'0.11.2-r3-'+lockSha256.slice(0,12));
   patchInstalledRuntime(loc);
   assert.equal(brandIdentityPatchReady(root), true);
   assert.equal(runtimeReady(loc), true);
-  assert.equal(rc9Ready(), true, 'rc.9 accepts the patched runtime');
   assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(root, '.hermes-paseo-runtime.json'), 'utf8'))).sort(), ['lockSha256', 'revision'], 'the receipt keeps its two fields');
 });
 
@@ -199,6 +193,7 @@ test('marking a runtime ready never touches the server, so no patch problem can 
   const cli = path.join(root, 'node_modules/@getpaseo/cli/package.json');
   fs.mkdirSync(path.dirname(cli), { recursive: true });
   fs.writeFileSync(cli, JSON.stringify({ version: '0.11.2' }));
+  fs.writeFileSync(path.join(root,'node_modules/@getpaseo/server/package.json'),JSON.stringify({version:'0.11.2'}));
   assert.equal(runtimeReady(loc), false, 'no receipt yet');
   // The same receipt rc.9 wrote, and nothing else: the patch belongs to a start for a Smart target (patchInstalledRuntime).
   for (const bytes of [source, source + '\n// edited by someone\n']) {

@@ -1,8 +1,42 @@
 # Hermes Paseo 驗收紀錄
 
-## 0.1.5-rc.1：連線標的（Paseo、Woowtech Smart、Apporo Smart）
+## 0.1.5-rc.2：安全 runtime 與停止前準備（2026-11-26，本機）
 
-本版讓 Dashboard 選擇 daemon 使用的 relay 與網頁 App，預設仍是 Paseo。**不更動 daemon（仍是 Paseo 0.11.2），也不更動 runtime 鎖定檔**：`runtime/`、`host/`、`bin/` 與 0.1.4-rc.9 位元組相同，`plugin.yaml` 只改 `version` 行（`git diff 1101a5d HEAD --stat` 可重現）。
+基於 Step1 `d63578d`；runtime／橋接／UI 核心檢查點為 `3e034d4`。Paseo 維持 **0.11.2**，Hermes 的 `extends: acp` provider 與模型／mode 程式碼不變，目標相容版本仍為 Hermes **0.22.5**。只更新 `hono 4.13.13 → 4.13.16` 與 `@hono/node-server 2.1.4 → 2.1.6`；lock diff 沒有其他套件變更。新 revision 為 `0.11.2-r3-523d451cc096`，完整 manifest hash 見[維運文件](operations.zh-TW.md#paas-自動更新器與本版)。
+
+本機 Linux、UID 1000、Node **22.23.3**、Python **3.11.2**，結果如下：
+
+| 驗證 | 結果與範圍 |
+|---|---|
+| `node --test tests/*.test.mjs` | **235/235 通過**（最終完整重跑）；涵蓋既有 opt-in、Smart patch、ACP 模型保護、鎖、relay、UI 回歸，以及程序使用相對 runtime 路徑時保守保留目錄。 |
+| `python -m unittest discover -s tests -p 'test_*.py'` | **120/120 通過**；新增準備失敗保留 serving phase、8 次退避上限、立即重試、嚴格布林 installed、明確停止及停止排隊等測試。 |
+| React／Chromium | 全部情境通過，包含準備失敗／低空間／立即重試及原有 opt-in 流程；Playwright **1.64.1**，現有 Chromium build **1234**（Chrome for Testing **151.0.7922.34**）。API 與官方 App 是本機 fixtures，無付費模型呼叫。 |
+| `npm audit --omit=dev --prefix runtime` | **0 vulnerabilities**；兩份 manifest SHA-256 與審核 pair 一致。 |
+| 原生 plugin-guard v11 | 以提供的 `scan_compare.py`、Hermes upstream 與 rc.9 基準，掃描乾淨候選原始碼樹及 `.mjs` 鏡像；**23 → 23，新增 0**，完整 signature 不變。不是實際 chart 更新器執行。 |
+| chart 候選內容 gate | 協調者回報 chart **0.4.10**（`a81a2a2`）的實際 `validate_candidate` 對核心 `3e034d41ce8634ae4790098b02ab7d502f205cf3` 的乾淨 Git archive 與 rc.9 比較通過；`runtime_changed: true`，host／capabilities／原生掃描（含 `.mjs`）gate 均通過。這是該固定 SHA 的內容檢查，未執行服務更新。 |
+| 套件邊界 | `host/` 與 rc.9 沒有差異；`plugin.yaml` 僅 version 行改為 rc.2。沒有 0.17.4 設定正規化、`CONFIG_INCOMPATIBLE` 或內建 Hermes provider 遷移。 |
+
+**安裝驗證**：在本 worktree 的隔離資料目錄，以 UID 1000 執行真實 `node bin/control.mjs prepare`（真實 npm 下載），退出 0、`installed: true`；CLI／server 都是 0.11.2，Hono 套件版本符合上表。再次準備成功，receipt 的 mtime 不變，`.npm-cache` 已移除，glibc 的 musl SDK 目錄皆已移除；磁碟使用約 **565 MiB**。沒有建立 daemon home、沒有套品牌補丁、沒有啟動真實 daemon。這是單一 x64 安裝結果，不是其他架構的容量保證。
+
+**升級／清理測試**：使用活著的本機 stand-in supervisor 與標記呼叫來源的 0.11.2 lifecycle fixtures，確認 r3 準備前後 status／chat／stop 都使用確切 r2 模組；同版本不足以授權未知 revision、錯誤 receipt 或符號連結。準備不改 config（包含壞 JSON）、server ID、金鑰、選定標的，不做 config migration。失敗安裝、timeout、空間不足、快取清理與乾淨重試均通過。r1 只在新 daemon 可連線後清理；活著的同 UID 使用者、未知／未來／連結目錄保留，r2 永遠保留供回滾。
+
+**混合 UID 邊界**：測試用程序表 fixture 明確包含另一 UID 的 root／s6 類程序，驗證先判 UID、跳過它的不可讀 metadata，失敗安裝可清理並重試；同 UID metadata 不可讀仍拒絕清理。真實安裝及失敗重試測試都以非 root UID 1000 執行，但本機 PID namespace 只有 UID 1000，所以**沒有宣稱已在真實混合 UID HA／PaaS 容器驗收**。
+
+重現方式（所有暫存寫入 worktree 內）：
+
+```bash
+mkdir -p artifacts/tmp
+TMPDIR="$PWD/artifacts/tmp" node --test tests/*.test.mjs
+TMPDIR="$PWD/artifacts/tmp" PYTHONDONTWRITEBYTECODE=1 /data/pi-agent/home/work/hermes-validation-1126-venv/bin/python -m unittest discover -s tests -p 'test_*.py'
+node --check dashboard/dist/index.js
+npm audit --omit=dev --prefix runtime --cache "$PWD/artifacts/npm-cache"
+```
+
+本次只提交本機分支；**未推送、合併、打 tag、發 Release 或改動服務／叢集**。chart **0.4.10** 必須放行這個完整 manifest pair，並在舊 daemon 停止前驗證候選 `prepare` 的退出碼與嚴格 `installed === true`（不要求 `configCheck`）。仍須由獨立沙盒／chart 工作完成真實 Hermes 0.22.5 對話、升級／回滾及 rollout 驗收；下方 Step1／rc.9 歷史實測不能當成 rc.2 live 驗收。
+
+## 歷史 0.1.5-rc.1：連線標的（Paseo、Woowtech Smart、Apporo Smart）
+
+本版讓 Dashboard 選擇 daemon 使用的 relay 與網頁 App，預設仍是 Paseo。**不更動 daemon（仍是 Paseo 0.11.2），也不更動 runtime 鎖定檔**：`runtime/`、`host/`、`bin/` 與 0.1.4-rc.9 位元組相同，`plugin.yaml` 只改 `version` 行（歷史 Step1：`git diff 1101a5d d63578d --stat` 可重現）。
 
 自動測試（2026-11-25，本機 Node 22.23.3、Python 3.12 與 3.11）：Node 162 項、Python 112 項全數通過；`node --check dashboard/dist/index.js` 通過。React／Chromium 瀏覽器測試（本機 Playwright 1.62.0 與 Chromium 1255，不是 CI 鎖定的 1.64.1）全部情境通過，新增「儲存標的後等待套用、停止再恢復、產生並開啟 Woowtech Smart 配對連結（opener 與 referrer 為空）」「未儲存的選擇在頁面輪詢後仍保留」「舊後端沒有標的欄位時維持僅 Paseo」；API 與官方網頁皆為本機模擬。三份標的表（Node、Python 橋接、Dashboard）有一致性測試，並以改動任一欄位證明測試會失敗。
 
