@@ -21,7 +21,7 @@ const olderDaemon = async (f, loc) => {
 
 test('prepare installs the new runtime beside a running rc.9 daemon without touching it or its config', async t => {
   const f = fixture(); t.after(() => f.close());
-  const npm = fakeNpm(f, { tree: { persistedConfig: true, modules: lifecycleModules('current') } });
+  const npm = fakeNpm(f, { tree: { modules: lifecycleModules('current') } });
   const loc = ownedHome();
   const { child } = await olderDaemon(f, loc);
   fs.writeFileSync(configFile(loc), JSON.stringify(COMPATIBLE));
@@ -45,7 +45,7 @@ test('prepare installs the new runtime beside a running rc.9 daemon without touc
 
 test('preparing again does nothing: no npm, and no runtime lock while there is nothing to install', async t => {
   const f = fixture(); t.after(() => f.close());
-  const npm = fakeNpm(f, { tree: { persistedConfig: true } });
+  const npm = fakeNpm(f);
   const loc = ownedHome();
   await olderDaemon(f, loc);
   await prepare();
@@ -60,7 +60,7 @@ test('preparing again does nothing: no npm, and no runtime lock while there is n
 
 test('two prepares at once install once', async t => {
   const f = fixture(); t.after(() => f.close());
-  const npm = fakeNpm(f, { tree: { persistedConfig: true } });
+  const npm = fakeNpm(f);
   ownedHome();
   const [first, second] = await Promise.all([prepare(), prepare()]);
   assert.equal(first.installed && second.installed, true);
@@ -81,7 +81,7 @@ test('prepare never reads or rewrites config, keys or selected target, even with
 
 test('prepare on a fresh installation only installs: no Paseo home, no daemon, no recorded start', async t => {
   const f = fixture(); t.after(() => f.close());
-  fakeNpm(f, { tree: { persistedConfig: true } });
+  fakeNpm(f);
   const loc = locations();
   const result = await prepare();
   assert.equal(result.installed, true);
@@ -95,7 +95,7 @@ test('prepare is a control action with no input, answering with the public statu
   assert.deepEqual(validateInput('prepare', {}), {});
   for (const input of [{ target: 'paseo' }, { force: true }, { provider: 'hermes' }, []]) assert.throws(() => validateInput('prepare', input), { code: 'INVALID_REQUEST' });
   const f = fixture(); t.after(() => f.close());
-  fakeNpm(f, { tree: { persistedConfig: true } });
+  fakeNpm(f);
   const shown = publicStatus(await prepare());
   assert.equal(shown.installed, true);
   assert.equal(shown.prepare.stage, 'ready');
@@ -104,7 +104,7 @@ test('prepare is a control action with no input, answering with the public statu
 
 test('bin/control.mjs prepare: exit 0 with the status when ready, the failing code and exit 1 otherwise', async t => {
   const f = fixture(); t.after(() => f.close());
-  const npm = fakeNpm(f, { tree: { persistedConfig: true } });
+  const npm = fakeNpm(f);
   const run = () => spawnSync(process.execPath, ['bin/control.mjs', 'prepare'], { cwd: new URL('..', import.meta.url), input: '{}', encoding: 'utf8', timeout: 60000, env: process.env });
   npm.mode('fail');
   const failed = run();
@@ -128,7 +128,7 @@ test('bin/control.mjs prepare: exit 0 with the status when ready, the failing co
 
 test('prepare refuses a runtime directory it does not own', async t => {
   const f = fixture(); t.after(() => f.close());
-  fakeNpm(f, { tree: { persistedConfig: true } });
+  fakeNpm(f);
   const root = runtimeDirectory(locations());
   fs.mkdirSync(root, { recursive: true });
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'somebody-elses-project' }));
@@ -138,7 +138,7 @@ test('prepare refuses a runtime directory it does not own', async t => {
 
 test('an installed release needs no npm even when npm is missing', async t => {
   const f = fixture(); t.after(() => f.close());
-  seedCurrentRelease(locations(), { persistedConfig: true });
+  seedCurrentRelease(locations());
   // A PATH with the lock helper and nothing else: no npm anywhere.
   const bin = path.join(f.dir, 'no-npm-bin'); fs.mkdirSync(bin);
   fs.symlinkSync(spawnSync('sh', ['-c', 'command -v flock'], { encoding: 'utf8' }).stdout.trim(), path.join(bin, 'flock'));

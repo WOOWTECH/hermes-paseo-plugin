@@ -1,6 +1,6 @@
 # Hermes Paseo plugin
 
-Hermes Agent / Web 插件：啟用後準備固定 Paseo runtime，在受保護的插件頁完成官方加密 relay 配對（可選 Paseo、Woowtech Smart 或 Apporo Smart），於所選的網頁 App 選取 Hermes ACP 模型並建立及接續對話。目前版本 **0.1.5-rc.1**。
+Hermes Agent / Web 插件：啟用後準備固定 Paseo runtime，在受保護的插件頁完成官方加密 relay 配對（可選 Paseo、Woowtech Smart 或 Apporo Smart），於所選的網頁 App 選取 Hermes ACP 模型並建立及接續對話。目前版本 **0.1.5-rc.2**。
 
 公開 repo：<https://github.com/WOOWTECH/hermes-paseo-plugin>。下載不需要 GitHub 帳號或 token。
 
@@ -8,15 +8,19 @@ Gitea 原始碼鏡像：<https://git-prod.woowtech.io/mirror/hermes-paseo-plugin
 
 完整中文教學：[下載、安裝、部署與測試](docs/install.zh-TW.md)。
 
-**0.1.5-rc.1 新增連線標的**（見下方 [連線標的](#連線標的)）：在插件頁選擇 daemon 使用 Paseo、Woowtech Smart 或 Apporo Smart 的 relay 與網頁 App，預設仍是 Paseo，而且沒有人儲存標的之前，插件的行為與 0.1.4-rc.9 完全相同。本版**不更動 daemon，也不更動 runtime 鎖定檔**：受管 daemon 仍是 Paseo 0.11.2，`runtime/package.json` 與 `runtime/package-lock.json` 與 0.1.4-rc.9 位元組相同，已安裝的 runtime 不會重新下載或重新執行 `npm ci`。
+**0.1.5-rc.2 安全更新與 runtime 預先準備**：維持 Paseo **0.11.2** 與 Hermes **0.22.5** 的 ACP 設定，僅將兩項相依套件固定為 `hono 4.13.16`、`@hono/node-server 2.1.6`。runtime 改為 `0.11.2-r3-523d451cc096`；先執行 `node bin/control.mjs prepare`，在舊 daemon 持續服務時安裝及驗證新 runtime，確認退出碼 0 且 JSON 的 `installed === true` 後才停止舊 daemon。`prepare` 不改寫設定、不啟停服務、不套品牌補丁。PaaS rollout 依賴 **chart 0.4.10** 的已審核 manifest 允許清單與 prepare-before-stop 流程；chart 0.4.9 會拒絕這份新鎖定檔。本分支僅供審查，尚未發布或完成 live rollout 驗收。
+
+0.1.5-rc.1 的連線標的仍是**選擇才生效**：沒有儲存標的時，沿用 rc.9 的 App／relay／CORS 行為、不套品牌補丁。安全 runtime 的安裝獨立於連線標的；Smart 補丁只在啟動明確儲存的 Smart 標的前套用。
+
+安裝前需至少 **1536 MiB 可用空間**；不足時回報 `INSUFFICIENT_DISK`，舊服務不受影響。每次安裝使用私有 npm cache 並清掉；glibc 主機移除不使用的 musl SDK。新版成功啟動後僅清理無程序使用的已知舊 runtime，**一律保留最新前版 r2 供離線回滾**，不因低空間刪掉它。
 
 目前為公開預覽版本。部署到正式環境前，請在自己的主機完成 Web 安裝／啟用、官方配對及首輪／續聊驗收；各版本的支援範圍與驗收方式見 [實測紀錄](docs/validation.md)。
 
-2026-10-26 最新重測：PaaS `.263` 已透過服務專用版本固定及原生 Redeploy，將測試站升至 chart `0.4.0`。Dashboard adapter、原 Hermes 映像、CPU 限制與 10 GiB 磁碟均保留；原配對、部署前對話的記憶續聊、官方 Paseo 新對話與 Dashboard 重載期間的背景驗收通過。平台部署模板整合已完成此環境的實測。
+歷史重測（2026-10-26，0.1.4 系列）：PaaS `.263` 已透過服務專用版本固定及原生 Redeploy，將測試站升至 chart `0.4.0`。Dashboard adapter、原 Hermes 映像、CPU 限制與 10 GiB 磁碟均保留；原配對、部署前對話的記憶續聊、官方 Paseo 新對話與 Dashboard 重載期間的背景驗收通過。平台部署模板整合已完成此環境的實測。
 
 同日追加 [官方 Paseo Web 詳細測試](docs/web-acceptance-20261026.zh-TW.md)：新裝置配對、手機模擬續聊、即時模型／模式切換、中止、雙裝置並行、明確斷線後重連與歷史歸檔通過。附件首測因缺少檔案工具失敗；使用者核准後已啟用原生 `file` 工具，工具載入及原生讀寫測試通過。模型附件回覆與還原後續聊仍待訂閱 HTTP 429 額度恢復後重測，不能宣稱所有功能正常。
 
-測試站使用自己已授權的 Hermes `openai-codex:gpt-6.1-sol`，另已通過三路並行共六段對話、插件資料還原及可控跨節點搬移。早期 0.8B 本機模型的失敗紀錄保留於驗收文件。此版本可公開下載試用；長期負載、整機災難復原及其他環境仍待驗收。
+測試站使用自己已授權的 Hermes `openai-codex:gpt-6.1-sol`，另已通過三路並行共六段對話、插件資料還原及可控跨節點搬移。早期 0.8B 本機模型的失敗紀錄保留於驗收文件。上述歷史版本可公開下載試用；長期負載、整機災難復原及其他環境仍待驗收。
 
 0.1.4-rc.3 加入由管理者設定的第二個精確 HA Ingress Origin；原本的 Dashboard Origin 與登入保留。HA add-on **0.1.11** 已發布並同步至 [HA App Store](https://github.com/WOOWTECH/Woow_HA_App_Store)。隔離 HAOS 完成原生安裝、官方配對、HA 側欄、Dashboard 重載、真實對話與附件、停用／重啟，以及正式映像升級的資料保留驗證；公開 Gitea URL 也通過原生 Web 安裝。rc.4 補上攔截回覆的錯誤分類。後續八輪實測全部通過：新舊 DeepSeek 對話、Xiaomi 切換與冷啟動續聊，以及官方商店成品的新配對、附件讀取和加密備份還原後續聊；首次新增 project 的必要步驟已補進教學。先前攔截回覆的上游根因仍未確診。詳細範圍見 [HA 驗收報告](docs/ha-acceptance-20261026.zh-TW.md) 與 [HA 安裝步驟](docs/install.zh-TW.md#home-assistant-add-on)。
 
@@ -51,8 +55,8 @@ Hermes 0.19 的 Web 插件列表只在頁面載入時讀取。從插件頁安裝
 | Woowtech Smart | `https://smart.woowtech.io` | `relay.woowtech.io:443` |
 | Apporo Smart | `https://smart.apporo.ai` | `relay.apporo.ai:443` |
 
-- **選擇才生效，沒選就什麼都不改**：沒有人儲存過標的之前（`plugin-data/hermes-paseo/connection.json` 不存在）插件處於「舊模式」，行為與 0.1.4-rc.9 完全相同：啟動 daemon 時不寫入 `app.baseUrl`、`daemon.relay`、CORS，不補丁 runtime，不備份、不刪除任何檔案，`config.json` 與 runtime 目錄逐位元組不變；狀態顯示 Paseo（`targetSaved` 為 false），配對與 rc.9 一樣只核對網頁 App 網址、不核對 relay。第一次按 **儲存連線標的**（選 Paseo 也算）才進入「管理模式」，從下一次啟動 daemon 起才寫入所選標的的設定。
-- **預設與升級**：沒有人儲存連線標的之前，標的是 Paseo。手動更新（從 GitHub 安裝或 Git pull，並重載 Dashboard）不會重啟執行中的 daemon；**PaaS 自動更新器會**：它依序執行 `control stop`、安裝新版、`control start`，所以 daemon 會以新程式碼重啟一次。這次重啟與 rc.9 的啟動相同，什麼都不會改變；連線標的與品牌補丁要等有人在插件頁儲存標的之後的下一次停止再啟動才套用。仍在執行的舊 daemon 視為 Paseo，runtime 不會重新下載或重新執行 `npm ci`。
+- **選擇才生效**：`connection.json` 不存在時是舊模式，不新增連線標的的 App／relay／CORS 覆寫，不套品牌補丁或建立標的設定備份；仍會安裝本版的安全 runtime。狀態顯示 Paseo（`targetSaved: false`），配對與 rc.9 一樣只核對 App、不核對自訂 relay。第一次按 **儲存連線標的**（包含 Paseo）後，從下一次啟動 daemon 才寫入該標的設定。
+- **預設與升級**：手動更新插件不會重啟正在執行的 daemon。新版會用確切 r2 receipt 與程序 revision 控制舊服務，準備 r3 後顯示 `RESTART_REQUIRED`。PaaS chart 0.4.10 須先完成候選版 `prepare`，再停止舊 daemon、安裝插件並啟動；沒儲存標的時仍沿用 rc.9 的連線行為。準備失敗會顯示代碼、磁碟空間與重試倒數，也可按「立即重試準備」；明確的停止操作仍可使用。
 - **儲存只是記錄**：選好後按 **儲存連線標的**，選擇存入 `plugin-data/hermes-paseo/connection.json`；這個動作不會詢問或改動執行中的 daemon，也不取用長時間的 runtime 鎖。標的有變時，頁面顯示「標的已儲存，停止再啟動服務後生效」：先結束使用中的對話，按 **停止服務**，待停止完成再按 **恢復服務**，新標的才套用，之後才能產生它的配對連結。在那之前配對與 relay 驗證都會回報 `CONFIGURATION_PENDING`。
 - **切換保留身分**：切換標的會作廢舊的配對連結與 relay 驗證結果；daemon 的 server ID 與金鑰保留，已配對的裝置在切回同一標的後仍可使用。
 - **套用的內容（管理模式）**：每次啟動 daemon 時，插件依所選標的寫入 `app.baseUrl`、`daemon.relay`（`endpoint`、`publicEndpoint`、`useTls`、`publicUseTls`，TLS 明確寫出）與 `daemon.cors.allowedOrigins`；不屬於這三個標的的 CORS 來源保留，三個 App 的來源以 `URL.origin` 比對（大小寫、預設連接埠、結尾斜線不同的寫法視為同一個，不會重複列出）。不寫入 `daemon.relay.requireProtectedSecurity`（Paseo 0.11.2 的嚴格設定檔不認得它）。
@@ -68,7 +72,7 @@ Hermes 0.19 的 Web 插件列表只在頁面載入時讀取。從插件頁安裝
 - **管理模式會覆蓋自訂的 relay 與 App 網址**：管理模式下，每次啟動 daemon 都用所選標的（Paseo 也一樣）的值寫入這些欄位，所以 `config.json` 裡手動改過的 relay 或 App 網址會在下一次啟動被取代，不只是切換時。需要自訂值的人，不要儲存連線標的；已經儲存過的，先備份 `plugin-data/hermes-paseo/daemon/config.json`（第一次改寫前插件已幫你留了一份，見上）。
 - **品牌識別**：Woowtech／Apporo Smart 的網頁 App 要求 daemon 的握手帶有 `brand: {id, name}`。只有選這兩個標的時，插件才會在啟動 daemon 前，以雜湊釘住的小補丁在已安裝的 runtime 內就地修改 daemon 的 `websocket-server.js` 一個檔案並放置一個輔助檔，讓握手帶有所選標的的品牌（補丁內容與驗證見[維運文件](docs/operations.zh-TW.md#品牌識別補丁與升級)）。Paseo 不需要補丁，也不要求補丁：`websocket-server.js` 被改過、讀不到或唯讀，都不會影響預設的 Paseo 啟動；已補丁的 runtime 對 Paseo 保持原樣。已執行的舊 daemon 不會被補丁影響，補丁在下次啟動前才套用。補丁與 `npm ci` 無關：補丁失敗不會讓下一次啟動重新安裝 runtime。
 - **配對連結**只會是所選標的的網頁 App（`<網頁 App>/#offer=…`），而且不會寫入任何檔案；舊版留下的 `pairing.private.json` 會在儲存標的時與管理模式啟動時刪除（舊模式不刪）。
-- **回滾到 0.1.4-rc.9**：從沒儲存過標的的服務不需要任何動作，直接降版。已儲存過的，先在插件頁切回 **Paseo**，停止再恢復服務，確認配對連結是 `app.paseo.sh`，再降版。rc.9 接受已補丁的 runtime（它只檢查鎖定檔與 CLI 版本），但只放行 `app.paseo.sh` 的配對連結；daemon 仍是 Smart 標的時，rc.9 的 daemon 能啟動，卻會拒絕產生配對連結（`PAIRING_ORIGIN_INVALID`）。
+- **回滾到 0.1.4-rc.9**：先用新版停止 r3 daemon，再安裝 rc.9 並以保留的 r2 runtime 啟動，無須下載。從沒儲存標的時保留 rc.9 的連線設定；已使用 Smart 標的時，先切回 Paseo 並完成停止／恢復，確認連結是 `app.paseo.sh` 再回滾。rc.9 不認得 Smart 配對網址；詳見[回滾步驟](docs/operations.zh-TW.md#回滾到-014-rc9)。
 
 ## 在 Hermes 對話調用插件
 

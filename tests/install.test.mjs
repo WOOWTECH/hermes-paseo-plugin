@@ -29,7 +29,7 @@ const names = dir => fs.readdirSync(dir).sort();
 
 test('a volume that cannot hold the install is refused before anything is created, and the old daemon is untouched', async t => {
   const f = fixture(); t.after(() => f.close());
-  const npm = fakeNpm(f, { tree: { persistedConfig: true } });
+  const npm = fakeNpm(f);
   const loc = ownedHome();
   const { child } = await olderDaemon(f, loc);
   capacity(t, { available: () => INSTALL_PEAK_MIB - 1 });
@@ -51,7 +51,7 @@ test('a volume that cannot hold the install is refused before anything is create
 
 test('a volume whose free space cannot be read does not block the install', async t => {
   const f = fixture(); t.after(() => f.close());
-  const npm = fakeNpm(f, { tree: { persistedConfig: true } });
+  const npm = fakeNpm(f);
   capacity(t, { available: () => null });
   assert.equal((await prepare()).installed, true);
   assert.equal(npm.calls().length, 1);
@@ -67,7 +67,7 @@ test('the real volume check reads the nearest existing parent and a plausible si
 test('the unused musl SDK builds are removed on glibc only, and readiness does not depend on them', async t => {
   for (const glibc of [true, false]) {
     const f = fixture(); t.after(() => f.close());
-    fakeNpm(f, { tree: { persistedConfig: true } });
+    fakeNpm(f);
     capacity(t, { glibc: () => glibc });
     const loc = locations();
     await prepare();
@@ -101,7 +101,7 @@ test('only the musl builds of the Claude SDK are removed, and a link is never fo
 
 test('npm caches inside the release being installed, and the cache is gone afterwards, success or failure', async t => {
   const f = fixture(); t.after(() => f.close());
-  const npm = fakeNpm(f, { tree: { persistedConfig: true } });
+  const npm = fakeNpm(f);
   const loc = locations(), root = runtimeDirectory(loc), cache = path.join(root, '.npm-cache');
   npm.mode('fail');
   await assert.rejects(prepare(), { code: 'RUNTIME_INSTALL_FAILED' });
@@ -122,7 +122,7 @@ test('npm caches inside the release being installed, and the cache is gone after
 
 test('a failed install leaves nothing that looks ready, and the next attempt starts from nothing', async t => {
   const f = fixture(); t.after(() => f.close());
-  const npm = fakeNpm(f, { tree: { persistedConfig: true } });
+  const npm = fakeNpm(f);
   const loc = locations(), root = runtimeDirectory(loc);
   npm.mode('fail');
   await assert.rejects(prepare(), { code: 'RUNTIME_INSTALL_FAILED' });
@@ -146,7 +146,7 @@ test('a failed install leaves nothing that looks ready, and the next attempt sta
 
 test('an install that ran out of space is reported as such, with the numbers, and cleaned up', async t => {
   const f = fixture(); t.after(() => f.close());
-  const npm = fakeNpm(f, { tree: { persistedConfig: true } });
+  const npm = fakeNpm(f);
   let reads = 0;
   capacity(t, { available: () => ++reads === 1 ? 50000 : 10 });
   npm.mode('fail');
@@ -157,7 +157,7 @@ test('an install that ran out of space is reported as such, with the numbers, an
 
 test('an install that takes too long is stopped, reported as a timeout and removed', async t => {
   const f = fixture(); t.after(() => f.close());
-  const npm = fakeNpm(f, { tree: { persistedConfig: true } });
+  const npm = fakeNpm(f);
   const saved = installSettings.npmTimeoutMs; installSettings.npmTimeoutMs = 400; t.after(() => { installSettings.npmTimeoutMs = saved; });
   npm.mode('hang');
   await assert.rejects(prepare(), { code: 'RUNTIME_INSTALL_TIMEOUT' });
@@ -170,7 +170,7 @@ test('an install that takes too long is stopped, reported as a timeout and remov
 
 test('starting reports a failed install the same way and keeps the failure for the status', async t => {
   const f = fixture(); t.after(() => f.close());
-  const npm = fakeNpm(f, { tree: { persistedConfig: true } });
+  const npm = fakeNpm(f);
   npm.mode('fail');
   await assert.rejects(activate(), { code: 'RUNTIME_INSTALL_FAILED' });
   assert.equal(readState().lastError.code, 'RUNTIME_INSTALL_FAILED');
@@ -180,7 +180,7 @@ test('starting reports a failed install the same way and keeps the failure for t
 
 test('a release directory a running daemon claims is never reinstalled over, even without its receipt', async t => {
   const f = fixture(); t.after(() => f.close());
-  const npm = fakeNpm(f, { tree: { persistedConfig: true } });
+  const npm = fakeNpm(f);
   const loc = ownedHome(), root = runtimeDirectory(loc);
   fs.mkdirSync(path.join(root, 'node_modules/live'), { recursive: true });
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'hermes-paseo-managed-runtime' }));

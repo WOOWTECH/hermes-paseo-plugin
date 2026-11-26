@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { runtimeDirectory, markRuntimeReady, PASEO_VERSION, LEGACY_PASEO_VERSION, PRIOR_RELEASES } from '../src/runtime-layout.mjs';
 import { locations, updateState } from '../src/state.mjs';
@@ -74,7 +74,7 @@ export async function connectToDaemon(options) {
 }
 
 /** The files `npm ci` leaves for this release (original upstream server source), without a receipt. */
-export function writeCurrentTree(root, { persistedConfig = false, modules = {} } = {}) {
+export function writeCurrentTree(root, { modules = {} } = {}) {
   fs.mkdirSync(root, { recursive: true });
   write(root, 'package.json', JSON.stringify({ name: 'hermes-paseo-managed-runtime' }));
   write(root, `${SERVER}/package.json`, JSON.stringify({ name: '@getpaseo/server', type: 'module', version: PASEO_VERSION }));
