@@ -1,3 +1,4 @@
+import {seedCurrentRelease} from './release-fixtures.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -77,6 +78,7 @@ test('overlapping checks share one connection through the relay', async () => {
 
 test('the default connection targets the offer as an endpoint, uses the managed home and always closes', async () => {
   const f = fixture(); try {
+    seedCurrentRelease(locations());
     const root = path.join(runtimeDirectory(locations()), 'node_modules/@getpaseo/cli');
     fs.mkdirSync(path.join(root, 'dist/utils'), { recursive: true });
     fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: '@getpaseo/cli', type: 'module', version: '0.11.2' }));

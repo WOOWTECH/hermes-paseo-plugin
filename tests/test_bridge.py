@@ -271,11 +271,200 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn('password', result['providers'][0])
 
     def test_pair_origin_validation(self):
-        self.assertEqual(b.public_pair({'url': 'https://app.paseo.sh/?offer=test', 'token': 'secret'}), {'url': 'https://app.paseo.sh/?offer=test'})
+        self.assertEqual(b.public_pair({'url': 'https://app.paseo.sh/#offer=test', 'token': 'secret'}),
+                         {'url': 'https://app.paseo.sh/#offer=test', 'target': 'paseo'})
         for url in ['http://app.paseo.sh/a', 'https://app.paseo.sh.evil/a', 'https://user@app.paseo.sh/a',
-                    'https://app.paseo.sh:444/a', 'https://app.paseo.sh/\nsecret', 'javascript:test']:
+                    'https://app.paseo.sh:444/a', 'https://app.paseo.sh/\nsecret', 'javascript:test',
+                    'https://app.paseo.sh/?offer=test', 'https://app.paseo.sh/pair#offer=test',
+                    'https://app.paseo.sh:443/#offer=test', 'https://app.paseo.sh/?#offer=test',
+                    'https://app.paseo.sh/#offer=', 'https://app.paseo.sh/#offer=a.b', 'https://app.paseo.sh/#token=x',
+                    'https://app.paseo.sh/#offer=a#b', 'https://APP.paseo.sh/#offer=a', 'https://app.paseo.sh//#offer=a']:
             with self.subTest(url=url), self.assertRaises(b.BridgeError):
                 b.public_pair({'url': url})
+
+    def test_pair_links_are_released_only_for_the_selected_targets_exact_app(self):
+        for target, origin in b.TARGET_ORIGINS.items():
+            url = origin + '/#offer=PRIVATE_offer-1'
+            with self.subTest(target=target):
+                self.assertEqual(b.public_pair({'url': url, 'target': target}, target), {'url': url, 'target': target})
+                for other in set(b.TARGET_ORIGINS) - {target}:
+                    with self.assertRaises(b.BridgeError):
+                        b.public_pair({'url': url}, other)
+                with self.assertRaises(b.BridgeError):
+                    b.public_pair({'url': url, 'target': 'paseo' if target != 'paseo' else 'apporo'}, target)
+        for target in ('custom', '', None, ['paseo'], {'id': 'paseo'}, 7):
+            with self.subTest(target=target), self.assertRaises(b.BridgeError):
+                b.public_pair({'url': 'https://smart.woowtech.io/#offer=x'}, target)
+
+    def test_pair_uses_the_target_saved_on_disk_not_the_runtime_output(self):
+        b._private_dir(self.bridge.state_dir)
+        b._write_json(self.bridge.state_dir / 'connection.json', {'version': 1, 'target': 'apporo'})
+        (self.bridge.state_dir / 'connection.json').chmod(0o600)
+        good = {'url': 'https://smart.apporo.ai/#offer=abc', 'target': 'apporo', 'createdAt': 'now'}
+        with patch.object(b, 'run_process', return_value=good), patch.object(b, 'resolve_executable', return_value=sys.executable):
+            self.assertEqual(self.bridge._invoke('pair'), {'url': good['url'], 'target': 'apporo'})
+        for wrong in ({'url': 'https://app.paseo.sh/#offer=abc', 'target': 'paseo'}, {'url': 'https://app.paseo.sh/#offer=abc'},
+                      {'url': 'https://smart.woowtech.io/#offer=abc', 'target': 'woowtech'}, {'url': good['url'], 'target': 'woowtech'}):
+            with patch.object(b, 'run_process', return_value=wrong), patch.object(b, 'resolve_executable', return_value=sys.executable), \
+                    self.subTest(wrong=wrong), self.assertRaises(b.BridgeError) as caught:
+                self.bridge._invoke('pair')
+            self.assertEqual(caught.exception.code, 'INVALID_PAIR_URL')
+        # A damaged or unreadable choice releases nothing, whatever the runtime answers.
+        b._write_json(self.bridge.state_dir / 'connection.json', {'version': 1, 'target': 'custom'})
+        with patch.object(b, 'run_process', return_value=good), patch.object(b, 'resolve_executable', return_value=sys.executable), \
+                self.assertRaises(b.BridgeError) as caught:
+            self.bridge._invoke('pair')
+        self.assertEqual(caught.exception.code, 'CONNECTION_STATE_CORRUPT')
+
+    def test_offers_for_every_official_app_are_hidden_in_free_text(self):
+        for text in ['open https://smart.woowtech.io/#offer=PRIVATE now', 'https://smart.apporo.ai/#offer=PRIVATE',
+                     'https://app.paseo.sh/#offer=PRIVATE', 'mirror https://elsewhere.example/#offer=PRIVATE']:
+            with self.subTest(text=text):
+                self.assertNotIn('PRIVATE', b.redact({'reply': text})['reply'])
+
+    def test_a_pairing_offer_is_hidden_wherever_its_url_points(self):
+        hidden = b.redact({'reply': 'mirror https://elsewhere.example/#offer=PRIVATE-1 and x#connect=PRIVATE-2, end'})['reply']
+        self.assertNotIn('PRIVATE', hidden)
+        self.assertEqual(hidden.count('[pairing hidden]'), 2)
+        self.assertTrue(hidden.endswith(', end') or hidden.endswith(' end'))
+        self.assertEqual(b.redact({'reply': 'a plain https://elsewhere.example/page link'})['reply'],
+                         'a plain https://elsewhere.example/page link')
+
+    def test_redaction_takes_linear_time_on_the_longest_replies(self):
+        """`reply` comes from a model and may be as long as the process output limit, and `re` holds the GIL,
+        so a pattern that scans forward from every character stalls the whole Hermes web process. The offer
+        pattern once began with an unbounded run before the `#`: 80 KB without one took about 22 seconds."""
+        cases = {
+            'one unbroken run': 'a' * 80000,
+            'a near miss at every position': '#offer' * 13000,
+            'an unbroken run of offers': '#offer=' * 11000,
+            'spaced offers': '#offer=x ' * 9000,
+            'official links': 'https://smart.woowtech.io/#offer=SECRET-1 ' * 2000,
+            'foreign links': 'https://elsewhere.example/#offer=SECRET-2 ' * 2000,
+            'a scheme at every position': 'https://' * 10000,
+            'userinfo without an app host': 'https://' + 'a@' * 40000,
+            'a key with endless spacing': 'password' + ' ' * 80000 + 'x',
+            'a bearer word with endless spacing': 'bearer' + ' ' * 80000,
+            'an assignment then spacing': 'secret=' + ' ' * 80000 + ',',
+            'repeated key names': 'api_key ' * 10000,
+            'repeated assignments': 'password=x ' * 7000,
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                started = time.perf_counter()
+                result = b.redact({'reply': text})['reply']
+                elapsed = time.perf_counter() - started
+                self.assertLess(elapsed, 1.0, f'{name} took {elapsed:.2f}s')
+                self.assertNotIn('SECRET', result)
+
+    def test_config_accepts_exactly_one_known_target(self):
+        for target in b.TARGET_ORIGINS:
+            self.assertEqual(b.validate_input('config', {'target': target}), {'target': target})
+        for body, code in [({}, 'INVALID_TARGET'), ({'target': 'Paseo'}, 'INVALID_TARGET'), ({'target': 'custom'}, 'INVALID_TARGET'),
+                           ({'target': ['paseo']}, 'INVALID_TARGET'), ({'target': None}, 'INVALID_TARGET'), ({'target': ''}, 'INVALID_TARGET'),
+                           ({'target': 'paseo', 'url': 'https://evil.example'}, 'INVALID_REQUEST'),
+                           ({'target': 'paseo', 'relayEndpoint': 'evil.example:443'}, 'INVALID_REQUEST')]:
+            with self.subTest(body=body), self.assertRaises(b.BridgeError) as caught:
+                b.validate_input('config', body)
+            self.assertEqual(caught.exception.code, code)
+        for body in (None, [], 'paseo'):
+            with self.subTest(body=body), self.assertRaises(b.BridgeError):
+                b.validate_input('config', body)
+
+    def test_config_saves_through_the_runtime_and_invalidates_cached_status(self):
+        calls = []
+        def run(argv, payload, env, timeout, *_):
+            calls.append((argv[-1], json.loads(payload)))
+            if argv[-1] == 'config':
+                return {'saved': True, 'target': 'woowtech', 'configurationPending': True, 'url': 'https://smart.woowtech.io/#offer=x'}
+            return {'enabled': True, 'phase': 'running', 'daemon': {'reachable': True}}
+        with patch.object(b, 'run_process', side_effect=run), patch.object(b, 'resolve_executable', return_value=sys.executable):
+            self.bridge.status()
+            result = self.bridge.call('config', {'target': 'woowtech'})
+            self.bridge.status()
+        self.assertEqual(result, {'saved': True, 'target': 'woowtech', 'configurationPending': True}, 'only public fields, never a link')
+        self.assertEqual([action for action, _ in calls], ['status', 'config', 'status'], 'the cached status is not reused after a save')
+        self.assertEqual(calls[1], ('config', {'target': 'woowtech'}))
+
+    def test_config_reaches_node_with_the_target_only_and_its_own_time_budget(self):
+        answer = {'saved': True, 'target': 'apporo', 'configurationPending': True}
+        with patch.object(b, 'run_process', return_value=answer) as run, patch.object(b, 'resolve_executable', return_value=sys.executable):
+            self.assertEqual(self.bridge.call('config', {'target': 'apporo'}), answer)
+        argv, payload, _, timeout = run.call_args.args
+        self.assertEqual(argv[1:], [str(self.bridge.root / 'bin' / 'control.mjs'), 'config'])
+        self.assertEqual(json.loads(payload), {'target': 'apporo'})
+        self.assertEqual(timeout, b.TIMEOUTS['config'])
+        self.assertLess(b.TIMEOUTS['config'], b.TIMEOUTS['start'], 'saving only records the choice; it never waits for an install')
+
+    def test_status_always_names_a_known_target_a_boolean_saved_flag_and_a_boolean_pending_flag(self):
+        shown = lambda d: (d['selectedTarget'], d['targetSaved'], d['activeTarget'], d['configurationPending'], d['connectionCode'])
+        # Nothing on disk: the legacy default, whatever the runtime claimed.
+        self.assertEqual(shown(self.bridge._decorate({'selectedTarget': 'evil', 'activeTarget': 'other', 'configurationPending': 'yes'})),
+                         ('paseo', False, None, False, None))
+        for hostile in (['paseo'], {'id': 'paseo'}, 7, None, 'yes'):
+            decorated = self.bridge._decorate({'selectedTarget': hostile, 'targetSaved': hostile, 'activeTarget': hostile,
+                                               'configurationPending': hostile, 'connectionCode': hostile})
+            with self.subTest(hostile=hostile):
+                self.assertEqual(shown(decorated), ('paseo', False, None, False, None))
+        decorated = self.bridge._decorate({'selectedTarget': 'apporo', 'targetSaved': True, 'activeTarget': 'paseo', 'configurationPending': True})
+        self.assertEqual(shown(decorated), ('apporo', True, 'paseo', True, None))
+        # The code of a record that cannot be read is passed on only when it is one the page may name.
+        self.assertEqual(self.bridge._decorate({'selectedTarget': 'paseo', 'targetSaved': True, 'connectionCode': 'CONNECTION_STATE_CORRUPT'})['connectionCode'], 'CONNECTION_STATE_CORRUPT')
+        self.assertIsNone(self.bridge._decorate({'selectedTarget': 'paseo', 'targetSaved': True, 'connectionCode': 'not a code'})['connectionCode'])
+        self.assertEqual(set(b.redact({'selectedTarget': 'apporo', 'targetSaved': True, 'activeTarget': 'paseo', 'configurationPending': True,
+                                       'connectionCode': 'CONNECTION_STATE_CORRUPT', 'appUrl': 'x'})),
+                         {'selectedTarget', 'targetSaved', 'activeTarget', 'configurationPending', 'connectionCode'})
+        self.assertEqual(b.redact({'connectionCode': 'a free text reason'})['connectionCode'], 'OPERATION_FAILED', 'a code, never prose')
+
+    def test_a_runtime_that_cannot_answer_still_shows_the_saved_target(self):
+        b._private_dir(self.bridge.state_dir)
+        b._write_json(self.bridge.state_dir / 'connection.json', {'version': 1, 'target': 'woowtech'})
+        with patch.object(self.bridge, '_invoke', side_effect=b.BridgeError('NODE_UNAVAILABLE')):
+            shown = self.bridge.status(fresh=True)
+        self.assertEqual((shown['selectedTarget'], shown['targetSaved'], shown['activeTarget'], shown['configurationPending']), ('woowtech', True, None, False))
+        self.assertEqual(shown['diagnosticCode'], 'NODE_UNAVAILABLE')
+        (self.bridge.state_dir / 'connection.json').unlink()
+        with patch.object(self.bridge, '_invoke', side_effect=b.BridgeError('NODE_UNAVAILABLE')):
+            shown = self.bridge.status(fresh=True)
+        self.assertEqual((shown['selectedTarget'], shown['targetSaved']), ('paseo', False), 'nothing was ever saved')
+
+    def test_the_saved_target_is_read_from_its_own_private_file_and_a_bad_file_fails_closed(self):
+        self.assertEqual(self.bridge.connection_target(), 'paseo', 'nothing saved')
+        self.assertEqual(self.bridge.connection_choice(), (False, 'paseo'), 'nothing saved: the legacy default')
+        b._private_dir(self.bridge.state_dir)
+        file = self.bridge.state_dir / 'connection.json'
+        for target in b.TARGET_ORIGINS:
+            b._write_json(file, {'version': 1, 'target': target})
+            self.assertEqual(self.bridge.connection_target(), target)
+            self.assertEqual(self.bridge.connection_choice(), (True, target), 'saving Paseo is a choice too')
+        for corrupt in ({'version': 1, 'target': 'custom'}, {'target': 'paseo'}, {'version': 1, 'target': 'paseo', 'extra': 1},
+                        {'version': 2, 'target': 'paseo'}, {'version': True, 'target': 'paseo'}, {'version': 1.0, 'target': 'paseo'},
+                        {'version': 1, 'target': ['paseo']}, {'version': 1, 'target': {'id': 'paseo'}}, {'version': 1, 'target': None}):
+            b._write_json(file, corrupt)
+            with self.subTest(corrupt=corrupt), self.assertRaises(b.BridgeError) as caught:
+                self.bridge.connection_target()
+            self.assertEqual(caught.exception.code, 'CONNECTION_STATE_CORRUPT')
+            self.assertEqual(self.bridge._shown_choice(), (True, 'paseo'), 'the page shows Paseo as saved, so saving it replaces the record; nothing is released on it')
+        b._write_json(file, {'version': 1, 'target': 'apporo'})
+        file.chmod(0o606)
+        with self.assertRaises(b.BridgeError) as caught:
+            self.bridge.connection_target()
+        self.assertEqual(caught.exception.code, 'STATE_UNAVAILABLE', 'a file others can write is not a record')
+        file.chmod(0o600)
+        file.unlink()
+        file.symlink_to(self.bridge.state_dir / 'elsewhere.json')
+        with self.assertRaises(b.BridgeError):
+            self.bridge.connection_target()
+
+    def test_config_answers_only_with_public_fields(self):
+        shown = b.redact({'saved': True, 'target': 'apporo', 'configurationPending': True, 'appUrl': 'x', 'relayEndpoint': 'y', 'password': 'z'})
+        self.assertEqual(shown, {'saved': True, 'target': 'apporo', 'configurationPending': True})
+        for code in ('INVALID_TARGET', 'CONFIGURATION_PENDING', 'CONNECTION_STATE_CORRUPT', 'CONFIG_INVALID', 'CONFIG_CORRUPT',
+                     'BRAND_IDENTITY_SOURCE_MISMATCH', 'BRAND_IDENTITY_PATCH_MISMATCH', 'UNSAFE_SYMLINK',
+                     'RUNTIME_NOT_READABLE', 'RUNTIME_NOT_WRITABLE', 'CONFIG_BACKUP_FAILED'):
+            with self.subTest(code=code):
+                self.assertEqual(b.BridgeError(code).code, code)
+                self.assertEqual(b.redact({'diagnosticCode': code})['diagnosticCode'], code)
 
 
 class ProcessTests(unittest.TestCase):
@@ -343,6 +532,7 @@ class RegistrationTests(unittest.TestCase):
             native.register(Context())
         self.assertEqual(set(tools), {'paseo_status', 'paseo_start', 'paseo_stop', 'paseo_models', 'paseo_chat', 'paseo_continue'})
         self.assertNotIn('paseo_pair', tools)
+        self.assertNotIn('paseo_config', tools, 'choosing a connection target is a Dashboard action, not a model tool')
         self.assertIn('/paseo', commands['paseo'](''))
         self.assertIn('on_session_start', hooks)
         for tool in tools.values():
@@ -416,6 +606,47 @@ class RouteTests(unittest.TestCase):
             response = self.client.post(self.prefix + '/relay', json={}, headers=self.origin)
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json(), {'ok': False, 'code': 'RELAY_UNVERIFIED'})
+
+    def test_config_route_is_protected_and_saves_only_a_known_target(self):
+        with patch.object(self.runtime, 'call', side_effect=AssertionError('untrusted invocation')):
+            for headers in [{'Origin': 'https://evil.test'}, {'Origin': 'null'}, {'Origin': 'http://testserver', 'Sec-Fetch-Site': 'same-site'},
+                            {'Origin': 'http://testserver', 'Sec-Fetch-Site': 'cross-site'}, {}, {'Origin': 'http://testserver.evil'},
+                            {'Origin': 'http://testserver', 'Sec-Fetch-Mode': 'no-cors'}, {'Origin': 'http://testserver', 'Sec-Fetch-Mode': 'navigate'}]:
+                with self.subTest(headers=headers):
+                    response = self.client.post(self.prefix + '/config', json={'target': 'woowtech'}, headers=headers)
+                    self.assertEqual(response.status_code, 403)
+                    self.privacy(response)
+            self.assertEqual(self.client.get(self.prefix + '/config', headers=self.origin).status_code, 404)
+        answer = {'saved': True, 'target': 'woowtech', 'configurationPending': True}
+        with patch.object(self.runtime, '_invoke', return_value=answer) as invoke:
+            response = self.client.post(self.prefix + '/config', json={'target': 'woowtech'}, headers=self.origin)
+        self.assertEqual((response.status_code, response.json()), (200, answer))
+        invoke.assert_called_once_with('config', {'target': 'woowtech'})
+        self.privacy(response)
+        with patch.object(self.runtime, '_invoke', side_effect=AssertionError('invalid input reached the runtime')):
+            for body, code in [({}, 'INVALID_TARGET'), ({'target': 'custom'}, 'INVALID_TARGET'), ({'target': None}, 'INVALID_TARGET'),
+                               ({'target': 'paseo', 'url': 'https://evil.example'}, 'INVALID_REQUEST'),
+                               ({'target': 'paseo', 'appUrl': 'https://evil.example'}, 'INVALID_REQUEST')]:
+                with self.subTest(body=body):
+                    response = self.client.post(self.prefix + '/config', json=body, headers=self.origin)
+                    self.assertEqual((response.status_code, response.json()), (400, {'ok': False, 'code': code}))
+                    self.privacy(response)
+
+    def test_config_route_is_json_only_bounded_and_strict(self):
+        headers = {**self.origin, 'Content-Type': 'application/json'}
+        with patch.object(self.runtime, '_invoke', side_effect=AssertionError('rejected input reached the runtime')):
+            for content, status, code in [('{"target":"paseo","target":"apporo"}', 400, 'INVALID_JSON'), ('[]', 400, 'INVALID_REQUEST'),
+                                          ('{"target":NaN}', 400, 'INVALID_JSON'), ('x' * (b.MAX_INPUT + 1), 413, 'REQUEST_TOO_LARGE')]:
+                with self.subTest(content=content[:40]):
+                    response = self.client.post(self.prefix + '/config', content=content, headers=headers)
+                    self.assertEqual((response.status_code, response.json()['code']), (status, code))
+            response = self.client.post(self.prefix + '/config', content='{"target":"paseo"}', headers={**self.origin, 'Content-Type': 'text/plain'})
+            self.assertEqual((response.status_code, response.json()['code']), (415, 'JSON_REQUIRED'))
+            response = self.client.post(self.prefix + '/config', content='{"target":"paseo"}', headers={**headers, 'Content-Encoding': 'gzip'})
+            self.assertEqual((response.status_code, response.json()['code']), (415, 'UNSUPPORTED_ENCODING'))
+            for query in ('?profile=other', '?target=apporo'):
+                response = self.client.post(self.prefix + '/config' + query, json={'target': 'paseo'}, headers=self.origin)
+                self.assertEqual(response.status_code, 400)
 
     def test_get_security_applies_to_status_and_models(self):
         with patch.object(self.runtime, '_invoke', side_effect=AssertionError('untrusted invocation')):
@@ -517,9 +748,15 @@ class RouteTests(unittest.TestCase):
             self.runtime._worker.join(2)
 
     def test_pair_only_returns_valid_https_url(self):
-        with patch.object(self.runtime, '_invoke', return_value={'url': 'https://app.paseo.sh/?offer=test'}):
+        with patch.object(b, 'run_process', return_value={'url': 'https://app.paseo.sh/#offer=test', 'target': 'paseo', 'createdAt': 'now'}), \
+                patch.object(b, 'resolve_executable', return_value=sys.executable):
             response = self.client.post(self.prefix + '/pair', json={}, headers=self.origin)
-        self.assertEqual(response.json(), {'url': 'https://app.paseo.sh/?offer=test'})
+        self.assertEqual(response.json(), {'url': 'https://app.paseo.sh/#offer=test', 'target': 'paseo'})
+        self.privacy(response)
+        with patch.object(b, 'run_process', return_value={'url': 'https://app.paseo.sh/?offer=test', 'target': 'paseo'}), \
+                patch.object(b, 'resolve_executable', return_value=sys.executable):
+            response = self.client.post(self.prefix + '/pair', json={}, headers=self.origin)
+        self.assertEqual((response.status_code, response.json()), (400, {'ok': False, 'code': 'INVALID_PAIR_URL'}))
         self.privacy(response)
 
     def test_backend_error_redaction_and_privacy(self):

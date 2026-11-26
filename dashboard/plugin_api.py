@@ -186,6 +186,16 @@ async def relay(request: Request):
     return await asyncio.to_thread(bridge.get_bridge().call, 'relay', body)
 
 
+@router.post('/config')
+async def config(request: Request):
+    # Saves the connection target and nothing else. It goes through the same Origin, Fetch Metadata, JSON
+    # and size gates as every other route; the body is exactly {"target": "<id>"} for one of the fixed
+    # targets. It is not a model tool, and the runtime does not ask the daemon anything to answer it.
+    body = await read_json(request)
+    bridge.validate_input('config', body)
+    return await asyncio.to_thread(bridge.get_bridge().call, 'config', body)
+
+
 @router.post('/acceptance')
 async def acceptance(request: Request):
     body = await read_json(request)

@@ -1,16 +1,18 @@
 # Hermes Paseo：下載、安裝、部署與測試
 
-適用於 v0.1.4-rc.6 公開候選版。本教學將插件部署到已有的 Hermes Agent / Dashboard；Hermes 核心與可用的模型端點須先準備好。實測範圍與待驗項目見 [驗收紀錄](validation.md)。
+適用於 v0.1.5-rc.1 公開候選版。本教學將插件部署到已有的 Hermes Agent / Dashboard；Hermes 核心與可用的模型端點須先準備好。實測範圍與待驗項目見 [驗收紀錄](validation.md)。本版新增**連線標的**（Paseo、Woowtech Smart、Apporo Smart），見第 5 節；受管 daemon 仍是 Paseo 0.11.2，runtime 鎖定檔與 0.1.4-rc.9 相同。
 
 ## 下載網址
 
 - 原始碼：https://github.com/WOOWTECH/hermes-paseo-plugin
 - Gitea 原始碼鏡像：https://git-prod.woowtech.io/mirror/hermes-paseo-plugin
-- v0.1.4-rc.6：https://github.com/WOOWTECH/hermes-paseo-plugin/releases/tag/v0.1.4-rc.6
-- 固定版本 ZIP：https://github.com/WOOWTECH/hermes-paseo-plugin/archive/refs/tags/v0.1.4-rc.6.zip
-- Paseo 官方介面：https://app.paseo.sh
+- v0.1.5-rc.1：https://github.com/WOOWTECH/hermes-paseo-plugin/releases/tag/v0.1.5-rc.1
+- 固定版本 ZIP：https://github.com/WOOWTECH/hermes-paseo-plugin/archive/refs/tags/v0.1.5-rc.1.zip
+- 連線標的的官方網頁 App：Paseo https://app.paseo.sh、Woowtech Smart https://smart.woowtech.io、Apporo Smart https://smart.apporo.ai
 
-公開下載不需要 GitHub token。Web / CLI 從 GitHub 安裝會取得目前 main；ZIP 固定為 v0.1.4-rc.6。候選版不代表已完成所有正式部署環境的驗收。
+公開下載不需要 GitHub token。Web / CLI 從 GitHub 安裝會取得目前 main；ZIP 固定為 v0.1.5-rc.1。上列 v0.1.5-rc.1 的 Release 與固定版本網址要在該 tag 發佈之後才存在，發佈前請從 main 安裝。候選版不代表已完成所有正式部署環境的驗收。
+
+從 0.1.4-rc.9 升級時：在有人儲存連線標的之前，插件的行為與 rc.9 完全相同（不寫入 relay、App 網址或 CORS，不補丁 runtime，`config.json` 不動），仍在執行的舊 daemon 視為 Paseo。手動更新（Git pull 並重載 Dashboard）不會重啟執行中的 daemon；**PaaS 自動更新器會重啟它**（`control stop`、安裝新版、`control start`，以新程式碼啟動一次），但這次啟動與 rc.9 的相同，什麼都不會改變。連線標的與品牌識別補丁要等有人在插件頁儲存標的之後的下一次「停止服務 → 恢復服務」才套用。Paseo runtime 不會重新下載。
 
 ## 1. 確認環境
 
@@ -82,7 +84,7 @@ hermes plugins enable hermes-paseo
 
 若要使用固定版本 ZIP：
 
-1. 下載上述 v0.1.4-rc.6 ZIP 並解壓。
+1. 下載上述 v0.1.5-rc.1 ZIP 並解壓。
 2. 將包含 `plugin.yaml`、`__init__.py`、`dashboard/`、`runtime/` 的那一層資料夾命名為 `hermes-paseo`。
 3. 放入同一 Hermes profile 的 `plugins/` 目錄：預設為 `~/.hermes/plugins/hermes-paseo/`；自訂 `HERMES_HOME` 時為 `$HERMES_HOME/plugins/hermes-paseo/`。檔案須由 Hermes 服務帳戶擁有。
 4. 確認 `plugin.yaml` 直接位於該目錄，然後執行 `hermes plugins enable hermes-paseo`。
@@ -116,14 +118,16 @@ python3 ~/.hermes/plugins/hermes-paseo/bin/configure-origin.py https://hermes.ex
 
 1. 開啟 Hermes 側欄的 **Paseo**，或自己的 Hermes 網址加 `/paseo`。尚未完成設定時，插件載入後會自動導向此頁。
 2. 等待 **服務已就緒**。第一次會下載並啟動固定 Paseo runtime；已手動停止時，按 **恢復服務**。
-3. 按 **產生配對連結**。
-4. 按 **開啟 Paseo 官方網站並綁定**，在新分頁按 **Connect**。
+3. 在 **連線標的** 選擇要連接的平台：**Woowtech Smart**、**Apporo Smart** 或預設的 **Paseo**，按 **儲存連線標的**。已選標的的網頁 App 可用旁邊的 **開啟 <標的名稱>** 開啟。看到「標的已儲存，停止再啟動服務後生效」時，先結束使用中的對話，按 **停止服務**，等停止完成再按 **恢復服務**；之後才能配對。切換標的不會改變 daemon 的 server ID 與金鑰，已配對的裝置在切回同一標的後仍可使用。第一次使用且要用 Paseo 的官方 relay、不想讓插件改動 daemon 設定時可略過這一步：頁面會顯示「尚未選擇連線標的」，插件不會改動 daemon 的 `config.json`，配對照舊可用。**儲存標的（包含 Paseo）之後**，每次啟動 daemon 都會依所選標的寫入 relay、App 網址與 CORS 設定，並在第一次改寫前把原來的 `config.json` 備份為同目錄的 `config.json.pre-agent-connect`（只備份一次；還原方式見 [README](../README.md#連線標的)）。
+4. 按 **產生配對連結**，再按 **使用配對連結開啟 <標的名稱>**，在新分頁按 **Connect**。連結只屬於所選標的，且只顯示在這個頁面，不會存檔。標的尚未儲存或還在等待套用時，產生連結的按鈕會停用。
 5. 全新裝置若顯示 **No projects yet**，先按側欄 **Add project**。可用 **Search for directory** 選擇已有工作目錄；或選 **New directory**，輸入主機上的父目錄，按 **Use this parent**，再填 **Directory name** 並按 Enter。HA 可在 `/opt/data` 下建立自己的專案子目錄，資料會持久保存；這是 Hermes 主機上的路徑。
 6. 按 **New workspace**，確認已選定 project；若仍顯示 **Choose project**，先選取剛建立的專案。再開啟 **Select model**；若先看到供應者清單，按 **Hermes** 再選模型，第一次使用 **Default** 權限模式，填訊息並按 **Create**。
 
 全新 HA 商店實例已重現：配對 Online 但沒有 project 時，無法建立代理；沒有新增模型請求。必須先完成上述 project 步驟，不能只依模型清單或 Create 按鈕判定可對話。
 
-Hermes 頁面的模型／模式選單用於探索可用選項；實際對話設定在 Paseo 建立對話時選擇。官方 relay 不需要額外的 Paseo 密碼。配對連結可能授予存取權，請保留給自己的裝置使用。
+Hermes 頁面的模型／模式選單用於探索可用選項；實際對話設定在所選標的的網頁 App 建立對話時選擇。官方 relay 不需要額外的 Paseo 密碼；每個標的使用自己的 relay。配對連結可能授予存取權，請保留給自己的裝置使用。
+
+每次啟動 daemon，插件都會用所選標的（沒選過就是 Paseo）的設定重寫 daemon 的 relay、App 網址與 CORS 來源，切換標的（包含切回 Paseo）時同理；手動改在 `config.json` 的自訂 relay 或 App 網址會被取代，啟動或切換前請先備份。回滾到 0.1.4-rc.9 前，先切回 **Paseo** 並完成停止與恢復，否則 rc.9 會拒絕 Smart 標的的配對連結；步驟見[維運文件的回滾一節](operations.zh-TW.md#回滾到-014-rc9)。
 
 在 Hermes 修改預設模型後，既有 ACP 程序可能仍保留舊預設。先完成或停止進行中的對話，再在 Paseo 插件頁「停止服務 → 恢復服務」，重新取得模型清單。官方 Paseo 的模型按鈕位於訊息輸入區，文字可能是「Select model」或已選模型的名稱；選定模型後才顯示權限模式按鈕。不要把「模型清單可讀取」當作帳號已登入或模型已回覆的證據。
 

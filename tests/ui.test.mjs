@@ -553,10 +553,10 @@ test('legacy immediate results survive status polling when acceptanceJob is abse
 
 test('pairing stays as an explicit secure official link and never enters storage, logs or a popup', async () => {
   const app = host(); await app.mount('page');
-  const secretUrl = 'https://app.paseo.sh/pair#token=PRIVATE-PAIR-OFFER';
+  const secretUrl = 'https://app.paseo.sh/#offer=PRIVATE-PAIR-OFFER';
   app.handle('/pair', () => ({ url: secretUrl }));
   await app.click('產生配對連結');
-  const link = nodes(app.tree()).find(node => node.type === 'a' && node.props.target === '_blank');
+  const link = nodes(app.tree()).find(node => node.type === 'a' && content(node) === '使用配對連結開啟 Paseo');
   assert.equal(link.props.href, secretUrl);
   assert.equal(link.props.rel, 'noopener noreferrer');
   assert.equal(link.props.referrerPolicy, 'no-referrer');
@@ -572,7 +572,8 @@ test('pairing stays as an explicit secure official link and never enters storage
 });
 
 test('nonofficial, credentialed or executable pair URLs are rejected without leaking them', async () => {
-  for (const url of ['javascript:alert(1)', 'https://evil.example/?secret=SECRET', 'https://app.paseo.sh.evil.example/pair', 'https://user:SECRET@app.paseo.sh/pair', 'http://app.paseo.sh/pair']) {
+  for (const url of ['javascript:alert(1)', 'https://evil.example/?secret=SECRET', 'https://app.paseo.sh.evil.example/pair', 'https://user:SECRET@app.paseo.sh/pair', 'http://app.paseo.sh/pair',
+    'https://app.paseo.sh/pair#offer=SECRET', 'https://app.paseo.sh/?x=1#offer=SECRET', 'https://app.paseo.sh/#token=SECRET', 'https://app.paseo.sh/#offer=', 'https://smart.woowtech.io/#offer=SECRET']) {
     const app = host(); await app.mount('page');
     app.handle('/pair', () => ({ url })); await app.click('產生配對連結');
     assert.equal(nodes(app.tree()).filter(row => row.type === 'a').length, 0);
@@ -842,4 +843,338 @@ test('explicit Dashboard recovery permits one failed first-start retry without c
     assert.equal(saved.paused, paused);
     assert.equal(count(app, '/start'), 0, 'new initialization waits for the actual refresh');
   }
+});
+
+// ---- connection targets (item 6) ----
+const targeted = (patch = {}) => snapshot({ selectedTarget: 'paseo', targetSaved: true, connectionCode: null, activeTarget: 'paseo', configurationPending: false, ...patch });
+const targetSelect = app => nodes(nodes(app.tree()).find(row => row.type === 'label' && content(row.children[0]) === '連線標的')).find(row => row.type === 'select');
+const linkNamed = (app, name) => nodes(app.tree()).find(row => row.type === 'a' && content(row) === name);
+const offerFor = origin => origin + '/#offer=PRIVATE-' + Buffer.from(origin).toString('base64url');
+const TABLE = [['woowtech', 'Woowtech Smart', 'https://smart.woowtech.io'], ['apporo', 'Apporo Smart', 'https://smart.apporo.ai'], ['paseo', 'Paseo', 'https://app.paseo.sh']];
+
+test('an older backend without targets keeps the Paseo-only page and exact empty POST bodies', async () => {
+  const app = host(); await app.mount('page');
+  assert.equal(targetSelect(app), undefined);
+  assert.equal(linkNamed(app, '開啟 Paseo'), undefined);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, false);
+  app.handle('/pair', () => ({ url: offerFor('https://app.paseo.sh') }));
+  await app.click('產生配對連結');
+  assert.equal(app.calls.find(call => call.path.endsWith('/pair')).init.body, '{}');
+  assert.equal(linkNamed(app, '使用配對連結開啟 Paseo').props.href, offerFor('https://app.paseo.sh'));
+});
+
+test('targets are offered as Woowtech Smart, Apporo Smart and Paseo, with a link to the saved target\'s web app', async () => {
+  for (const [id, label, origin] of TABLE) {
+    const app = host({ status: targeted({ selectedTarget: id, activeTarget: id }) }); await app.mount('page');
+    const select = targetSelect(app);
+    assert.deepEqual(select.children.map(option => [option.props.value, content(option)]), TABLE.map(([value, name]) => [value, name]));
+    assert.equal(select.props.value, id);
+    const open = linkNamed(app, '開啟 ' + label);
+    assert.equal(open.props.href, origin + '/');
+    assert.equal(open.props.target, '_blank');
+    assert.equal(open.props.rel, 'noopener noreferrer');
+    assert.equal(open.props.referrerPolicy, 'no-referrer');
+    assert.equal(nodes(app.tree()).filter(row => row.type === 'a' && content(row).startsWith('開啟 ')).length, 1, 'one fixed link, for the saved target only');
+    assert.equal(buttonNode(app, '儲存連線標的').props.disabled, true, 'nothing to save yet');
+    assert.equal(count(app, '/config'), 0);
+  }
+});
+
+test('saving a target sends exactly that target, then pairing waits until the daemon restarts with it', async () => {
+  const app = host({ status: targeted() }); await app.mount('page');
+  await app.change('連線標的', 'woowtech');
+  assert.equal(targetSelect(app).props.value, 'woowtech');
+  assert.match(content(app.tree()), /連線標的尚未儲存；儲存後才能產生 Woowtech Smart 的配對連結/);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, true, 'an unsaved target never pairs');
+  assert.equal(linkNamed(app, '開啟 Paseo').props.href, 'https://app.paseo.sh/', 'the link follows the saved target');
+  app.handle('/config', () => { app.status(targeted({ selectedTarget: 'woowtech', configurationPending: true })); return { saved: true, target: 'woowtech', configurationPending: true }; });
+  await app.click('儲存連線標的');
+  const post = app.calls.find(call => call.path.endsWith('/config'));
+  assert.equal(post.init.method, 'POST');
+  assert.equal(post.init.body, '{"target":"woowtech"}');
+  assert.equal(post.init.headers['Content-Type'], 'application/json');
+  assert.match(content(app.tree()), /標的已儲存，停止再啟動服務後生效/);
+  assert.match(content(app.tree()), /停止服務」，待停止完成再按「恢復服務」/);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, true);
+  assert.equal(linkNamed(app, '開啟 Woowtech Smart').props.href, 'https://smart.woowtech.io/');
+  assert.equal(targetSelect(app).props.value, 'woowtech');
+  assert.doesNotMatch(content(app.tree()), /Paseo 執行環境需要重啟/, 'a pending target is not mistaken for a runtime restart');
+  assert.equal(count(app, '/pair'), 0);
+  assert.equal(count(app, '/start'), 0);
+  // Restarted with the new target: pairing returns its own web app only.
+  app.status(targeted({ selectedTarget: 'woowtech', activeTarget: 'woowtech' })); await app.advance(2000);
+  assert.doesNotMatch(content(app.tree()), /標的已儲存/);
+  const secret = offerFor('https://smart.woowtech.io');
+  app.handle('/pair', () => ({ url: secret, target: 'woowtech' }));
+  await app.click('產生配對連結');
+  const link = linkNamed(app, '使用配對連結開啟 Woowtech Smart');
+  assert.equal(link.props.href, secret);
+  assert.equal(link.props.rel, 'noopener noreferrer');
+  assert.equal(link.props.referrerPolicy, 'no-referrer');
+  assert.doesNotMatch(content(app.tree()), /PRIVATE/);
+  assert.doesNotMatch(JSON.stringify([...app.storage]), /PRIVATE/);
+  assert.deepEqual(app.logs, []);
+  // Another tab saves a different target: the old link disappears at the next read.
+  app.status(targeted({ selectedTarget: 'apporo', activeTarget: 'woowtech', configurationPending: true })); await app.advance(2000);
+  assert.equal(linkNamed(app, '使用配對連結開啟 Woowtech Smart'), undefined);
+  assert.equal(linkNamed(app, '開啟 Apporo Smart').props.href, 'https://smart.apporo.ai/');
+});
+
+test('the saved choice shows at once and the next read has the last word', async () => {
+  const app = host({ status: targeted() }); await app.mount('page');
+  await app.change('連線標的', 'apporo');
+  const reads = count(app, '/status');
+  const answer = deferred();
+  app.handle('/status', () => answer.promise);
+  app.handle('/config', () => ({ saved: true, target: 'apporo', configurationPending: true }));
+  await app.click('儲存連線標的');
+  assert.equal(targetSelect(app).props.value, 'apporo', 'no flicker back to the old choice while the status is read again');
+  assert.equal(linkNamed(app, '開啟 Apporo Smart').props.href, 'https://smart.apporo.ai/');
+  assert.match(content(app.tree()), /標的已儲存/);
+  assert.ok(count(app, '/status') > reads);
+  answer.resolve(targeted({ selectedTarget: 'apporo', configurationPending: true })); await app.settle();
+  assert.equal(targetSelect(app).props.value, 'apporo');
+  // A reply that does not describe this save changes nothing optimistic.
+  const odd = host({ status: targeted() }); await odd.mount('page');
+  await odd.change('連線標的', 'woowtech');
+  odd.handle('/config', () => ({ saved: true, target: 'apporo', configurationPending: true }));
+  await odd.click('儲存連線標的');
+  assert.equal(targetSelect(odd).props.value, 'paseo');
+});
+
+test('an unsaved choice survives status polling, hidden tabs and the daemon restarting, and blocks pairing until saved', async () => {
+  const app = host({ status: targeted() }); await app.mount('page');
+  await app.change('連線標的', 'apporo');
+  for (let i = 0; i < 4; i++) {
+    await app.advance(2000);
+    assert.equal(targetSelect(app).props.value, 'apporo', 'poll ' + i);
+    assert.equal(buttonNode(app, '產生配對連結').props.disabled, true);
+    assert.match(content(app.tree()), /連線標的尚未儲存/);
+  }
+  assert.ok(count(app, '/status') >= 5, 'the page did poll');
+  await app.hidden(true); await app.hidden(false);
+  assert.equal(targetSelect(app).props.value, 'apporo');
+  app.status(targeted({ phase: 'restart_required', diagnosticCode: 'RESTART_REQUIRED' })); await app.advance(2000);
+  assert.equal(targetSelect(app).props.value, 'apporo');
+  assert.equal(count(app, '/config'), 0, 'choosing never saves by itself');
+  // Choosing the saved target again drops the draft; another tab saving the same choice ends it too.
+  await app.change('連線標的', 'paseo');
+  assert.doesNotMatch(content(app.tree()), /尚未儲存/);
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, true);
+  await app.change('連線標的', 'woowtech');
+  app.status(targeted({ selectedTarget: 'woowtech', activeTarget: 'paseo', configurationPending: true })); await app.advance(2000);
+  assert.doesNotMatch(content(app.tree()), /尚未儲存/);
+  assert.equal(targetSelect(app).props.value, 'woowtech');
+});
+
+test('a pairing link for another target, or one naming another target, is rejected', async () => {
+  for (const reply of [{ url: offerFor('https://app.paseo.sh') }, { url: offerFor('https://smart.woowtech.io'), target: 'paseo' }, { url: offerFor('https://smart.woowtech.io') + 'x y' },
+    { url: 'https://smart.woowtech.io/#offer=' }, { url: 'https://smart.woowtech.io/x#offer=A' }, { url: 'https://smart.woowtech.io/?a=1#offer=A' }, { url: 'https://smart.woowtech.io:444/#offer=A' }, { url: 'https://smart.woowtech.io/#offer=A', target: 'apporo' }]) {
+    const app = host({ status: targeted({ selectedTarget: 'woowtech', activeTarget: 'woowtech' }) }); await app.mount('page');
+    app.handle('/pair', () => reply); await app.click('產生配對連結');
+    assert.equal(nodes(app.tree()).filter(row => row.type === 'a' && content(row).startsWith('使用配對連結')).length, 0, JSON.stringify(reply).slice(0, 80));
+    assert.match(content(app.tree()), /有效的官方連結/);
+    assert.doesNotMatch(content(app.tree()), /PRIVATE/);
+  }
+  const apporo = host({ status: targeted({ selectedTarget: 'apporo', activeTarget: 'apporo' }) }); await apporo.mount('page');
+  apporo.handle('/pair', () => ({ url: offerFor('https://smart.apporo.ai'), target: 'apporo' })); await apporo.click('產生配對連結');
+  assert.equal(linkNamed(apporo, '使用配對連結開啟 Apporo Smart').props.href, offerFor('https://smart.apporo.ai'));
+});
+
+test('a target saved while stopped applies at the next start, and nothing here ever starts or stops the service', async () => {
+  const app = host({ status: targeted({ enabled: false, phase: 'disabled', daemon: { running: false, reachable: false }, selectedTarget: 'apporo', activeTarget: null, configurationPending: true }) });
+  await app.mount('page');
+  assert.match(content(app.tree()), /標的已儲存，停止再啟動服務後生效/);
+  assert.match(content(app.tree()), /新的連線標的「Apporo Smart」會在下次啟動服務時套用/);
+  await app.change('連線標的', 'paseo');
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, false);
+  await app.change('連線標的', 'apporo');
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, true);
+  assert.doesNotMatch(content(app.tree()), /尚未儲存/);
+  assert.equal(count(app, '/start'), 0);
+  assert.equal(count(app, '/stop'), 0);
+});
+
+test('an unknown or hostile target in the status falls back to Paseo by name and builds no link from it', async () => {
+  for (const bad of ['javascript:alert(1)', '__proto__', 'https://evil.example', '', 7, null, ['apporo']]) {
+    const app = host({ status: targeted({ selectedTarget: bad, activeTarget: bad }) }); await app.mount('page');
+    const anchors = nodes(app.tree()).filter(row => row.type === 'a').map(row => row.props.href);
+    assert.deepEqual(anchors.filter(Boolean), typeof bad === 'string' ? ['https://app.paseo.sh/'] : [], String(bad));
+    if (typeof bad === 'string') assert.equal(targetSelect(app).props.value, 'paseo');
+  }
+});
+
+test('a pending target, an unsaved choice and a busy save each keep the pairing and save buttons honest', async () => {
+  const app = host({ status: targeted({ selectedTarget: 'woowtech', activeTarget: 'paseo', configurationPending: true }) }); await app.mount('page');
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, true);
+  assert.equal(targetSelect(app).props.disabled, false);
+  const gate = deferred();
+  app.handle('/config', () => gate.promise);
+  await app.change('連線標的', 'apporo');
+  const click = app.click('儲存連線標的');
+  await app.settle();
+  assert.equal(targetSelect(app).props.disabled, true, 'busy');
+  assert.match(content(buttonNode(app, '正在儲存')), /正在儲存/);
+  assert.equal(buttonNode(app, '正在儲存').props.disabled, true);
+  gate.resolve({ saved: true, target: 'apporo', configurationPending: true }); await click; await app.settle();
+  assert.equal(count(app, '/config', 'POST'), 1);
+  assert.equal(targetSelect(app).props.disabled, false);
+});
+
+test('before any target is saved the page says nothing was changed, and saving what is shown (Paseo too) turns the plugin\'s settings on', async () => {
+  const app = host({ status: targeted({ targetSaved: false }) }); await app.mount('page');
+  assert.match(content(app.tree()), /尚未選擇連線標的：服務維持原有設定，沿用 Paseo 官方 relay，插件不會改動 daemon 的 config\.json/);
+  assert.match(content(app.tree()), /下次啟動服務才會依所選標的寫入 relay、App 網址與 CORS 設定，並先把原來的 config\.json 備份為 config\.json\.pre-agent-connect/);
+  assert.equal(targetSelect(app).props.value, 'paseo');
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, false, 'rc.9 paired in this state, and so does the page');
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, false, 'Paseo is a choice that can be saved');
+  app.handle('/config', () => { app.status(targeted()); return { saved: true, target: 'paseo', configurationPending: false }; });
+  await app.click('儲存連線標的');
+  const post = app.calls.find(call => call.path.endsWith('/config'));
+  assert.equal(post.init.body, '{"target":"paseo"}');
+  assert.doesNotMatch(content(app.tree()), /尚未選擇連線標的/, 'saved: the notice is gone');
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, true);
+  assert.doesNotMatch(content(app.tree()), /標的已儲存，停止再啟動服務後生效/, 'saving the shown target changes nothing that waits');
+  // Choosing another target while nothing is saved works as it does later.
+  const other = host({ status: targeted({ targetSaved: false }) }); await other.mount('page');
+  await other.change('連線標的', 'apporo');
+  assert.match(content(other.tree()), /連線標的尚未儲存；儲存後才能產生 Apporo Smart 的配對連結/);
+  other.handle('/config', () => { other.status(targeted({ selectedTarget: 'apporo', configurationPending: true })); return { saved: true, target: 'apporo', configurationPending: true }; });
+  await other.click('儲存連線標的');
+  assert.equal(other.calls.find(call => call.path.endsWith('/config')).init.body, '{"target":"apporo"}');
+  assert.match(content(other.tree()), /標的已儲存，停止再啟動服務後生效/);
+  assert.doesNotMatch(content(other.tree()), /尚未選擇連線標的/);
+});
+
+test('a record that cannot be read is named, blocks pairing, and saving the shown target repairs it', async () => {
+  const app = host({ status: targeted({ targetSaved: true, connectionCode: 'CONNECTION_STATE_CORRUPT', diagnosticCode: 'CONNECTION_STATE_CORRUPT' }) }); await app.mount('page');
+  assert.match(content(app.tree()), /連線標的的紀錄（connection\.json）無法辨識，暫時顯示為 Paseo，也不會產生配對連結。重新選擇並按「儲存連線標的」即可修復/);
+  assert.doesNotMatch(content(app.tree()), /尚未選擇連線標的/, 'it is not the legacy state');
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, true);
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, false, 'the shown target can be saved to replace the record');
+  app.handle('/config', () => { app.status(targeted()); return { saved: true, target: 'paseo', configurationPending: false }; });
+  await app.click('儲存連線標的');
+  assert.equal(app.calls.find(call => call.path.endsWith('/config')).init.body, '{"target":"paseo"}');
+  assert.doesNotMatch(content(app.tree()), /無法辨識/);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, false);
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, true);
+  // Another target can be chosen and saved from there too.
+  const other = host({ status: targeted({ selectedTarget: 'paseo', targetSaved: true, connectionCode: 'CONNECTION_STATE_CORRUPT' }) }); await other.mount('page');
+  await other.change('連線標的', 'woowtech');
+  other.handle('/config', () => { other.status(targeted({ selectedTarget: 'woowtech', configurationPending: true })); return { saved: true, target: 'woowtech', configurationPending: true }; });
+  await other.click('儲存連線標的');
+  assert.equal(other.calls.find(call => call.path.endsWith('/config')).init.body, '{"target":"woowtech"}');
+  assert.doesNotMatch(content(other.tree()), /無法辨識/);
+});
+
+test('a record path that is a link is named, cannot be saved over from here, and blocks pairing', async () => {
+  const app = host({ status: targeted({ targetSaved: true, connectionCode: 'UNSAFE_SYMLINK' }) }); await app.mount('page');
+  assert.match(content(app.tree()), /含有符號連結，插件不會跟隨或取代它，也不會產生配對連結。請由管理者檢查 plugin-data\/hermes-paseo\/connection\.json/);
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, true);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, true);
+  await app.change('連線標的', 'apporo');
+  assert.equal(buttonNode(app, '儲存連線標的').props.disabled, true, 'not even for another target: the write would be refused');
+  buttonNode(app, '儲存連線標的').props.onClick(); await app.settle();
+  assert.equal(count(app, '/config'), 0, 'and a click that gets through anyway sends nothing');
+  // Any other code is named as a code, and never as prose from the backend.
+  const odd = host({ status: targeted({ targetSaved: true, connectionCode: 'STATE_UNAVAILABLE' }) }); await odd.mount('page');
+  assert.match(content(odd.tree()), /連線標的的紀錄無法讀取（STATE_UNAVAILABLE）/);
+  assert.equal(buttonNode(odd, '儲存連線標的').props.disabled, true, 'only a record that is known to be damaged is replaced');
+  const hostile = host({ status: targeted({ targetSaved: true, connectionCode: '<b>x</b> not a code' }) }); await hostile.mount('page');
+  assert.doesNotMatch(content(hostile.tree()), /<b>/);
+  assert.equal(buttonNode(hostile, '產生配對連結').props.disabled, false, 'a value that is not a code is no record problem');
+});
+
+test('a failed start for a target reason is explained in plain words with its code, and a code that is not ours is not', async () => {
+  const failure = (code, phase = 'error') => host({ status: targeted({ phase, diagnosticCode: code, daemon: { running: false, reachable: false } }) });
+  const expected = {
+    BRAND_IDENTITY_SOURCE_MISMATCH: /不是已知的 Paseo 0\.11\.2 原版（可能被改過），所以沒有更動它。請改選 Paseo 再啟動/,
+    BRAND_IDENTITY_PATCH_MISMATCH: /驗證不通過，已還原檔案/,
+    RUNTIME_NOT_WRITABLE: /無法寫入 runtime 目錄（權限不足或唯讀）/,
+    RUNTIME_NOT_READABLE: /無法讀取 runtime 裡的 websocket-server\.js/,
+    CONFIG_BACKUP_FAILED: /無法備份 daemon 的 config\.json，所以沒有改寫它/,
+    UNSAFE_SYMLINK: /外掛資料路徑中有符號連結，插件拒絕跟隨/,
+    CONNECTION_STATE_CORRUPT: /連線標的的紀錄無法辨識，沒有啟動/,
+  };
+  for (const [code, pattern] of Object.entries(expected)) {
+    const app = failure(code); await app.mount('page');
+    assert.match(content(app.tree()), pattern, code);
+    assert.match(content(app.tree()), new RegExp('（代碼 ' + code + '）'));
+  }
+  for (const code of ['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'PROCESS_FAILED', '', null]) {
+    const app = failure(code); await app.mount('page');
+    assert.doesNotMatch(content(app.tree()), /（代碼 /, String(code));
+  }
+  const running = failure('BRAND_IDENTITY_SOURCE_MISMATCH', 'running'); await running.mount('page');
+  assert.doesNotMatch(content(running.tree()), /（代碼 /, 'only while the start has failed');
+});
+
+test('the Dashboard zh-TW wording for targets stays Traditional Chinese', () => {
+  const copy = [...source.matchAll(/"([^"\n]*[\u4e00-\u9fff][^"\n]*)"/g)].map(match => match[1]).join('\n');
+  for (const phrase of ['連線標的', '儲存連線標的', '標的已儲存，停止再啟動服務後生效', '連線標的尚未儲存', '使用配對連結開啟', '尚未選擇連線標的', '重新選擇並按「儲存連線標的」即可修復', '請改選 Paseo 再啟動']) assert.ok(copy.includes(phrase), phrase);
+  // Characters that exist only in Simplified Chinese (the Dashboard's other copy is Traditional).
+  assert.doesNotMatch(copy, /[连线标储务启动开关态选择码链对话测试验证设绑]/);
+});
+
+const unprepared = (prepare, patch = {}) => targeted({ diagnosticCode: 'RESTART_REQUIRED', installed: false, prepare,
+  daemon: { running: true, reachable: true, version: '0.11.2' }, ...patch });
+
+test('while the new release is being installed beside an older daemon the page says so and advises nothing the service would refuse', async () => {
+  const app = host({ status: unprepared({ stage: 'running' }) }); await app.mount('page');
+  const text = content(app.tree());
+  assert.match(text, /正在準備新版 Paseo 執行環境/);
+  assert.match(text, /準備新版中/);
+  assert.doesNotMatch(text, /需要停止再恢復服務才會換成新版本|需要重新啟動|執行環境已更新/);
+  assert.equal(buttonNode(app, '停止服務').props.disabled, false, 'an explicit stop remains possible');
+  assert.equal(buttonNode(app, '重新啟動／重試').props.disabled, true, 'nothing to retry while it runs');
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, false, 'the older daemon still pairs');
+  assert.equal(count(app, '/start'), 0);
+  // Ready: only now is the restart advised.
+  app.status(targeted({ diagnosticCode: 'RESTART_REQUIRED', installed: true, prepare: { stage: 'ready' }, daemon: { running: true, reachable: true, version: '0.11.2' } })); await app.advance(2000);
+  assert.match(content(app.tree()), /Paseo 執行環境已更新/);
+  assert.doesNotMatch(content(app.tree()), /正在準備新版|準備失敗/);
+});
+
+test('a failed preparation shows its code and the next try, never the stop-and-restart advice, and can be retried by hand', async () => {
+  const app = host({ status: unprepared({ stage: 'failed', code: 'RUNTIME_INSTALL_FAILED', retryInSeconds: 60 }, { phase: 'running' }) });
+  await app.mount('header'); await app.mount('page');
+  const text = content(app.tree());
+  assert.match(text, /新版 Paseo 執行環境準備失敗（原因代碼 RUNTIME_INSTALL_FAILED）/);
+  assert.match(text, /目前服務照常可用，不需要停止或重啟/);
+  assert.match(text, /約 60 秒後自動重試/);
+  assert.match(text, /仍可按「停止服務」手動停止/);
+  assert.match(text, /新版準備失敗/);
+  assert.doesNotMatch(text, /需要停止再恢復服務才會換成新版本|啟動失敗|需要重新啟動/);
+  assert.match(content(app.tree('header')), /新版準備失敗/);
+  assert.equal(buttonNode(app, '產生配對連結').props.disabled, false);
+  // The retry button posts the ordinary start request: the service retries the preparation at once.
+  app.handle('/start', () => { app.status(unprepared({ stage: 'running' })); return {}; });
+  await app.click('立即重試準備');
+  assert.equal(count(app, '/start', 'POST'), 1);
+  assert.equal(app.calls.find(call => call.path.endsWith('/start')).init.body, '{}');
+  assert.match(content(app.tree()), /正在準備新版/);
+  assert.equal(count(app, '/stop'), 0);
+});
+
+test('a preparation that ran out of space or attempts says exactly that', async () => {
+  const app = host({ status: unprepared({ stage: 'failed', code: 'INSUFFICIENT_DISK', retryInSeconds: 30, requiredMiB: 1536, availableMiB: 812 }) });
+  await app.mount('page');
+  assert.match(content(app.tree()), /磁碟空間不足：安裝需要約 1536 MiB 可用，目前只有 812 MiB/);
+  app.status(unprepared({ stage: 'failed', code: 'RUNTIME_INSTALL_TIMEOUT', retryInSeconds: null })); await app.advance(2000);
+  assert.match(content(app.tree()), /自動重試已停止，可按「立即重試準備」/);
+  assert.doesNotMatch(content(app.tree()), /磁碟空間不足|秒後自動重試/);
+  assert.equal(buttonNode(app, '立即重試準備').props.disabled, false);
+});
+
+test('preparation data from the service is validated: unknown stages, odd codes and bad numbers are not trusted', async () => {
+  for (const prepare of [{ stage: 'exploded', code: 'X' }, 'failed', null, { stage: 'failed', code: 'lowercase/path', retryInSeconds: -5, requiredMiB: 'many', availableMiB: 1.5 }]) {
+    const app = host({ status: unprepared(prepare) }); await app.mount('page');
+    const text = content(app.tree());
+    assert.doesNotMatch(text, /lowercase|\/path|many|-5/);
+    assert.match(text, /準備新版|新版 Paseo 執行環境準備失敗/);
+    assert.doesNotMatch(text, /磁碟空間不足/);
+  }
+  const odd = host({ status: unprepared({ stage: 'failed', code: 'lowercase/path', retryInSeconds: -5 }) }); await odd.mount('page');
+  assert.match(content(odd.tree()), /原因代碼 未知）/);
+  assert.match(content(odd.tree()), /自動重試已停止/);
 });

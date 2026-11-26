@@ -1,3 +1,4 @@
+import {seedCurrentRelease,lifecycleModules} from './release-fixtures.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -129,11 +130,7 @@ test('stale lock from an earlier container retires without signalling the unrela
     fs.writeFileSync(path.join(loc.paseoHome,'.hermes-paseo-owner.json'),JSON.stringify({installationId:state.installationId,home:loc.paseoHome}));
     const record={pid:child.pid,uid:process.getuid(),startedAt:'2000-01-01T00:00:00.000Z',heartbeat:true,listen:'127.0.0.1:6769'};
     fs.writeFileSync(path.join(loc.paseoHome,'paseo.pid'),JSON.stringify(record));
-    const pkg=path.join(loc.runtimeDir,'node_modules/@getpaseo/server');fs.mkdirSync(path.join(pkg,'dist/server/server'),{recursive:true});
-    fs.mkdirSync(path.join(loc.runtimeDir,'node_modules/@getpaseo/cli'),{recursive:true});fs.writeFileSync(path.join(loc.runtimeDir,'node_modules/@getpaseo/cli/package.json'),JSON.stringify({version:'0.11.2'}));
-    fs.writeFileSync(path.join(pkg,'package.json'),JSON.stringify({type:'module'}));
-    fs.writeFileSync(path.join(pkg,'dist/server/server/daemon-instance.js'),'import fs from "node:fs";export async function readDaemonInstance(home){try{return JSON.parse(fs.readFileSync(home+"/paseo.pid","utf8"))}catch{return null}};export async function stopDaemonInstance(){throw new Error("must never signal a reused PID")};');
-    fs.writeFileSync(path.join(pkg,'dist/server/server/pid-lock.js'),'import fs from "node:fs";export async function getPidLockInfo(home){try{return JSON.parse(fs.readFileSync(home+"/paseo.pid","utf8"))}catch{return null}};export async function releasePidLock(home,expected){const x=await getPidLockInfo(home);if(x&&x.pid===expected.ownerPid&&x.startedAt===expected.startedAt)fs.unlinkSync(home+"/paseo.pid")};');
+    seedCurrentRelease(loc,{modules:lifecycleModules('current')});
     assert.ok(linuxProcessBirth(child.pid));
     assert.equal(demonstrablyReusedPid(record),true);
     assert.equal(demonstrablyReusedPid({...record,startedAt:'invalid'}),false);

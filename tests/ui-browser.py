@@ -20,6 +20,9 @@ from urllib.parse import urlsplit
 from playwright.sync_api import expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parent.parent
+# The fixed apps of the three connection targets (mirrored from src/connection-targets.mjs).
+TARGET_ORIGINS = {'paseo': 'https://app.paseo.sh', 'woowtech': 'https://smart.woowtech.io',
+                  'apporo': 'https://smart.apporo.ai'}
 HARNESS = r'''
 (function () {
   const React = window.hostReact;
@@ -91,17 +94,34 @@ class Fixture:
         self.background_acceptance = False
         self.acceptance_job = None
         self.disconnect_acceptance = False
+        self.target = 'paseo'
+        self.saved = False  # nobody saved a target yet: the plugin's legacy mode
+        self.connection_code = None
+        self.active = None
+        self.pending = False
+        self.legacy_backend = False
+        self.preparation = None
+        self.prepared = False
 
     def status(self):
         if self.ready_at and time.monotonic() >= self.ready_at:
             self.phase, self.enabled, self.ready_at = 'running', True, None
+            # A start always runs the daemon with the saved target.
+            self.active, self.pending = self.target, False
         running = self.phase == 'running'
+        if running and self.active is None:
+            self.active = self.target
         value = dict(enabled=self.enabled, phase=self.phase,
                     daemon=dict(running=running, reachable=running),
                     providers=[dict(provider='hermes', label='本機 Hermes ACP', status='ready'),
                                dict(provider='claude', label='未安裝 Claude', status='unavailable'),
                                dict(provider='codex', label='未安裝 Codex', status='unavailable')],
                     onboarding=dict(required=not self.completed, id=self.onboarding_id, completed=self.completed))
+        if not self.legacy_backend:
+            value.update(selectedTarget=self.target, targetSaved=self.saved, connectionCode=self.connection_code,
+                         activeTarget=self.active if running else None, configurationPending=self.pending)
+        if self.preparation is not None:
+            value.update(installed=self.prepared, prepare=self.preparation, diagnosticCode='RESTART_REQUIRED')
         if self.acceptance_job is not None:
             value['acceptanceJob'] = self.acceptance_job
         return value
@@ -137,8 +157,11 @@ def assert_posts(fixture, origin):
     for call in fixture.calls:
         if call['method'] != 'POST':
             continue
-        expected = {'confirm': True} if call['path'] == '/api/hermes-paseo-host/reload' else {}
-        assert json.loads(call['body']) == expected
+        if call['path'].endswith('/config'):
+            assert set(json.loads(call['body'])) == {'target'} and json.loads(call['body'])['target'] in TARGET_ORIGINS
+        else:
+            expected = {'confirm': True} if call['path'] == '/api/hermes-paseo-host/reload' else {}
+            assert json.loads(call['body']) == expected
         assert call['content_type'] == 'application/json'
         assert call['origin'] == origin and call['site'] == 'same-origin'
 
@@ -211,6 +234,20 @@ def run(args):
                     return
                 return self.send(dict(ok=fixture.reload_status == 202, generation=fixture.generation),
                                  status=fixture.reload_status)
+            if self.path.endswith('/config'):
+                try:
+                    value = json.loads(body)
+                except ValueError:
+                    value = None
+                if (not isinstance(value, dict) or set(value) != {'target'} or value['target'] not in TARGET_ORIGINS
+                        or self.headers.get('Content-Type') != 'application/json'):
+                    return self.send({}, status=400)
+                if value['target'] != fixture.target:
+                    fixture.target = value['target']
+                    fixture.pending = fixture.active != fixture.target if fixture.phase == 'running' else True
+                # The first save ends legacy mode, and saving replaces a record that could not be read.
+                fixture.saved, fixture.connection_code = True, None
+                return self.send(dict(saved=True, target=fixture.target, configurationPending=fixture.pending))
             if body != b'{}' or self.headers.get('Content-Type') != 'application/json':
                 return self.send({}, status=400)
             if self.path.endswith('/start'):
@@ -219,13 +256,16 @@ def run(args):
                 fixture.ready_at = time.monotonic() + .15
                 return self.send(fixture.status(), status=202)
             if self.path.endswith('/stop'):
-                fixture.phase, fixture.enabled, fixture.ready_at = 'disabled', False, None
+                fixture.phase, fixture.enabled, fixture.ready_at, fixture.active = 'disabled', False, None, None
                 if fixture.acceptance_job and fixture.acceptance_job['pending']:
                     fixture.acceptance_job = dict(fixture.acceptance_job, phase='interrupted', pending=False,
                                                   result=None, code='ACCEPTANCE_INTERRUPTED')
                 return self.send(fixture.status())
             if self.path.endswith('/pair'):
-                return self.send({'url': 'https://app.paseo.sh/pair#offer=TEST-PRIVATE-OFFER'})
+                if fixture.pending:
+                    return self.send({'ok': False, 'code': 'CONFIGURATION_PENDING'}, status=503)
+                return self.send({'url': TARGET_ORIGINS[fixture.target] + '/#offer=TEST-PRIVATE-OFFER',
+                                  'target': fixture.target})
             if self.path.endswith('/acceptance'):
                 if fixture.background_acceptance:
                     fixture.acceptance_job = dict(jobId=f'fixture-job-{fixture.count("/acceptance", "POST")}',
@@ -258,7 +298,7 @@ def run(args):
             def route(request):
                 if request.request.url.startswith(origin + '/'):
                     request.continue_()
-                elif request.request.url.startswith('https://app.paseo.sh/'):
+                elif any(request.request.url.startswith(app + '/') for app in TARGET_ORIGINS.values()):
                     request.fulfill(status=200, content_type='text/html', body='<p>Mock official binding</p>')
                 else:
                     blocked_requests.append('Unexpected external request blocked')
@@ -282,7 +322,9 @@ def run(args):
             expect(page.get_by_role('combobox', name='模型', exact=True)).to_have_value('acp-discovered-model', timeout=10000)
             expect(page.get_by_role('combobox', name='模式', exact=True)).to_have_value('discovered-mode')
             page.get_by_role('button', name='產生配對連結').click()
-            link = page.get_by_role('link', name='開啟 Paseo 官方網站並綁定')
+            expect(page.get_by_role('combobox', name='連線標的', exact=True)).to_have_value('paseo')
+            assert page.get_by_role('link', name='開啟 Paseo', exact=True).get_attribute('href') == 'https://app.paseo.sh/'
+            link = page.get_by_role('link', name='使用配對連結開啟 Paseo', exact=True)
             expect(link).to_be_visible()
             assert len(context.pages) == 1, 'generating an offer must not open a popup'
             assert link.get_attribute('rel') == 'noopener noreferrer'
@@ -341,6 +383,128 @@ def run(args):
             assert_posts(fixture, origin)
             context.close()
             print('PASS: 202 releases the foreground action; refresh adopts pending/completed jobs; Stop reports interruption.')
+
+            # A target saved while the daemon runs stays pending: no pairing until stop and resume. The unsaved
+            # choice survives the page's own status polling (every 2 s), and the links open only the app of the
+            # saved target.
+            fixture = Fixture.reloadable()
+            context = browser.new_context(viewport=dict(width=390, height=844))
+            context.route('**/*', route)
+            page = context.new_page()
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(origin + '/paseo')
+            select = page.get_by_role('combobox', name='連線標的', exact=True)
+            expect(select).to_have_value('paseo')
+            assert select.locator('option').all_text_contents() == ['Woowtech Smart', 'Apporo Smart', 'Paseo']
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_enabled(timeout=10000)
+            select.select_option('woowtech')
+            expect(page.get_by_text('連線標的尚未儲存', exact=False)).to_be_visible()
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_disabled()
+            polls = fixture.count('/status')
+            page.wait_for_timeout(4500)
+            assert fixture.count('/status') >= polls + 2, 'the page kept polling'
+            expect(select).to_have_value('woowtech')
+            expect(page.get_by_text('連線標的尚未儲存', exact=False)).to_be_visible()
+            page.get_by_role('button', name='儲存連線標的', exact=True).click()
+            expect(page.get_by_text('標的已儲存，停止再啟動服務後生效', exact=False)).to_be_visible()
+            expect(page.get_by_text('連線標的尚未儲存', exact=False)).to_have_count(0)
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_disabled()
+            open_link = page.get_by_role('link', name='開啟 Woowtech Smart', exact=True)
+            assert open_link.get_attribute('href') == 'https://smart.woowtech.io/'
+            assert open_link.get_attribute('rel') == 'noopener noreferrer'
+            assert open_link.get_attribute('referrerPolicy') == 'no-referrer'
+            assert fixture.count('/config', 'POST') == 1 and fixture.count('/pair') == 0
+            expect(select).to_have_value('woowtech')
+            page.wait_for_timeout(2600)
+            expect(select).to_have_value('woowtech')
+            expect(page.get_by_text('標的已儲存，停止再啟動服務後生效', exact=False)).to_be_visible()
+            page.get_by_role('button', name='停止服務', exact=True).click()
+            expect(page.get_by_text('已手動停止', exact=True).last).to_be_visible()
+            expect(page.get_by_text('新的連線標的「Woowtech Smart」會在下次啟動服務時套用', exact=False)).to_be_visible()
+            page.get_by_role('button', name='恢復服務', exact=True).click()
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_enabled(timeout=10000)
+            expect(page.get_by_text('標的已儲存，停止再啟動服務後生效', exact=False)).to_have_count(0)
+            page.get_by_role('button', name='產生配對連結', exact=True).click()
+            link = page.get_by_role('link', name='使用配對連結開啟 Woowtech Smart', exact=True)
+            expect(link).to_be_visible()
+            assert link.get_attribute('href') == 'https://smart.woowtech.io/#offer=TEST-PRIVATE-OFFER'
+            assert link.get_attribute('rel') == 'noopener noreferrer'
+            assert link.get_attribute('referrerPolicy') == 'no-referrer'
+            assert 'TEST-PRIVATE-OFFER' not in page.inner_text('body')
+            assert 'TEST-PRIVATE-OFFER' not in page.evaluate('JSON.stringify({...sessionStorage,...localStorage})')
+            with context.expect_page() as opened:
+                link.click()
+            popup = opened.value
+            popup.wait_for_load_state()
+            assert popup.url.startswith('https://smart.woowtech.io/')
+            assert popup.evaluate('window.opener === null && document.referrer === ""')
+            popup.close()
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            assert fixture.count('/config', 'POST') == 1
+            assert_posts(fixture, origin)
+            context.close()
+            print('PASS: a saved target waits for stop and resume before pairing; the unsaved choice survives polling; links open only its own app.')
+
+            # Nothing saved yet (legacy mode) says so and changes nothing; saving the shown Paseo turns the settings on.
+            fixture = Fixture.reloadable()
+            context = browser.new_context(viewport=dict(width=390, height=844))
+            context.route('**/*', route)
+            page = context.new_page()
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(origin + '/paseo')
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_enabled(timeout=10000)
+            expect(page.get_by_text('尚未選擇連線標的：服務維持原有設定', exact=False)).to_be_visible()
+            expect(page.get_by_text('config.json.pre-agent-connect', exact=False)).to_be_visible()
+            save = page.get_by_role('button', name='儲存連線標的', exact=True)
+            expect(save).to_be_enabled()
+            save.click()
+            expect(page.get_by_text('尚未選擇連線標的', exact=False)).to_have_count(0)
+            expect(save).to_be_disabled()
+            assert fixture.count('/config', 'POST') == 1 and fixture.saved and fixture.target == 'paseo'
+            expect(page.get_by_text('標的已儲存，停止再啟動服務後生效', exact=False)).to_have_count(0)
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_enabled()
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            assert_posts(fixture, origin)
+            context.close()
+            print('PASS: before a target is saved the page says nothing changed; saving Paseo turns the settings on without waiting for a restart.')
+
+            # A record that cannot be read is named, blocks pairing and is repaired by saving the shown target.
+            fixture = Fixture.reloadable()
+            fixture.saved, fixture.connection_code = True, 'CONNECTION_STATE_CORRUPT'
+            context = browser.new_context(viewport=dict(width=390, height=844))
+            context.route('**/*', route)
+            page = context.new_page()
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(origin + '/paseo')
+            expect(page.get_by_text('連線標的的紀錄（connection.json）無法辨識', exact=False)).to_be_visible(timeout=10000)
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_disabled()
+            expect(page.get_by_text('尚未選擇連線標的', exact=False)).to_have_count(0)
+            save = page.get_by_role('button', name='儲存連線標的', exact=True)
+            expect(save).to_be_enabled()
+            save.click()
+            expect(page.get_by_text('連線標的的紀錄（connection.json）無法辨識', exact=False)).to_have_count(0)
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_enabled()
+            assert fixture.count('/config', 'POST') == 1 and fixture.connection_code is None
+            assert_posts(fixture, origin)
+            context.close()
+            print('PASS: a damaged record is named, blocks pairing, and saving the shown target repairs it.')
+
+            # A backend loaded before a plugin update reports no target: the page stays as it was (Paseo only).
+            fixture = Fixture.reloadable()
+            fixture.legacy_backend = True
+            context = browser.new_context(viewport=dict(width=390, height=844))
+            context.route('**/*', route)
+            page = context.new_page()
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(origin + '/paseo')
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_enabled(timeout=10000)
+            assert page.get_by_role('combobox', name='連線標的', exact=True).count() == 0
+            page.get_by_role('button', name='產生配對連結', exact=True).click()
+            expect(page.get_by_role('link', name='使用配對連結開啟 Paseo', exact=True)).to_be_visible()
+            assert fixture.count('/config', 'POST') == 0
+            assert_posts(fixture, origin)
+            context.close()
+            print('PASS: a backend without targets keeps the Paseo-only page and pairing.')
 
             fixture = Fixture.reloadable()
             fixture.background_acceptance = True
@@ -531,6 +695,31 @@ def run(args):
                 assert fixture.count('/reload', 'POST') == 0
                 context.close()
             print('PASS: active installer/start/stop phases disable Dashboard reload.')
+            # The new release could not be installed beside the older daemon: the page says why and when it
+            # tries again instead of advising a stop, and the retry button is the ordinary start request.
+            current = Fixture.reloadable()
+            current.preparation = dict(stage='failed', code='INSUFFICIENT_DISK', retryInSeconds=60, requiredMiB=1536, availableMiB=812)
+            fixture = current
+            context = browser.new_context(viewport=dict(width=390, height=844))
+            context.route('**/*', route)
+            page = context.new_page()
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.goto(origin + '/paseo')
+            expect(page.get_by_text('新版 Paseo 執行環境準備失敗（原因代碼 INSUFFICIENT_DISK）', exact=False)).to_be_visible()
+            expect(page.get_by_text('磁碟空間不足：安裝需要約 1536 MiB 可用，目前只有 812 MiB', exact=False)).to_be_visible()
+            expect(page.get_by_text('約 60 秒後自動重試', exact=False)).to_be_visible()
+            assert page.get_by_text('需要停止再恢復服務', exact=False).count() == 0
+            assert page.get_by_text('啟動失敗', exact=False).count() == 0
+            expect(page.get_by_role('button', name='產生配對連結', exact=True)).to_be_enabled()
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            retry = page.get_by_role('button', name='立即重試準備', exact=True)
+            expect(retry).to_be_enabled()
+            retry.click()
+            wait_for_calls(page, fixture, '/start', 1)
+            assert fixture.count('/start', 'POST') == 1 and fixture.count('/stop', 'POST') == 0
+            assert_posts(fixture, origin)
+            context.close()
+            print('PASS: a failed preparation shows its code and next try, advises no stop, and retries through the ordinary start request.')
             browser.close()
         assert not errors, f'Browser React errors: {errors}'
         assert not blocked_requests, blocked_requests

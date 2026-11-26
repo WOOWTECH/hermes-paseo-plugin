@@ -75,6 +75,7 @@ class IngressRouteTests(unittest.TestCase):
         ('POST', plugin_prefix + '/pair', {}),
         ('POST', plugin_prefix + '/start', {}),
         ('POST', plugin_prefix + '/stop', {}),
+        ('POST', plugin_prefix + '/config', {'target': 'paseo'}),
         ('GET', plugin_prefix + '/acceptance', None),
         ('POST', plugin_prefix + '/acceptance', {}),
         ('GET', host.PREFIX + '/capabilities', None),
@@ -266,7 +267,7 @@ class IngressRouteTests(unittest.TestCase):
         self.assert_no_actions()
         self.assertEqual(self.client.post(self.plugin_prefix + '/pair?profile=default',
                                          headers=headers, json={}).status_code, 200)
-        for route in self.routes[7:]:
+        for route in (row for row in self.routes if not row[1].startswith(self.plugin_prefix)):
             self.assertEqual(self.request(route, headers, '?profile=default').status_code, 400)
 
     def test_ingress_cannot_hide_a_bad_private_primary_or_missing_host_primary(self):

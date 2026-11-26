@@ -1,11 +1,13 @@
 import * as runtime from './runtime.mjs';
 import {RuntimeError} from './state.mjs';
+import {connectionTarget} from './connection-targets.mjs';
 const providers=new Set(['hermes','claude','codex','pi']);
-const actions=new Set(['status','start','stop','models','pair','relay','acceptance','chat','continue']);
+const actions=new Set(['status','start','stop','prepare','models','pair','relay','config','acceptance','chat','continue']);
 export function validateInput(action,input) {
  if(!actions.has(action)||!input||typeof input!=='object'||Array.isArray(input))throw new RuntimeError('INVALID_REQUEST');
- const fields={status:[],start:[],stop:[],models:['provider'],pair:[],relay:[],acceptance:['providers'],chat:['provider','model','mode','thinking','message'],continue:['agentId','message']}[action];
+ const fields={status:[],start:[],stop:[],prepare:[],models:['provider'],pair:[],relay:[],config:['target'],acceptance:['providers'],chat:['provider','model','mode','thinking','message'],continue:['agentId','message']}[action];
  if(Object.keys(input).some(k=>!fields.includes(k)))throw new RuntimeError('INVALID_REQUEST');
+ if(action==='config')connectionTarget(input.target);
  if(input.provider!==undefined&&!providers.has(input.provider))throw new RuntimeError('INVALID_PROVIDER');
  if(action==='models'&&!providers.has(input.provider))throw new RuntimeError('INVALID_PROVIDER');
  if(action==='chat'&&!providers.has(input.provider))throw new RuntimeError('INVALID_PROVIDER');
@@ -16,16 +18,18 @@ export function validateInput(action,input) {
  return input;
 }
 export function publicStatus(s) {
- return {installed:s.installed,version:s.version,enabled:s.enabled,phase:s.phase,diagnosticCode:s.diagnosticCode||null,daemon:{running:s.daemon.running,reachable:s.daemon.reachable,relayEnabled:s.daemon.relayEnabled,relayVerified:s.daemon.relayVerified,relayVerifiedAt:s.daemon.relayVerifiedAt},providers:s.providers.filter(p=>providers.has(p.provider)),chatVerified:s.chatVerified,chatVerifiedAt:s.state?.acceptance?.checkedAt||null};
+ return {installed:s.installed===true,prepare:s.prepare,version:s.version,enabled:s.enabled,phase:s.phase,diagnosticCode:s.diagnosticCode||null,daemon:{running:s.daemon.running,reachable:s.daemon.reachable,relayEnabled:s.daemon.relayEnabled,relayVerified:s.daemon.relayVerified,relayVerifiedAt:s.daemon.relayVerifiedAt},providers:s.providers.filter(p=>providers.has(p.provider)),chatVerified:s.chatVerified,chatVerifiedAt:s.state?.acceptance?.checkedAt||null,selectedTarget:s.selectedTarget,targetSaved:s.targetSaved,connectionCode:s.connectionCode,activeTarget:s.activeTarget,configurationPending:s.configurationPending};
 }
 export async function control(action,input={}) {
  validateInput(action,input);
  if(action==='status')return publicStatus(await runtime.status());
+ if(action==='prepare')return publicStatus(await runtime.prepare());
  if(action==='start'){await runtime.activate();return publicStatus(await runtime.status());}
  if(action==='stop'){await runtime.deactivate();return publicStatus(await runtime.status());}
  if(action==='models')return runtime.listModels(input.provider);
  if(action==='pair')return runtime.pair();
  if(action==='relay'){await runtime.verifyRelay();return publicStatus(await runtime.status());}
+ if(action==='config')return runtime.saveConnectionSettings(input);
  if(action==='acceptance')return runtime.acceptance(input);
  if(action==='chat')return runtime.createChat({...input,cwd:runtime.locations().agentDir,title:'Hermes Paseo conversation'});
  if(action==='continue')return runtime.continueChat(input);
