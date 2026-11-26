@@ -187,16 +187,20 @@ test('a runtime that is already patched is left alone by a start for Paseo', asy
 });
 
 for (const target of SMART) {
-  test(`a start for ${target.id} refuses a runtime whose server it does not recognise, and leaves it as it found it`, async t => {
+  test(`a start for ${target.id} refuses a runtime whose server it does not recognise, and leaves everything as it found it`, async t => {
     const p = profile(t);
+    await activate(); await deactivate();
     fs.appendFileSync(p.server, '\n// local edit\n');
-    const edited = fs.readFileSync(p.server);
+    const [edited, config] = [fs.readFileSync(p.server), configBytes(p)];
     await saveConnectionSettings({ target: target.id });
     await assert.rejects(activate(), { code: 'BRAND_IDENTITY_SOURCE_MISMATCH' });
     assert.ok(fs.readFileSync(p.server).equals(edited));
     assert.equal(fs.existsSync(helperPath(p)), false);
-    assert.equal(starts(p).length, 0, 'no daemon was started');
+    assert.equal(starts(p).length, 1, 'no daemon was started (the one start is the setup\'s)');
     assert.equal(fs.existsSync(p.marker), false);
+    assert.ok(configBytes(p).equals(config), 'config.json was not rewritten for a target that cannot start');
+    assert.equal(fs.existsSync(backupPath(p)), false, 'and nothing was backed up for it');
+    assert.equal(readState().configBackup, undefined);
     const s = await status();
     assert.deepEqual([s.phase, s.diagnosticCode === null, s.state.lastError.code], ['error', true, 'BRAND_IDENTITY_SOURCE_MISMATCH']);
     // The way out is Paseo, which needs no patch: the same runtime starts for it.
@@ -336,12 +340,12 @@ test('a link where the backup belongs is refused, and nothing is rewritten, star
   fs.writeFileSync(elsewhere, 'precious');
   fs.symlinkSync(elsewhere, backupPath(p));
   const config = configBytes(p), runtime = treeDigest(p.root);
-  await saveConnectionSettings({ target: 'apporo' });
+  await saveConnectionSettings({ target: 'paseo' });
   await assert.rejects(activate(), { code: 'UNSAFE_SYMLINK' });
   assert.equal(fs.readFileSync(elsewhere, 'utf8'), 'precious');
   assert.ok(configBytes(p).equals(config), 'config.json is untouched');
   assert.equal(starts(p).length, 1, 'no daemon was started');
-  assert.deepEqual(treeDigest(p.root), runtime, 'and the runtime was not patched');
+  assert.deepEqual(treeDigest(p.root), runtime, 'and the runtime was not touched');
   assert.equal(readState().configBackup, undefined, 'it is tried again once the link is gone');
   fs.unlinkSync(backupPath(p));
   assert.equal((await activate()).phase, 'running');
@@ -407,6 +411,8 @@ test('a patch that fails after the install does not make the next attempt instal
   assert.equal(runtimeReady(p.loc), true, 'the install itself finished: the runtime is ready');
   assert.equal(fs.existsSync(helperPath(p)), false);
   assert.equal(starts(p).length, 0);
+  assert.equal(fs.existsSync(p.config), false, 'config.json was not written for a start that cannot happen');
+  assert.equal(readState().configBackup, undefined);
   await assert.rejects(activate(), { code: 'BRAND_IDENTITY_SOURCE_MISMATCH' });
   assert.equal(npmRuns(p), 1, 'the second attempt did not run npm ci again');
   // Paseo needs no patch, so the very same runtime starts for it.

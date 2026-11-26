@@ -245,11 +245,13 @@ export async function activate(options = {}) {
       } else {
         // Managed mode (a target was saved) applies it here and only here: its relay, app and CORS settings go into
         // config.json, its brand into the daemon's environment, and for a Smart target the runtime is patched while no
-        // daemon runs from it. Legacy mode starts exactly as rc.9 did.
+        // daemon runs from it. Legacy mode starts exactly as rc.9 did. The patch comes first: a runtime it cannot patch
+        // stops the start before config.json is backed up or rewritten, and a patch that is already in place is harmless.
         const choice = savedConnection(locations()), target = choice.saved ? choice.target : undefined;
-        const port = await choosePort(locations().port); await writeConfig(port, launchers, target);
-        updateState({ phase: 'starting' });
+        const port = await choosePort(locations().port);
         if (target !== undefined && requiresBrand(target)) patchInstalledRuntime(locations());
+        await writeConfig(port, launchers, target);
+        updateState({ phase: 'starting' });
         await cli(['daemon', 'start', '--timeout', '90'], target === undefined ? { timeoutMs: 105000 } : { timeoutMs: 105000, env: inheritedEnv(target) });
         const instance = await currentInstance(); await verifyInstanceOwnership(instance);
         updateState({ phase: 'running', providerReloadPending: null, daemonPid: instance.pid, daemonStartedAt: instance.startedAt, daemonContainerIdentity: linuxContainerIdentity(), ...(target === undefined ? {} : { activeTarget: target }), ...settledPending() });
