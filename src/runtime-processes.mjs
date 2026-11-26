@@ -57,7 +57,10 @@ export function runtimeInUse(root,revision,{procRoot=runtimeProcessTable.root,ow
      if(!runtime||!path.isAbsolute(runtime)||path.resolve(runtime,'releases',revision)===root)return true;
     }
     if(inside(fs.readlinkSync(path.join(base,'cwd'))))return true;
-   } catch(error) {if(!['ENOENT','ESRCH'].includes(error.code))return true;}
+   } catch(error) {if(!['ENOENT','ESRCH'].includes(error.code)) {
+    if(process.env.HERMES_PASEO_DEBUG_PROC==='1')process.stderr.write('[DEBUG-proc-1126] '+JSON.stringify({pid,code:error.code,syscall:error.syscall,file:error.path})+'\n');
+    return true;
+   }}
   }
   return false;
  } catch {return true;}

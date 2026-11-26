@@ -45,6 +45,8 @@ jobs:
           /tmp/hermes-paseo-unit-venv/bin/python -m pip install fastapi==0.115.14 httpx==0.28.1 PyYAML==6.0.3
           echo '/tmp/hermes-paseo-unit-venv/bin' >> "$GITHUB_PATH"
       - run: node --test tests/*.test.mjs
+        env:
+          HERMES_PASEO_DEBUG_PROC: '1'
       - run: python -m unittest discover -s tests -p 'test_*.py'
       - run: node --check dashboard/dist/index.js
 
