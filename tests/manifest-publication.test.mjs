@@ -6,7 +6,6 @@ import { spawnSync } from 'node:child_process';
 import { locations } from '../src/state.mjs';
 import { prepare } from '../src/runtime.mjs';
 import { prepareRuntimeManifest, runtimeDirectory } from '../src/runtime-layout.mjs';
-import { runtimeProcessTable } from '../src/runtime-processes.mjs';
 import { fixture, fakeNpm } from './release-fixtures.mjs';
 
 test('SIGKILL during either manifest copy leaves a release that prepare can retry safely', async t => {
@@ -14,10 +13,6 @@ test('SIGKILL during either manifest copy leaves a release that prepare can retr
     await t.test(name, async t => {
       const f = fixture(); t.after(() => f.close());
       const npm = fakeNpm(f), loc = locations(), root = runtimeDirectory(loc);
-      // Isolate ownership/publication from the host's unrelated process permissions.
-      const saved = { ...runtimeProcessTable }, proc = path.join(f.dir, 'proc');
-      fs.mkdirSync(proc); runtimeProcessTable.root = proc;
-      t.after(() => Object.assign(runtimeProcessTable, saved));
       const result = spawnSync(process.execPath, ['--input-type=module', '-e', `
         import fs from 'node:fs';
         import path from 'node:path';

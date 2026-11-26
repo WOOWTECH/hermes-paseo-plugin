@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { runtimeDirectory, markRuntimeReady, PASEO_VERSION, LEGACY_PASEO_VERSION, PRIOR_RELEASES } from '../src/runtime-layout.mjs';
 import { locations, updateState } from '../src/state.mjs';
+import { isolateFixtureProcesses, SCOPE_ENV } from './fixture-processes.mjs';
 
 const fixtures = new URL('./fixtures/paseo-0.11.2/', import.meta.url);
 export const websocketServerSource = () => gunzipSync(fs.readFileSync(new URL('websocket-server.js.gz', fixtures))).toString();
@@ -14,12 +15,18 @@ const CLI = 'node_modules/@getpaseo/cli';
 
 export function fixture(prefix = 'hermes-paseo-release-') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  const keys = ['HOME', 'HERMES_HOME', 'HERMES_PASEO_STATE_DIR', 'HERMES_PASEO_RUNTIME_DIR', 'HERMES_PASEO_PORT', 'PASEO_HOME'];
+  const keys = ['HOME', 'HERMES_HOME', 'HERMES_PASEO_STATE_DIR', 'HERMES_PASEO_RUNTIME_DIR', 'HERMES_PASEO_PORT', 'PASEO_HOME', SCOPE_ENV];
   const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   process.env.HOME = path.join(dir, 'home'); process.env.HERMES_HOME = path.join(dir, 'agent');
   process.env.HERMES_PASEO_STATE_DIR = path.join(dir, 'state'); process.env.HERMES_PASEO_RUNTIME_DIR = path.join(dir, 'runtime');
   delete process.env.HERMES_PASEO_PORT; delete process.env.PASEO_HOME;
+  process.env[SCOPE_ENV] = dir;
+  const processes = isolateFixtureProcesses(dir);
   const children = [], cleanups = [];
+  children.push = (...items) => {
+    items.forEach(child => processes.track(child.pid));
+    return Array.prototype.push.apply(children, items);
+  };
   return {
     dir, children,
     /** Runs `fn` when the fixture closes (before its directory is removed). */
@@ -27,6 +34,7 @@ export function fixture(prefix = 'hermes-paseo-release-') {
     close() {
       for (const child of children) { try { child.kill('SIGKILL'); } catch {} }
       for (const fn of cleanups.splice(0).reverse()) { try { fn(); } catch {} }
+      processes.close();
       for (const [key, value] of Object.entries(saved)) value === undefined ? delete process.env[key] : process.env[key] = value;
       fs.rmSync(dir, { recursive: true, force: true });
     },

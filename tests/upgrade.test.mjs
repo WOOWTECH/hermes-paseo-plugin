@@ -110,6 +110,7 @@ test('prepare and old-daemon start retain r1; pruning runs only after a reachabl
  await prepare();assert.equal(fs.existsSync(r1.root),true);await activate();assert.equal(fs.existsSync(r1.root),true);
  await deactivate();assert.equal(fs.existsSync(r1.root),true);
  const started=await activate();assert.equal(started.daemon.reachable,true);assert.equal(started.daemon.runtimeRevision,RUNTIME_REVISION);
+ assert.equal(runtimeInUse(runtimeDirectory(loc),RUNTIME_REVISION),true,'the fixture includes the newly detached supervisor');
  assert.equal(fs.existsSync(r1.root),false);assert.equal(fs.existsSync(r2.root),true);
  for(const name of ['server-id','keys.json'])assert.equal(fs.readFileSync(path.join(loc.paseoHome,name),'utf8'),'preserved');
  await deactivate();

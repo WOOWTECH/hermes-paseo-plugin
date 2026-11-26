@@ -105,7 +105,7 @@ test('prepare is a control action with no input, answering with the public statu
 test('bin/control.mjs prepare: exit 0 with the status when ready, the failing code and exit 1 otherwise', async t => {
   const f = fixture(); t.after(() => f.close());
   const npm = fakeNpm(f);
-  const run = () => spawnSync(process.execPath, ['bin/control.mjs', 'prepare'], { cwd: new URL('..', import.meta.url), input: '{}', encoding: 'utf8', timeout: 60000, env: process.env });
+  const run = () => spawnSync(process.execPath, ['--import', new URL('./fixture-processes.mjs', import.meta.url).href, 'bin/control.mjs', 'prepare'], { cwd: new URL('..', import.meta.url), input: '{}', encoding: 'utf8', timeout: 60000, env: process.env });
   npm.mode('fail');
   const failed = run();
   assert.equal(failed.status, 1);
