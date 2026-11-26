@@ -121,11 +121,21 @@ export function runtimeReady(loc) {
  } catch {return false;}
 }
 export function prepareRuntimeManifest(loc) {
- const root=runtimeDirectory(loc);privateDirectory(root);
- const file=path.join(root,'package.json');assertSafePath(file);
- if(fs.existsSync(file)&&JSON.parse(fs.readFileSync(file)).name!==MANAGED_NAME)throw new RuntimeError('RUNTIME_NOT_OWNED');
- for(const name of ['package.json','package-lock.json']) {
-  assertSafePath(path.join(root,name));fs.copyFileSync(path.join(template,name),path.join(root,name));
+ const root=runtimeDirectory(loc);privateDirectory(path.dirname(root));
+ const existing=assertSafePath(root);
+ if(existing&&(!existing.isDirectory()||existing.uid!==process.getuid?.()||fs.readdirSync(root).length))throw new RuntimeError('RUNTIME_NOT_OWNED');
+ // copyFile can die after creating an empty package.json. Stage outside the release so
+ // interruption leaves it absent/empty, never a partial manifest that cannot prove ownership.
+ // A SIGKILL may leave a small staging directory; it is not a release and is never reused.
+ const staging=fs.mkdtempSync(path.join(loc.runtimeDir,'.manifest-'));
+ try {
+  for(const name of ['package.json','package-lock.json']) {
+   const file=path.join(staging,name);
+   fs.copyFileSync(path.join(template,name),file,fs.constants.COPYFILE_EXCL);fs.chmodSync(file,0o600);
+  }
+  assertSafePath(root);fs.renameSync(staging,root);
+ } finally {
+  try { discardOwnedDirectory(staging); } catch { /* Already published, or no longer ours. */ }
  }
  return root;
 }
