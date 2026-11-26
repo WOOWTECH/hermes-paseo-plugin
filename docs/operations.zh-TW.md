@@ -141,7 +141,7 @@ node "$HERMES_HOME/plugins/hermes-paseo/bin/control.mjs" relay <<< '{}'
 發 release 時請注意：
 
 1. **tag 一推就會再跑一輪 CI**（約 1–2 分鐘；Chromium 安裝偶爾卡住，要重跑）。這段時間排程剛好執行，會因為檢查還沒全綠而拒絕，不計入失敗次數，隔天再試。要立刻更新時，先等這一輪綠燈。
-2. 變更 `host/`、`plugin.yaml` 能力或新增相依套件的版本不會被自動安裝，需要另外發 chart／HA 映像。0.1.5-rc.1 的檔案不屬於這一類，但發佈成 Release 會被稽核紅燈擋下並每天失敗，見下面[本版的說明](#paas-自動更新器與本版)。
+2. 變更 `host/`、`plugin.yaml` 能力或新增相依套件的版本不會被自動安裝，需要另外發 chart／HA 映像。0.1.5-rc.2 保留原有 host 與能力，修復 rc.1 的兩項相依套件弱點；新 runtime manifest pair 及停止前準備流程需要 **chart 0.4.10** 配合，見下面[本版的說明](#paas-自動更新器與本版)。
 3. 更新後若重載的 Dashboard、daemon 或 Plugin Doctor 不健康，更新器會自動裝回上一版、重啟 daemon 並再重載一次，Job 仍標示失敗以便察覺；失敗的版本只重試一次，之後要等更新的 release。
 4. 多台服務各自排程、互不把關。要先在專用服務驗證時：暫停其他服務的 CronJob（`spec.suspend: true`），在專用服務以 `kubectl create job --from=cronjob/<名稱>` 手動執行並驗證，通過後再逐台執行並恢復排程。rc.6 就是這樣發佈的。
 

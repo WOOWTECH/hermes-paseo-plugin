@@ -8,11 +8,12 @@
 
 | 驗證 | 結果與範圍 |
 |---|---|
-| `node --test tests/*.test.mjs` | **234/234 通過**；其後 CLI 路徑安全檢查的相關 30 項與最終 UI 59 項亦通過。涵蓋既有 opt-in、Smart patch、ACP 模型保護、鎖、relay、UI 回歸。 |
+| `node --test tests/*.test.mjs` | **235/235 通過**（最終完整重跑）；涵蓋既有 opt-in、Smart patch、ACP 模型保護、鎖、relay、UI 回歸，以及程序使用相對 runtime 路徑時保守保留目錄。 |
 | `python -m unittest discover -s tests -p 'test_*.py'` | **120/120 通過**；新增準備失敗保留 serving phase、8 次退避上限、立即重試、嚴格布林 installed、明確停止及停止排隊等測試。 |
 | React／Chromium | 全部情境通過，包含準備失敗／低空間／立即重試及原有 opt-in 流程；Playwright **1.64.1**，現有 Chromium build **1234**（Chrome for Testing **151.0.7922.34**）。API 與官方 App 是本機 fixtures，無付費模型呼叫。 |
 | `npm audit --omit=dev --prefix runtime` | **0 vulnerabilities**；兩份 manifest SHA-256 與審核 pair 一致。 |
 | 原生 plugin-guard v11 | 以提供的 `scan_compare.py`、Hermes upstream 與 rc.9 基準，掃描乾淨候選原始碼樹及 `.mjs` 鏡像；**23 → 23，新增 0**，完整 signature 不變。不是實際 chart 更新器執行。 |
+| chart 候選內容 gate | 協調者回報 chart **0.4.10**（`a81a2a2`）的實際 `validate_candidate` 對核心 `3e034d41ce8634ae4790098b02ab7d502f205cf3` 的乾淨 Git archive 與 rc.9 比較通過；`runtime_changed: true`，host／capabilities／原生掃描（含 `.mjs`）gate 均通過。這是該固定 SHA 的內容檢查，未執行服務更新。 |
 | 套件邊界 | `host/` 與 rc.9 沒有差異；`plugin.yaml` 僅 version 行改為 rc.2。沒有 0.17.4 設定正規化、`CONFIG_INCOMPATIBLE` 或內建 Hermes provider 遷移。 |
 
 **安裝驗證**：在本 worktree 的隔離資料目錄，以 UID 1000 執行真實 `node bin/control.mjs prepare`（真實 npm 下載），退出 0、`installed: true`；CLI／server 都是 0.11.2，Hono 套件版本符合上表。再次準備成功，receipt 的 mtime 不變，`.npm-cache` 已移除，glibc 的 musl SDK 目錄皆已移除；磁碟使用約 **565 MiB**。沒有建立 daemon home、沒有套品牌補丁、沒有啟動真實 daemon。這是單一 x64 安裝結果，不是其他架構的容量保證。

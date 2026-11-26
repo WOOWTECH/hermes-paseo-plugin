@@ -54,7 +54,7 @@ export function runtimeInUse(root,revision,{procRoot=runtimeProcessTable.root,ow
     if(env.includes(REVISION_ENTRY+revision)) {
      const value=key=>env.find(entry=>entry.startsWith(key+'='))?.slice(key.length+1);
      const home=value('PASEO_HOME'),runtime=value('HERMES_PASEO_RUNTIME_DIR')||(home?path.join(path.dirname(home),'runtime'):null);
-     if(!runtime||path.resolve(runtime,'releases',revision)===root)return true;
+     if(!runtime||!path.isAbsolute(runtime)||path.resolve(runtime,'releases',revision)===root)return true;
     }
     if(inside(fs.readlinkSync(path.join(base,'cwd'))))return true;
    } catch(error) {if(!['ENOENT','ESRCH'].includes(error.code))return true;}

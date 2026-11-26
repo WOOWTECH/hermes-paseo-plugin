@@ -114,3 +114,14 @@ test('prepare and old-daemon start retain r1; pruning runs only after a reachabl
  for(const name of ['server-id','keys.json'])assert.equal(fs.readFileSync(path.join(loc.paseoHome,name),'utf8'),'preserved');
  await deactivate();
 });
+
+test('process revision guards distinguish profiles and retain an ambiguous relative runtime path',t=>{
+ const f=fixture();t.after(()=>f.close());const proc=procFixture(f),root=runtimeDirectory(locations());
+ const inUse=()=>runtimeInUse(root,RUNTIME_REVISION,{procRoot:proc.root,owner:proc.owner});
+ proc.put(20,'environ',`HERMES_PASEO_RUNTIME_REVISION=${RUNTIME_REVISION}\0HERMES_PASEO_RUNTIME_DIR=${path.join(f.dir,'other')}\0`);
+ assert.equal(inUse(),false,'another private profile using the same revision is independent');
+ proc.put(20,'environ',`HERMES_PASEO_RUNTIME_REVISION=${RUNTIME_REVISION}\0HERMES_PASEO_RUNTIME_DIR=relative-runtime\0`);
+ assert.equal(inUse(),true,'the process working directory may differ: never resolve its relative path against ours');
+ proc.put(20,'environ',`HERMES_PASEO_RUNTIME_REVISION=${RUNTIME_REVISION}\0HERMES_PASEO_RUNTIME_DIR=${locations().runtimeDir}\0`);
+ assert.equal(inUse(),true);
+});
