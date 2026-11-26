@@ -17,6 +17,8 @@
 .hermes-paseo p { margin: 0 0 14px; overflow-wrap: anywhere; }
 .hermes-paseo .hp-eyebrow { color: var(--hp-accent); font-size: 12px; letter-spacing: .1em; font-weight: 650; margin-bottom: 8px; }
 .hermes-paseo .hp-muted { color: var(--hp-muted); }
+.hermes-paseo .hp-manual { margin-top: 12px; }
+.hermes-paseo .hp-version { color: var(--hp-muted); }
 .hermes-paseo .hp-small { font-size: 13px; margin: 14px 0 0; }
 .hermes-paseo .hp-card { border: 1px solid var(--hp-border); background: var(--hp-bg); border-radius: var(--radius, 12px); padding: clamp(16px, 2.5vw, 24px); margin: 0 0 16px; min-width: 0; }
 .hermes-paseo .hp-pair { border-inline-start: 4px solid var(--hp-accent); }
@@ -40,7 +42,7 @@
 .hermes-paseo .hp-error .hp-button { display: flex; margin-top: 10px; }
 .hermes-paseo .hp-result { border-inline-start: 3px solid var(--hp-accent); margin-top: 18px; padding-inline-start: 14px; overflow-wrap: anywhere; }
 .hermes-paseo .hp-result ul { padding-inline-start: 20px; margin: 8px 0 0; }
-.hermes-paseo.hp-header { min-width: 0; max-width: 220px; }
+.hermes-paseo.hp-header { min-width: 0; max-width: 280px; }
 .hermes-paseo .hp-guide { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; color: inherit; border: 1px solid var(--hp-border); border-radius: 8px; padding: 6px 10px; min-height: 36px; font-size: 12px; text-decoration: none; }
 .hermes-paseo .hp-header-status { color: var(--hp-muted); }
 .hermes-paseo .hp-dot { display: inline-block; width: 7px; height: 7px; background: var(--hp-muted); border-radius: 50%; flex-shrink: 0; }
@@ -52,7 +54,7 @@
   .hermes-paseo .hp-link { margin-inline-start: 0; display: flex; }
   .hermes-paseo .hp-actions .hp-button { flex: 1 1 110px; }
   .hermes-paseo .hp-header-status { display: none; }
-  .hermes-paseo.hp-header { max-width: 95px; }
+  .hermes-paseo.hp-header { max-width: 140px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .hermes-paseo .hp-button { transition: none; }

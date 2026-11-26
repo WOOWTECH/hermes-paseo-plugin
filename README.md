@@ -1,14 +1,18 @@
-# Hermes Paseo plugin
+# Hermes Agent Connect
 
-Hermes Agent / Web 插件：啟用後準備固定 Paseo runtime，在受保護的插件頁完成官方加密 relay 配對（可選 Paseo、Woowtech Smart 或 Apporo Smart），於所選的網頁 App 選取 Hermes ACP 模型並建立及接續對話。目前版本 **0.1.5-rc.2**。
+Hermes Agent / Web 插件：啟用後準備固定 Paseo runtime，在受保護的插件頁完成官方加密 relay 配對（可選 Paseo、Woowtech Smart 或 Apporo Smart），於所選的網頁 App 選取 Hermes ACP 模型並建立及接續對話。目前版本 **0.1.5-rc.3**。
 
 公開 repo：<https://github.com/WOOWTECH/hermes-paseo-plugin>。下載不需要 GitHub 帳號或 token。
 
 Gitea 原始碼鏡像：<https://git-prod.woowtech.io/mirror/hermes-paseo-plugin>。每 8 小時從 GitHub 拉取 Git 分支與標籤；Release 說明及附件仍以 GitHub 為準。
 
+同事實測網頁：[Agent Connect 三平台配對與實測手冊](https://hermes-agent-connect-pairing.elmolin47.chatgpt.site/)。涵蓋 Woowtech Smart、Apporo Smart、Paseo 的完整配對、首輪與續聊、切換、問題排查及手動實測回報。
+
 完整中文教學：[下載、安裝、部署與測試](docs/install.zh-TW.md)。
 
-**0.1.5-rc.2 安全更新與 runtime 預先準備**：維持 Paseo **0.11.2** 與 Hermes **0.22.5** 的 ACP 設定，僅將兩項相依套件固定為 `hono 4.13.16`、`@hono/node-server 2.1.6`。runtime 改為 `0.11.2-r3-523d451cc096`；先執行 `node bin/control.mjs prepare`，在舊 daemon 持續服務時安裝及驗證新 runtime，確認退出碼 0 且 JSON 的 `installed === true` 後才停止舊 daemon。`prepare` 不改寫設定、不啟停服務、不套品牌補丁。PaaS rollout 依賴 **chart 0.4.10** 的已審核 manifest 允許清單與 prepare-before-stop 流程；chart 0.4.9 會拒絕這份新鎖定檔。本分支僅供審查，尚未發布或完成 live rollout 驗收。
+**0.1.5-rc.3 介面與教學更新**：選單、頁首捷徑與頁面標題統一為 **Agent Connect**，新增三平台教學入口，並分別顯示外掛版本與 Paseo 底層執行環境版本。既有插件識別、API 路徑、配對身分及儲存的連線標的保留。
+
+**0.1.5-rc.2 安全更新與 runtime 預先準備**：維持 Paseo **0.11.2** 與 Hermes **0.22.5** 的 ACP 設定，僅將兩項相依套件固定為 `hono 4.13.16`、`@hono/node-server 2.1.6`。runtime 改為 `0.11.2-r3-523d451cc096`；先執行 `node bin/control.mjs prepare`，在舊 daemon 持續服務時安裝及驗證新 runtime，確認退出碼 0 且 JSON 的 `installed === true` 後才停止舊 daemon。`prepare` 不改寫設定、不啟停服務、不套品牌補丁。PaaS rollout 依賴 **chart 0.4.10** 的已審核 manifest 允許清單與 prepare-before-stop 流程；chart 0.4.9 會拒絕這份新鎖定檔。rc.2 已於 2026-11-26 發布，PaaS 255、225 已透過實際更新 Job 完成 chart 0.4.10 與 rc.2 部署；255 驗證升級、回復與再升級的同一對話續聊，225 驗證更新後續聊。
 
 0.1.5-rc.1 的連線標的仍是**選擇才生效**：沒有儲存標的時，沿用 rc.9 的 App／relay／CORS 行為、不套品牌補丁。安全 runtime 的安裝獨立於連線標的；Smart 補丁只在啟動明確儲存的 Smart 標的前套用。
 
@@ -33,13 +37,13 @@ hermes plugins install WOOWTECH/hermes-paseo-plugin
 hermes plugins enable hermes-paseo
 ```
 
-原生 Agent 插件與 Dashboard 頁面均包含在同一 repo。啟用後開啟 Paseo 頁面，按引導準備服務；預設標的是 Paseo，也可先選 Woowtech Smart 或 Apporo Smart（見下節）。產生配對連結後，在新分頁開啟該標的的官方網頁 App，按 Connect 完成綁定。全新 Paseo 裝置若顯示 No projects yet，先用 Add project 選擇或建立工作目錄，再於 New workspace 選定 project、Hermes、模型與權限模式。
+原生 Agent 插件與 Dashboard 頁面均包含在同一 repo。啟用後開啟 Agent Connect 頁面，按引導準備服務；預設標的是 Paseo，也可先選 Woowtech Smart 或 Apporo Smart（見下節）。產生配對連結後，在新分頁開啟該標的的官方網頁 App，按 Connect 完成綁定。全新 Paseo 裝置若顯示 No projects yet，先用 Add project 選擇或建立工作目錄，再於 New workspace 選定 project、Hermes、模型與權限模式。
 
 配置 0.1.4 主機介面時，仍啟用的服務在容器啟動後會準備 runtime，並在 daemon 意外中斷後恢復，不需開啟瀏覽器。手動停止的狀態會保留；Hermes Web 停用／移除插件前也會先確認服務停止。未配置主機介面時，仍使用可見 Web 頁面的恢復流程，CLI 移除前須先停止服務。
 
 文字對話服務預設不下載額外語音模型，保留使用者既有的明確語音啟用設定。主機介面另依容器 CPU quota 設定本機推理的預設執行緒數，保留管理者明確的環境設定。
 
-首次安裝的後端 API 是否能立即使用，依 Hermes 版本而異。Paseo 頁提供「重載 Dashboard → 確認重載」；配置好主機介面後，即使插件 API 尚未載入也可使用，完成後自動回到目前頁面。管理者須先完成一次性 [Dashboard 主機設定](docs/dashboard-control.zh-TW.md)；未配置主機會停用此按鈕並說明原因。
+首次安裝的後端 API 是否能立即使用，依 Hermes 版本而異。Agent Connect 頁提供「重載 Dashboard → 確認重載」；配置好主機介面後，即使插件 API 尚未載入也可使用，完成後自動回到目前頁面。管理者須先完成一次性 [Dashboard 主機設定](docs/dashboard-control.zh-TW.md)；未配置主機會停用此按鈕並說明原因。
 
 Hermes 0.19 的 Web 插件列表只在頁面載入時讀取。從插件頁安裝或啟用後，請重新整理一次；插件載入後會自動開啟尚未完成的配對指南。
 
