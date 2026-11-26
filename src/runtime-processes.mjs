@@ -58,7 +58,10 @@ export function runtimeInUse(root,revision,{procRoot=runtimeProcessTable.root,ow
     }
     if(inside(fs.readlinkSync(path.join(base,'cwd'))))return true;
    } catch(error) {if(!['ENOENT','ESRCH'].includes(error.code)) {
-    if(process.env.HERMES_PASEO_DEBUG_PROC==='1')process.stderr.write('[DEBUG-proc-1126] '+JSON.stringify({pid,code:error.code,syscall:error.syscall,file:error.path})+'\n');
+    if(process.env.HERMES_PASEO_DEBUG_PROC==='1') {
+     let identity=[];try {identity=fs.readFileSync(path.join(procRoot,pid,'status'),'utf8').split('\n').filter(line=>/^(Name|Uid|Gid):/.test(line));} catch {}
+     process.stderr.write('[DEBUG-proc-1126] '+JSON.stringify({pid,code:error.code,syscall:error.syscall,file:error.path,identity,callerUid:process.getuid?.(),callerGid:process.getgid?.()})+'\n');
+    }
     return true;
    }}
   }
