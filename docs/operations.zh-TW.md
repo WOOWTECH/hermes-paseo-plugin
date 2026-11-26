@@ -110,7 +110,9 @@ Dashboard／主機輪詢發現執行中的舊版時會背景準備。失敗使�
 
 `RUNTIME_INSTALL_FAILED`／`RUNTIME_INSTALL_TIMEOUT` 可在修好網路後重試；`INSUFFICIENT_DISK` 先清出空間；`RUNTIME_IN_USE` 表示 runtime 仍被程序使用或無法安全確認；`RUNTIME_NOT_OWNED`／`UNSAFE_SYMLINK` 需檢查路徑，不能強制刪除。
 
-Release 仍需等 chart 0.4.10 部署、沙盒與回滾驗收，以及五項 GitHub 檢查全綠。pre-release 仍會被更新器選中，不能用 pre-release 旗標替代 rollout 閘門。本次只做本機實作與驗證，未推送、合併、打 tag、發布或改動服務。
+若主機限制讀取同 UID 程序的 `/proc` 資料（例如受保護的 systemd 使用者管理程序），失敗安裝的殘留也會保留，後續準備可能回報 `RUNTIME_IN_USE`；這時不會強行清理或停止舊服務。安裝前的 manifest 先在 release 目錄外完整寫入，再原子發布；中斷不會在 release 留下無法辨識的空 manifest。SIGKILL 仍可能留下小型 `.manifest-*` 暫存目錄，不會作為 runtime 使用。
+
+Release 仍需等 chart 0.4.10 部署、沙盒與回滾驗收，以及五項 GitHub 檢查全綠。pre-release 仍會被更新器選中，不能用 pre-release 旗標替代 rollout 閘門。
 
 ## 回滾到 0.1.4-rc.9
 
